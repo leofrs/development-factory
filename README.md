@@ -88,6 +88,82 @@ O health check deve responder `{"ok":true}` com o backend em execução. `npm ru
 
 Os testes usam servidor HTTP, WebSocket e **node-pty reais** em porta efêmera. Um executável de teste temporário chamado `claude`, escrito em TypeScript, substitui somente o CLI via PATH. Assim não fazem chamadas de IA nem acessam seus repositórios, credenciais ou MCPs. Cobrem health, origem ausente/indevida, rota de upgrade, JSON inválido, schema, diretório inexistente, argumentos sem shell, cwd, TERM, entrada, resize, substituição da sessão, exit code, seletor de diretórios e persistência dos arquivos após gravação do parecer ou desconexão. Testes adicionais verificam histórico incompleto, remoção de ANSI dividido entre chunks, arquivos distintos e recusa de symlink no diretório de histórico. O teste manual acima verifica a integração com seu Claude e seus MCPs.
 
+## Padrão de lint e qualidade
+
+Este padrão se aplica a toda implementação e alteração em `apps/*` e `packages/*`, incluindo testes e configurações. Novos workspaces devem seguir as mesmas regras. Alterações devem manter o escopo da tarefa e preservar o comportamento existente, exceto quando sua mudança fizer parte do requisito.
+
+**Situação atual:** o projeto possui typecheck, testes e build, mas ainda não tem ESLint, Prettier, scripts de lint/formatação ou CI que os execute. As regras abaixo passam a orientar a implementação e a revisão de código; sua aplicação automática depende da instalação e configuração dessas ferramentas. Não declarar lint aprovado antes de essa automação existir e ser executada.
+
+### Ferramentas e escopo
+
+Adotar uma configuração ESLint compartilhada na raiz, no formato flat config, com ajustes por workspace:
+
+| Escopo | Base a configurar |
+| --- | --- |
+| JavaScript e configuração | Regras recomendadas de `@eslint/js`; ambiente Node ou navegador conforme o arquivo. |
+| TypeScript | `typescript-eslint` com `recommendedTypeChecked`, usando os projetos TypeScript de cada workspace. |
+| React em `apps/web` | `eslint-plugin-react-hooks` e `eslint-plugin-jsx-a11y`, com presets recomendados e avisos tratados como erros. |
+| Formatação | Prettier separado do lint; `eslint-config-prettier` para desativar regras de estilo conflitantes. |
+| Artefatos gerados | Ignorar `node_modules`, `dist`, cobertura, arquivos temporários e bancos SQLite; incluir código-fonte, testes e configurações mantidos pelo projeto. |
+
+Fixar as versões instaladas no lockfile e avaliar mudanças nos presets ao atualizar dependências. Configurações fora dos projetos TypeScript devem receber um override sem regras que dependam de informação de tipos.
+
+### Regras de lint obrigatórias
+
+As regras explícitas complementam os presets. Quando a regra TypeScript substitui uma regra equivalente do ESLint, desativar a versão básica para evitar diagnósticos duplicados.
+
+| Área | Regras e comportamento exigido |
+| --- | --- |
+| Tipagem | `@typescript-eslint/no-explicit-any`, `no-unsafe-assignment`, `no-unsafe-argument`, `no-unsafe-call`, `no-unsafe-member-access` e `no-unsafe-return`: usar `unknown` nas fronteiras e fazer narrowing ou validação. Os nomes `no-unsafe-*` desta linha pertencem a `@typescript-eslint`. |
+| Asserções | `@typescript-eslint/no-unnecessary-type-assertion`, `no-non-null-assertion` e `ban-ts-comment`: evitar coerções e `!`; proibir `@ts-ignore` e `@ts-nocheck`; exigir justificativa para `@ts-expect-error`. |
+| Código sem uso | `@typescript-eslint/no-unused-vars`: proibir variáveis e imports não usados. Permitir prefixo `_` apenas para argumentos intencionalmente ignorados e propriedades extraídas para exclusão antes de um rest; configurar essas exceções explicitamente. |
+| Imports | `@typescript-eslint/consistent-type-imports` e `no-duplicate-imports`: separar imports de tipos e evitar imports duplicados, permitindo declarações separadas de tipos. Preservar ESM e a convenção `.js` dos imports relativos TypeScript existentes. |
+| Promises | `@typescript-eslint/no-floating-promises`, com `ignoreVoid: false`, e `no-misused-promises`: aguardar ou tratar rejeições; `void` sozinho não trata erros. Callbacks que esperam retorno síncrono não devem receber funções assíncronas sem um adaptador com tratamento de falhas. |
+| Exceções | `@typescript-eslint/only-throw-error`: lançar `Error` ou subclasses com códigos estáveis para erros de domínio; não lançar strings ou objetos avulsos. |
+| Correção | `eqeqeq` com comparação estrita e exceção explícita para `== null`/`!= null`; `curly` em todos os blocos; `prefer-const`, `no-var`, `no-debugger`, `no-eval`, `no-implied-eval` e `no-new-func`. |
+| Hooks | Aplicar o preset recomendado de `react-hooks`, incluindo `rules-of-hooks` e `exhaustive-deps`. Corrigir dependências e estrutura dos efeitos em vez de silenciar o diagnóstico. |
+| Acessibilidade | Aplicar o preset recomendado de `jsx-a11y`: labels acessíveis, texto alternativo, semântica e interação por teclado. A verificação estática deve ser complementada pela revisão de foco e navegação. |
+
+Todas as regras obrigatórias devem ter severidade `error`. Não definir limites arbitrários de linhas de função, quantidade de parâmetros ou complexidade como bloqueios iniciais: dividir código quando isso melhorar responsabilidades e legibilidade.
+
+### Formatação
+
+Configurar Prettier com `tabWidth: 2`, `useTabs: false`, `singleQuote: true`, `semi: true`, `trailingComma: 'all'`, `printWidth: 100` e `endOfLine: 'lf'`. Usar aspas duplas em atributos JSX, UTF-8 e newline final. `printWidth` orienta a formatação; não deve ser duplicado por uma regra rígida de tamanho de linha.
+
+Aplicar formatação aos arquivos alterados. Uma normalização inicial de todo o repositório deve ser uma alteração separada, para manter os diffs funcionais legíveis. Markdown pode ser formatado, respeitando a política de arquivos permitidos no commit.
+
+### Regras de implementação e revisão
+
+Os itens abaixo são obrigatórios, mas não são garantidos apenas pelo ESLint:
+
+- Manter TypeScript `strict`, `noUncheckedIndexedAccess` e `verbatimModuleSyntax`; não enfraquecer o compilador para contornar erros.
+- Definir contratos de comunicação e domínio em `packages/shared`, com Zod e tipos inferidos. Validar JSON, mensagens WebSocket, respostas externas e dados persistidos nas fronteiras; tipos TypeScript sozinhos não validam dados em runtime.
+- Manter regras de domínio, persistência e controle de processos no backend. O pacote compartilhado não deve importar React, APIs de Node ou módulos específicos dos apps.
+- Preservar mensagens ao usuário em português e códigos de erro estáveis. Não registrar credenciais, tokens ou conteúdo sensível; logs operacionais devem ter contexto e finalidade, sem `console.log` de depuração deixado no código.
+- Usar APIs de processos com argumentos separados, sem interpolar entradas em shell. Validar caminhos, origens e limites de payload nas fronteiras correspondentes.
+- Em React, limpar efeitos, listeners, timers, conexões e recursos criados pelo componente. Cancelar requisições ou ignorar respostas obsoletas para impedir atualização por uma execução anterior.
+- Usar HTML semântico, nomes acessíveis, foco visível e suporte a teclado; não introduzir HTML não confiável na renderização de Markdown.
+- Cobrir mudanças de comportamento com testes proporcionais ao risco. Exercitar falhas e invariantes em domínio, persistência e processos; testes não devem chamar IA real, usar credenciais nem publicar em serviços externos.
+- Preservar separação entre estado do processo, salvamento de artefatos e conclusão da análise. Saída zero e mudança de arquivo não comprovam conclusão válida.
+
+### Verificação de cada entrega
+
+Enquanto a automação de lint/formatação não existir, revisar manualmente este padrão e executar os comandos existentes: `npm run typecheck`, `npm test` e `npm run build` para mudanças de código. Para alterações apenas de documentação, conferir os links, comandos citados e `git diff --check`. Informar qualquer verificação bloqueada ou não executada e seu motivo.
+
+Na implantação da automação, criar os seguintes comandos na raiz e executá-los em CI antes do merge:
+
+| Comando a criar | Contrato |
+| --- | --- |
+| `npm run lint` | Analisar todos os workspaces e configurações, sem modificar arquivos, com zero warnings (`--max-warnings 0`). |
+| `npm run lint:fix` | Aplicar correções automáticas de lint, sujeitas à revisão do diff. |
+| `npm run format:check` | Conferir a formatação dos arquivos mantidos pelo projeto, sem escrever alterações. |
+| `npm run format` | Aplicar Prettier; usar seleção de arquivos quando a tarefa exigir escopo limitado. |
+| `npm run check` | Executar lint, conferência de formatação, testes e build; o build já inclui typecheck. |
+
+Não desabilitar regras globalmente para aprovar uma entrega. Exceções devem ser locais, mencionar a regra específica e explicar o motivo técnico no código; quando temporárias, registrar também a condição de remoção. Não deixar warnings como dívida silenciosa nem usar autofix sem conferir o diff.
+
+Referências para a configuração: [presets do typescript-eslint](https://typescript-eslint.io/users/configs/), [regras de Hooks do React](https://react.dev/reference/eslint-plugin-react-hooks), [JSX a11y](https://github.com/jsx-eslint/eslint-plugin-jsx-a11y) e [integração do Prettier com linters](https://prettier.io/docs/integrating-with-linters).
+
 ## Estrutura
 
 ```text
@@ -99,6 +175,7 @@ apps/server/src/prompts/code-review.ts       Prompt das cinco etapas
 apps/server/src/directories.ts              Listagem das pastas do WSL
 apps/server/src/history.ts                  Persistência e acompanhamento do histórico
 apps/server/src/history-reader.ts           Consulta de arquivos Markdown existentes
+apps/server/src/storage/                    Repositório SQLite (`node:sqlite`), WAL e migrations versionadas
 apps/server/test/terminal.test.ts            Integração HTTP / WS / PTY
 apps/web/src/App.tsx                         Formulário e localStorage
 apps/web/src/components/TerminalModal.tsx    TUI, resize, clipboard e cleanup
@@ -107,6 +184,10 @@ apps/web/src/components/HistoryModal.tsx     Navegação e leitura do histórico
 ```
 
 O pacote compartilhado exporta `src/index.ts` diretamente; `tsx` e Vite o resolvem sem build intermediário. O backend também pode ser iniciado com `npm run start -w @development-factory/server`.
+
+### Armazenamento local de reviews
+
+O backend utiliza **SQLite** via módulo nativo `node:sqlite` (sem dependências externas ou compilação nativa no WSL), em modo `WAL` com transações `BEGIN IMMEDIATE` e migrations versionadas. Por padrão, o banco é criado fora dos repositórios analisados em `$XDG_DATA_HOME/development-factory/reviews.db` (ou `~/.local/share/development-factory/reviews.db`), podendo ser sobrescrito pela variável `REVIEW_DB_PATH`. Falhas na aplicação de migrations impedem a inicialização do servidor com diagnóstico explícito e sem apagar dados existentes.
 
 ## Limites e diagnóstico
 

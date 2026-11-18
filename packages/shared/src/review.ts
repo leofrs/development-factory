@@ -150,6 +150,18 @@ export const ReviewTransitionSchema = z.strictObject({
 }).refine(value => canTransitionReview(value.from, value.to), 'Transição de review inválida');
 export type ReviewTransition = z.infer<typeof ReviewTransitionSchema>;
 
+export const ReviewEventSchema = z.strictObject({
+  contractVersion: version,
+  id,
+  reviewId: id,
+  executionId: id.nullable(),
+  sequence: z.number().int().positive(),
+  type: text.max(120),
+  occurredAt: timestamp,
+  payload: z.record(z.string(), z.unknown()),
+});
+export type ReviewEvent = z.infer<typeof ReviewEventSchema>;
+
 export const ReviewSchema = z.strictObject({
   contractVersion: version,
   id,

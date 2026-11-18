@@ -3,9 +3,11 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import { handleTerminalConnection } from './ws/terminal-handler.js';
 import { listDirectories } from './directories.js';
 import { listHistory, readHistoryFile } from './history-reader.js';
+import { SqliteReviewRepository, type ReviewRepositoryOptions } from './storage/index.js';
 
 const allowedOrigins = new Set(['http://localhost:5173', 'http://127.0.0.1:5173']);
-export function createReviewServer() {
+export function createReviewServer(options?: ReviewRepositoryOptions) {
+  const reviewRepository = SqliteReviewRepository.open(options);
   const server = createServer(async (req, res) => {
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     res.setHeader('Cache-Control', 'no-store');
@@ -59,6 +61,7 @@ export function createReviewServer() {
     for (const [ws, stop] of sessions) { stop(); ws.terminate(); }
     wss.close();
     server.close();
+    reviewRepository.close();
   };
-  return { server, shutdown };
+  return { server, shutdown, reviewRepository };
 }
