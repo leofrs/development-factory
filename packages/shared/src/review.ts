@@ -249,3 +249,104 @@ export function transitionReview(review: Review, command: ReviewTransitionComman
   }
   return updated.data;
 }
+
+export const IdempotencyKeySchema = text
+  .max(256)
+  .refine(value => !/[\x00-\x1f\x7f]/.test(value), 'Chave de idempotência inválida');
+export type IdempotencyKey = z.infer<typeof IdempotencyKeySchema>;
+
+export const CreateReviewTargetInputSchema = z.discriminatedUnion('type', [
+  z.strictObject({
+    type: z.literal('pr'),
+    identifier: z.string().trim().regex(/^[1-9]\d*$/, 'Informe um número de PR positivo'),
+    repoPath: text
+      .max(4096)
+      .refine(value => value.startsWith('/') && !value.includes('\0'), 'Use um caminho absoluto no WSL'),
+  }),
+  z.strictObject({
+    type: z.literal('branch'),
+    identifier: text
+      .max(500)
+      .refine(value => !/[\x00-\x1f\x7f]/.test(value), 'Identificador inválido'),
+    repoPath: text
+      .max(4096)
+      .refine(value => value.startsWith('/') && !value.includes('\0'), 'Use um caminho absoluto no WSL'),
+  }),
+]);
+export type CreateReviewTargetInput = z.infer<typeof CreateReviewTargetInputSchema>;
+
+export const CreateReviewRequestSchema = z.strictObject({
+  target: CreateReviewTargetInputSchema,
+  idempotencyKey: IdempotencyKeySchema.optional(),
+});
+export type CreateReviewRequest = z.infer<typeof CreateReviewRequestSchema>;
+
+export const CreateReviewResponseSchema = z.strictObject({
+  contractVersion: version,
+  review: ReviewSchema,
+  execution: ReviewExecutionSchema,
+  replayed: z.boolean(),
+});
+export type CreateReviewResponse = z.infer<typeof CreateReviewResponseSchema>;
+
+export const ReviewDetailsSchema = z.strictObject({
+  contractVersion: version,
+  review: ReviewSchema,
+  executions: z.array(ReviewExecutionSchema),
+  events: z.array(ReviewEventSchema),
+});
+export type ReviewDetails = z.infer<typeof ReviewDetailsSchema>;
+
+export const ListReviewsFilterSchema = z.strictObject({
+  state: ReviewStateSchema.optional(),
+  repoPath: text
+    .max(4096)
+    .refine(value => value.startsWith('/') && !value.includes('\0'), 'Use um caminho absoluto no WSL')
+    .optional(),
+  limit: z.number().int().positive().max(200).optional(),
+});
+export type ListReviewsFilterInput = z.infer<typeof ListReviewsFilterSchema>;
+
+export const ReviewListResponseSchema = z.strictObject({
+  contractVersion: version,
+  reviews: z.array(ReviewSchema),
+});
+export type ReviewListResponse = z.infer<typeof ReviewListResponseSchema>;
+
+export const TransitionReviewRequestSchema = z.strictObject({
+  to: ReviewStateSchema,
+  at: timestamp.optional(),
+  reason: text,
+  result: ReviewResultSchema.optional(),
+  error: ReviewErrorSchema.optional(),
+  expectedUpdatedAt: timestamp.optional(),
+});
+export type TransitionReviewRequest = z.infer<typeof TransitionReviewRequestSchema>;
+
+export const TransitionReviewResponseSchema = z.strictObject({
+  contractVersion: version,
+  review: ReviewSchema,
+});
+export type TransitionReviewResponse = z.infer<typeof TransitionReviewResponseSchema>;
+
+export const ReviewApiErrorCodeSchema = z.enum([
+  'ORIGIN_FORBIDDEN',
+  'REVIEW_INVALID_INPUT',
+  'REVIEW_INVALID_TRANSITION',
+  'REVIEW_INVALID_CONTRACT',
+  'REVIEW_NOT_FOUND',
+  'REVIEW_IDEMPOTENCY_CONFLICT',
+  'REVIEW_CONFLICT',
+  'REVIEW_INTERNAL_ERROR',
+]);
+export type ReviewApiErrorCode = z.infer<typeof ReviewApiErrorCodeSchema>;
+
+export const ReviewApiErrorResponseSchema = z.strictObject({
+  contractVersion: version,
+  error: z.strictObject({
+    code: ReviewApiErrorCodeSchema,
+    message: text,
+    details: z.array(text).optional(),
+  }),
+});
+export type ReviewApiErrorResponse = z.infer<typeof ReviewApiErrorResponseSchema>;

@@ -21,6 +21,17 @@ export interface CreateReviewOptions {
   readonly event?: Omit<ReviewEvent, 'sequence'>;
 }
 
+export interface IdempotencyOptions {
+  readonly key: string;
+  readonly fingerprint: string;
+}
+
+export interface CreateReviewIdempotentlyResult {
+  readonly review: Review;
+  readonly execution: ReviewExecution;
+  readonly replayed: boolean;
+}
+
 export interface SaveTransitionOptions {
   readonly expectedUpdatedAt?: string;
   readonly executionId?: string | null;
@@ -313,6 +324,76 @@ export class SqliteReviewRepository {
       this.insertEventRow(event);
 
       return review;
+    });
+  }
+
+  createReviewIdempotently(
+    reviewInput: Review,
+    executionInput: ReviewExecution,
+    idempotency?: IdempotencyOptions,
+  ): CreateReviewIdempotentlyResult {
+    const parsedExecution = ReviewExecutionSchema.safeParse(executionInput);
+    if (!parsedExecution.success || parsedExecution.data.reviewId !== reviewInput.id) {
+      throw new ReviewStorageError('STORAGE_INVALID_INPUT', 'A execução inicial não corresponde ao review informado.');
+    }
+    const execution = parsedExecution.data;
+
+    return this.runInTransaction(() => {
+      if (idempotency) {
+        const existing = this.db
+          .prepare('SELECT review_id, request_fingerprint FROM review_idempotency_keys WHERE idempotency_key = ?')
+          .get(idempotency.key) as { review_id: string; request_fingerprint: string } | undefined;
+
+        if (existing) {
+          if (existing.request_fingerprint !== idempotency.fingerprint) {
+            throw new ReviewStorageError(
+              'STORAGE_CONFLICT',
+              'A chave de idempotência já foi utilizada para outra solicitação.',
+            );
+          }
+
+          const existingReview = this.getReviewById(existing.review_id);
+          if (!existingReview) {
+            throw new ReviewStorageError(
+              'STORAGE_CORRUPTED_DATA',
+              `A chave de idempotência aponta para o review inexistente ${existing.review_id}.`,
+            );
+          }
+
+          const existingExecution =
+            (existingReview.currentExecutionId
+              ? this.getExecutionById(existingReview.currentExecutionId)
+              : null) ?? this.listExecutionsByReviewId(existingReview.id)[0];
+
+          if (!existingExecution) {
+            throw new ReviewStorageError(
+              'STORAGE_CORRUPTED_DATA',
+              `O review ${existingReview.id} não possui execução inicial registrada.`,
+            );
+          }
+
+          return {
+            review: existingReview,
+            execution: existingExecution,
+            replayed: true,
+          };
+        }
+      }
+
+      const review = this.createReview(reviewInput, { execution });
+      if (idempotency) {
+        this.db
+          .prepare(
+            'INSERT INTO review_idempotency_keys (idempotency_key, review_id, request_fingerprint, created_at) VALUES (?, ?, ?, ?)',
+          )
+          .run(idempotency.key, review.id, idempotency.fingerprint, review.createdAt);
+      }
+
+      return {
+        review,
+        execution,
+        replayed: false,
+      };
     });
   }
 

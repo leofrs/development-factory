@@ -67,6 +67,22 @@ export const REVIEW_MIGRATIONS: readonly Migration[] = [
       `);
     },
   },
+  {
+    version: 2,
+    name: 'add_review_idempotency_keys',
+    up(db) {
+      db.exec(`
+        CREATE TABLE review_idempotency_keys (
+          idempotency_key TEXT PRIMARY KEY,
+          review_id TEXT NOT NULL REFERENCES reviews(id) ON DELETE RESTRICT,
+          request_fingerprint TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        ) STRICT;
+
+        CREATE UNIQUE INDEX idx_review_idempotency_review_id ON review_idempotency_keys (review_id);
+      `);
+    },
+  },
 ];
 
 function validateMigrations(migrations: readonly Migration[]): void {

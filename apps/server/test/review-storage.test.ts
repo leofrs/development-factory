@@ -260,8 +260,9 @@ test('falha na migration impede início do servidor com diagnóstico claro e sem
   initial.reviewRepository.createReview(review);
   initial.shutdown();
 
+  const nextVersion = REVIEW_MIGRATIONS.length + 1;
   const brokenMigration: Migration = {
-    version: 2,
+    version: nextVersion,
     name: 'broken_migration_step',
     up(db) {
       db.exec('CREATE TABLE temp_before_failure (id TEXT PRIMARY KEY) STRICT;');
@@ -274,7 +275,7 @@ test('falha na migration impede início do servidor com diagnóstico claro e sem
     (error: unknown) =>
       error instanceof ReviewStorageError &&
       error.code === 'STORAGE_MIGRATION_FAILED' &&
-      error.message.includes('v2') &&
+      error.message.includes(`v${nextVersion}`) &&
       error.message.includes('broken_migration_step'),
   );
 
@@ -283,7 +284,7 @@ test('falha na migration impede início do servidor com diagnóstico claro e sem
   try {
     const persisted = recovered.getReviewById(review.id);
     assert.deepEqual(persisted, review);
-    assert.equal(recovered.getAppliedMigrations().length, 1);
+    assert.equal(recovered.getAppliedMigrations().length, REVIEW_MIGRATIONS.length);
   } finally {
     recovered.close();
   }

@@ -8,8 +8,10 @@ export {
 } from './migrations.js';
 export {
   SqliteReviewRepository,
+  type CreateReviewIdempotentlyResult,
   type CreateReviewOptions,
   type ExecutionEventInput,
+  type IdempotencyOptions,
   type ListReviewsFilter,
   type ReviewRepositoryOptions,
   type SaveTransitionOptions,

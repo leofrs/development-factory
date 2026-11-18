@@ -1,24 +1,191 @@
-import { createServer } from 'node:http';
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { WebSocketServer, type WebSocket } from 'ws';
+import { REVIEW_CONTRACT_VERSION, type ReviewApiErrorResponse } from '@development-factory/shared';
 import { handleTerminalConnection } from './ws/terminal-handler.js';
 import { listDirectories } from './directories.js';
 import { listHistory, readHistoryFile } from './history-reader.js';
+import { ReviewService, ReviewServiceError } from './review-service.js';
 import { SqliteReviewRepository, type ReviewRepositoryOptions } from './storage/index.js';
 
 const allowedOrigins = new Set(['http://localhost:5173', 'http://127.0.0.1:5173']);
+const MAX_JSON_BODY_BYTES = 64 * 1024;
+
+function sendApiError(
+  res: ServerResponse,
+  statusCode: number,
+  error: ReviewApiErrorResponse['error'],
+): void {
+  const payload: ReviewApiErrorResponse = {
+    contractVersion: REVIEW_CONTRACT_VERSION,
+    error,
+  };
+  res.writeHead(statusCode).end(JSON.stringify(payload));
+}
+
+function applyCorsHeaders(req: IncomingMessage, res: ServerResponse): string | null {
+  const origin = req.headers.origin;
+  if (!origin || !allowedOrigins.has(origin)) {
+    return null;
+  }
+  res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Vary', 'Origin');
+  return origin;
+}
+
+async function readJsonBody(req: IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+
+  for await (const chunk of req) {
+    const buffer = typeof chunk === 'string' ? Buffer.from(chunk) : (chunk as Buffer);
+    totalBytes += buffer.length;
+    if (totalBytes > MAX_JSON_BODY_BYTES) {
+      throw new ReviewServiceError(
+        'REVIEW_INVALID_INPUT',
+        'O corpo da requisição excede o limite máximo permitido.',
+        413,
+      );
+    }
+    chunks.push(buffer);
+  }
+
+  const raw = Buffer.concat(chunks).toString('utf8').trim();
+  if (raw.length === 0) {
+    throw new ReviewServiceError(
+      'REVIEW_INVALID_INPUT',
+      'O corpo da requisição JSON é obrigatório.',
+      400,
+    );
+  }
+
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    throw new ReviewServiceError(
+      'REVIEW_INVALID_INPUT',
+      'O corpo da requisição não contém JSON válido.',
+      400,
+    );
+  }
+}
+
+function parseListReviewsQuery(searchParams: URLSearchParams): Record<string, unknown> {
+  const filter: Record<string, unknown> = {};
+  const state = searchParams.get('state');
+  const repoPath = searchParams.get('repoPath');
+  const limitRaw = searchParams.get('limit');
+
+  if (state !== null) {
+    filter.state = state;
+  }
+  if (repoPath !== null) {
+    filter.repoPath = repoPath;
+  }
+  if (limitRaw !== null) {
+    const parsedLimit = Number(limitRaw);
+    filter.limit = limitRaw.trim() !== '' && Number.isFinite(parsedLimit) ? parsedLimit : NaN;
+  }
+  return filter;
+}
+
+function getIdempotencyHeader(req: IncomingMessage): string | undefined {
+  const value = req.headers['idempotency-key'];
+  if (Array.isArray(value)) {
+    if (value.length > 1) {
+      throw new ReviewServiceError(
+        'REVIEW_INVALID_INPUT',
+        'Cabeçalho Idempotency-Key duplicado.',
+        400,
+      );
+    }
+    return value[0];
+  }
+  return value;
+}
+
 export function createReviewServer(options?: ReviewRepositoryOptions) {
   const reviewRepository = SqliteReviewRepository.open(options);
+  const reviewService = new ReviewService(reviewRepository);
   const server = createServer(async (req, res) => {
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     res.setHeader('Cache-Control', 'no-store');
     const url = new URL(req.url ?? '/', 'http://127.0.0.1:3001');
+
+    if (req.method === 'OPTIONS' && url.pathname.startsWith('/api/')) {
+      if (!applyCorsHeaders(req, res)) {
+        sendApiError(res, 403, { code: 'ORIGIN_FORBIDDEN', message: 'Origem não permitida.' });
+        return;
+      }
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Idempotency-Key');
+      res.writeHead(204).end();
+      return;
+    }
+
+    if (url.pathname === '/api/reviews' || url.pathname.startsWith('/api/reviews/')) {
+      if (!applyCorsHeaders(req, res)) {
+        sendApiError(res, 403, { code: 'ORIGIN_FORBIDDEN', message: 'Origem não permitida.' });
+        return;
+      }
+
+      try {
+        if (req.method === 'POST' && url.pathname === '/api/reviews') {
+          const body = await readJsonBody(req);
+          const idempotencyKey = getIdempotencyHeader(req);
+          const result = await reviewService.createReview(body, { idempotencyKey });
+          res.writeHead(result.replayed ? 200 : 201).end(JSON.stringify(result));
+          return;
+        }
+
+        if (req.method === 'GET' && url.pathname === '/api/reviews') {
+          const result = reviewService.listReviews(parseListReviewsQuery(url.searchParams));
+          res.writeHead(200).end(JSON.stringify(result));
+          return;
+        }
+
+        const reviewIdMatch = /^\/api\/reviews\/([^/]+)$/.exec(url.pathname);
+        if (req.method === 'GET' && reviewIdMatch?.[1] !== undefined) {
+          const reviewId = decodeURIComponent(reviewIdMatch[1]);
+          const result = reviewService.getReview(reviewId);
+          res.writeHead(200).end(JSON.stringify(result));
+          return;
+        }
+
+        const transitionMatch = /^\/api\/reviews\/([^/]+)\/transitions$/.exec(url.pathname);
+        if (req.method === 'POST' && transitionMatch?.[1] !== undefined) {
+          const reviewId = decodeURIComponent(transitionMatch[1]);
+          const body = await readJsonBody(req);
+          const review = await reviewService.transitionReview(reviewId, body);
+          res.writeHead(200).end(JSON.stringify({
+            contractVersion: REVIEW_CONTRACT_VERSION,
+            review,
+          }));
+          return;
+        }
+
+        sendApiError(res, 404, { code: 'REVIEW_NOT_FOUND', message: 'Rota de review não encontrada.' });
+      } catch (error) {
+        if (error instanceof ReviewServiceError) {
+          sendApiError(res, error.statusCode, {
+            code: error.code,
+            message: error.message,
+            ...(error.details && error.details.length > 0 ? { details: [...error.details] } : {}),
+          });
+          return;
+        }
+        sendApiError(res, 500, {
+          code: 'REVIEW_INTERNAL_ERROR',
+          message: 'Erro interno inesperado ao processar a requisição de review.',
+        });
+      }
+      return;
+    }
+
     if (req.method === 'GET' && ['/api/directories', '/api/history', '/api/history/file'].includes(url.pathname)) {
-      if (!req.headers.origin || !allowedOrigins.has(req.headers.origin)) {
+      if (!applyCorsHeaders(req, res)) {
         res.writeHead(403).end(JSON.stringify({ error: 'Origem não permitida.' }));
         return;
       }
-      res.setHeader('Access-Control-Allow-Origin', req.headers.origin);
-      res.setHeader('Vary', 'Origin');
       try {
         const path = url.searchParams.get('path') ?? undefined;
         const result = url.pathname === '/api/history/file'
@@ -63,5 +230,5 @@ export function createReviewServer(options?: ReviewRepositoryOptions) {
     server.close();
     reviewRepository.close();
   };
-  return { server, shutdown, reviewRepository };
+  return { server, shutdown, reviewRepository, reviewService };
 }
