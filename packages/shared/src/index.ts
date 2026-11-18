@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+export * from './review.js';
+
 export const TargetTypeSchema = z.enum(['pr', 'branch']);
 export type TargetType = z.infer<typeof TargetTypeSchema>;
 const columns = z.number().int().min(2).max(500);
