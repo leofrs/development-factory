@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { ReviewStateSchema } from './review.js';
 
 export * from './review.js';
 
@@ -25,6 +26,7 @@ export const ServerMessageSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('status'), state: z.enum(['running', 'exited']), exitCode: z.number().int().optional() }),
   z.object({ type: z.literal('error'), message: z.string() }),
   z.object({ type: z.literal('history'), reportPath: z.string(), sessionPath: z.string(), state: z.enum(['pending', 'saved', 'incomplete']) }),
+  z.object({ type: z.literal('review'), reviewId: z.string().uuid(), executionId: z.string().uuid(), state: ReviewStateSchema }),
 ]);
 
 export const DirectoryListingSchema = z.object({

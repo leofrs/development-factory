@@ -110,6 +110,8 @@ export function TerminalModal({ request, onClose, theme, onToggleTheme }: { requ
           if (started) send({ type: 'resize', cols: terminal.cols, rows: terminal.rows });
         } else if (message.type === 'history') {
           setHistory(message);
+        } else if (message.type === 'review') {
+          // Evento de ciclo de vida do review persistente (mantido para compatibilidade durante a transição).
         } else {
           setError(message.message);
           if (!started) setStatus('exited');

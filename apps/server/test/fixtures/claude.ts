@@ -9,6 +9,7 @@ process.stdout.on('resize', () => console.log(`SIZE:${process.stdout.columns}x${
 process.stdin.on('data', chunk => {
   const text = chunk.toString();
   if (text.includes('\u0003')) process.exit(130);
+  if (text === 'EXIT0') process.exit(0);
   if (text === 'EXIT') process.exit(7);
   if (text === 'SAVE') {
     const match = process.argv[2]?.match(/no arquivo ("(?:\\.|[^"\\])*")\./);

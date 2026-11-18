@@ -13,6 +13,7 @@ import {
   ReviewExecutionSchema,
   ReviewSchema,
   TransitionReviewRequestSchema,
+  canTransitionReview,
   isFinalReviewState,
   type CreateReviewResponse,
   type CreateReviewTargetInput,
@@ -22,8 +23,12 @@ import {
   type ReviewApiErrorCode,
   type ReviewArtifact,
   type ReviewArtifactListResponse,
+  type ReviewArtifactStatus,
   type ReviewDetails,
+  type ReviewError,
+  type ReviewExecution,
   type ReviewListResponse,
+  type ReviewProcess,
 } from '@development-factory/shared';
 import {
   ArtifactPreparationError,
@@ -599,6 +604,235 @@ export class ReviewService {
       }
 
       throw mapUnexpectedError(error);
+    }
+  }
+
+  /**
+   * Registra o início efetivo do processo de execução e move o review para `analyzing`.
+   */
+  async startExecution(
+    reviewIdInput: string,
+    executionIdInput: string,
+    pid: number,
+    reason = 'Sessão PTY iniciada.',
+  ): Promise<{ review: Review; execution: ReviewExecution }> {
+    const parsedReviewId = ReviewIdSchema.safeParse(reviewIdInput);
+    const parsedExecId = ReviewIdSchema.safeParse(executionIdInput);
+    if (!parsedReviewId.success || !parsedExecId.success || !Number.isInteger(pid) || pid <= 0) {
+      throw new ReviewServiceError(
+        'REVIEW_INVALID_INPUT',
+        'Os dados para iniciar a execução do review são inválidos.',
+        400,
+      );
+    }
+
+    try {
+      return await this.repository.withWriteLock(() => {
+        const review = this.repository.getReviewById(parsedReviewId.data);
+        if (!review) {
+          throw new ReviewServiceError(
+            'REVIEW_NOT_FOUND',
+            `Review ${parsedReviewId.data} não encontrado.`,
+            404,
+          );
+        }
+        if (isFinalReviewState(review.state)) {
+          throw new ReviewServiceError(
+            'REVIEW_INVALID_TRANSITION',
+            'Não é possível iniciar execução para um review já finalizado.',
+            409,
+          );
+        }
+
+        const execution = this.repository.getExecutionById(parsedExecId.data);
+        if (!execution || execution.reviewId !== review.id) {
+          throw new ReviewServiceError(
+            'REVIEW_NOT_FOUND',
+            `Execução ${parsedExecId.data} não encontrada para o review ${review.id}.`,
+            404,
+          );
+        }
+
+        const startedAt = this.now();
+        const updatedExecution = this.repository.updateExecution(
+          {
+            ...execution,
+            updatedAt: startedAt,
+            startedAt,
+            finishedAt: null,
+            process: { status: 'running', pid },
+          },
+          {
+            type: 'execution.started',
+            occurredAt: startedAt,
+            payload: { pid },
+          },
+        );
+
+        const updatedReview = review.state === 'preparing'
+          ? this.repository.saveReviewTransition(
+            review.id,
+            { to: 'analyzing', at: startedAt, reason },
+            { executionId: execution.id },
+          )
+          : review;
+
+        return { review: updatedReview, execution: updatedExecution };
+      });
+    } catch (error) {
+      throw mapUnexpectedError(error);
+    }
+  }
+
+  /**
+   * Registra o encerramento técnico da execução e a transição correspondente do review.
+   */
+  async finishExecution(
+    reviewIdInput: string,
+    executionIdInput: string,
+    params: {
+      readonly process: Extract<ReviewProcess, { status: 'exited' | 'failed' }>;
+      readonly targetState: 'incomplete' | 'failed' | 'cancelled';
+      readonly reason: string;
+      readonly error?: ReviewError;
+      readonly eventType?: string;
+    },
+  ): Promise<{ review: Review; execution: ReviewExecution }> {
+    const parsedReviewId = ReviewIdSchema.safeParse(reviewIdInput);
+    const parsedExecId = ReviewIdSchema.safeParse(executionIdInput);
+    if (!parsedReviewId.success || !parsedExecId.success) {
+      throw new ReviewServiceError(
+        'REVIEW_INVALID_INPUT',
+        'Os identificadores para finalizar a execução são inválidos.',
+        400,
+      );
+    }
+
+    try {
+      return await this.repository.withWriteLock(() => {
+        let review = this.repository.getReviewById(parsedReviewId.data);
+        if (!review) {
+          throw new ReviewServiceError(
+            'REVIEW_NOT_FOUND',
+            `Review ${parsedReviewId.data} não encontrado.`,
+            404,
+          );
+        }
+
+        let execution = this.repository.getExecutionById(parsedExecId.data);
+        if (!execution || execution.reviewId !== review.id) {
+          throw new ReviewServiceError(
+            'REVIEW_NOT_FOUND',
+            `Execução ${parsedExecId.data} não encontrada para o review ${review.id}.`,
+            404,
+          );
+        }
+
+        const finishedAt = this.now();
+        if (execution.process.status === 'pending' || execution.process.status === 'running') {
+          const startedAt = params.process.status === 'exited'
+            ? (execution.startedAt ?? finishedAt)
+            : execution.startedAt;
+
+          execution = this.repository.updateExecution(
+            {
+              ...execution,
+              updatedAt: finishedAt,
+              startedAt,
+              finishedAt,
+              process: params.process,
+            },
+            {
+              type: params.process.status === 'failed' ? 'execution.failed' : 'execution.exited',
+              occurredAt: finishedAt,
+              payload: { process: params.process },
+            },
+          );
+        }
+
+        if (!isFinalReviewState(review.state) && canTransitionReview(review.state, params.targetState)) {
+          review = this.repository.saveReviewTransition(
+            review.id,
+            {
+              to: params.targetState,
+              at: finishedAt,
+              reason: params.reason,
+              error: params.error,
+            },
+            {
+              executionId: execution.id,
+              eventType: params.eventType,
+            },
+          );
+        }
+
+        return { review, execution };
+      });
+    } catch (error) {
+      throw mapUnexpectedError(error);
+    }
+  }
+
+  /**
+   * Atualiza o estado de um artefato existente sem concluir automaticamente o review.
+   */
+  async updateArtifactStatus(
+    reviewIdInput: string,
+    artifactIdInput: string,
+    status: ReviewArtifactStatus,
+    error: ReviewError | null = null,
+    eventType?: string,
+  ): Promise<ReviewArtifact> {
+    const parsedReviewId = ReviewIdSchema.safeParse(reviewIdInput);
+    const parsedArtifactId = ReviewIdSchema.safeParse(artifactIdInput);
+    if (!parsedReviewId.success || !parsedArtifactId.success) {
+      throw new ReviewServiceError(
+        'REVIEW_INVALID_INPUT',
+        'Os identificadores para atualizar o artefato são inválidos.',
+        400,
+      );
+    }
+
+    try {
+      return await this.repository.withWriteLock(() => {
+        const artifacts = this.repository.listArtifactsByReviewId(parsedReviewId.data);
+        const existing = artifacts.find(item => item.id === parsedArtifactId.data);
+        if (!existing) {
+          throw new ReviewServiceError(
+            'REVIEW_NOT_FOUND',
+            `Artefato ${parsedArtifactId.data} não encontrado para o review ${parsedReviewId.data}.`,
+            404,
+          );
+        }
+
+        if (existing.status === status && existing.error?.code === error?.code && existing.error?.message === error?.message) {
+          return existing;
+        }
+
+        const updatedAt = this.now();
+        const candidate = ReviewArtifactSchema.safeParse({
+          ...existing,
+          status,
+          error,
+          updatedAt,
+        });
+
+        if (!candidate.success) {
+          throw new ReviewServiceError(
+            'REVIEW_INVALID_CONTRACT',
+            'A atualização do artefato viola o contrato do review.',
+            400,
+            formatZodIssues(candidate.error),
+          );
+        }
+
+        return this.repository.saveArtifact(
+          candidate.data,
+          eventType ? { type: eventType, occurredAt: updatedAt } : undefined,
+        );
+      });
+    } catch (err) {
+      throw mapUnexpectedError(err);
     }
   }
 }
