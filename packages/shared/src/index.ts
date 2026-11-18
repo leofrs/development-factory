@@ -5,6 +5,8 @@ export * from './review.js';
 
 export const TargetTypeSchema = z.enum(['pr', 'branch']);
 export type TargetType = z.infer<typeof TargetTypeSchema>;
+export const FactoryInputTypeSchema = z.enum(['jira_url', 'jira_key', 'title']);
+export type FactoryInputType = z.infer<typeof FactoryInputTypeSchema>;
 const columns = z.number().int().min(2).max(500);
 const rows = z.number().int().min(1).max(300);
 
