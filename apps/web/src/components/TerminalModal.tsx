@@ -1,9 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
-import { Check, Copy, GitBranch, GitPullRequest, Square, Terminal as TerminalIcon } from 'lucide-react';
+import { Check, Compass, Copy, FileText, GitBranch, GitPullRequest, Square, Terminal as TerminalIcon } from 'lucide-react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
-import { ServerMessageSchema, type ClientMessage, type ReviewRequest, type ServerMessage } from '@development-factory/shared';
+import {
+  ServerMessageSchema,
+  type ClientMessage,
+  type FactoryRequest,
+  type ReviewRequest,
+  type ServerMessage,
+} from '@development-factory/shared';
 import '@xterm/xterm/css/xterm.css';
 import { terminalThemes, type Theme } from '../theme';
 import { ThemeToggle } from './ThemeToggle';
@@ -11,7 +17,25 @@ import { ThemeToggle } from './ThemeToggle';
 type Status = 'connecting' | 'running' | 'exited';
 const labels: Record<Status, string> = { connecting: 'Conectando', running: 'Em execução', exited: 'Encerrado' };
 
-export function TerminalModal({ request, onClose, theme, onToggleTheme }: { request: ReviewRequest; onClose: () => void; theme: Theme; onToggleTheme: () => void }) {
+export type TerminalSession =
+  | { mode: 'review'; request: ReviewRequest }
+  | { mode: 'factory'; request: FactoryRequest };
+
+export function TerminalModal({
+  session,
+  onClose,
+  theme,
+  onToggleTheme,
+  onSavedReport,
+  onViewMarkdown,
+}: {
+  session: TerminalSession;
+  onClose: () => void;
+  theme: Theme;
+  onToggleTheme: () => void;
+  onSavedReport?: (reportPath: string) => void;
+  onViewMarkdown?: (reportPath: string) => void;
+}) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -91,7 +115,11 @@ export function TerminalModal({ request, onClose, theme, onToggleTheme }: { requ
         if (disposed) return;
         clearTimeout(connectionTimer);
         fit();
-        send({ type: 'start_review', ...request, cols: terminal.cols, rows: terminal.rows });
+        if (session.mode === 'review') {
+          send({ type: 'start_review', ...session.request, cols: terminal.cols, rows: terminal.rows });
+        } else {
+          send({ type: 'start_factory', ...session.request, cols: terminal.cols, rows: terminal.rows });
+        }
         terminal.focus();
       };
       ws.onmessage = event => {
@@ -110,6 +138,9 @@ export function TerminalModal({ request, onClose, theme, onToggleTheme }: { requ
           if (started) send({ type: 'resize', cols: terminal.cols, rows: terminal.rows });
         } else if (message.type === 'history') {
           setHistory(message);
+          if (message.state === 'saved') {
+            onSavedReport?.(message.reportPath);
+          }
         } else if (message.type === 'review') {
           // Evento de ciclo de vida do review persistente (mantido para compatibilidade durante a transição).
         } else {
@@ -166,7 +197,7 @@ export function TerminalModal({ request, onClose, theme, onToggleTheme }: { requ
       term?.dispose();
       terminalRef.current = null;
     };
-  }, [request]);
+  }, [session]);
 
   async function copyOutput() {
     const terminal = terminalRef.current;
@@ -188,18 +219,48 @@ export function TerminalModal({ request, onClose, theme, onToggleTheme }: { requ
     } catch { if (terminalRef.current) setError('Não foi possível copiar a saída. Autorize o clipboard no navegador.'); }
   }
 
-  const TargetIcon = request.targetType === 'pr' ? GitPullRequest : GitBranch;
+  const TargetIcon = session.mode === 'factory'
+    ? Compass
+    : session.request.targetType === 'pr'
+      ? GitPullRequest
+      : GitBranch;
+  const sessionTitle = session.mode === 'factory'
+    ? session.request.value
+    : session.request.targetType === 'pr'
+      ? `PR #${session.request.identifier}`
+      : session.request.identifier;
+  const repoPath = session.request.repoPath;
+  const savedLabel = session.mode === 'factory'
+    ? history?.state === 'saved'
+      ? 'Plano salvo'
+      : history?.state === 'incomplete'
+        ? 'Plano incompleto'
+        : 'Plano em elaboração'
+    : history?.state === 'saved'
+      ? 'Parecer salvo'
+      : history?.state === 'incomplete'
+        ? 'Review incompleto'
+        : 'Parecer em elaboração';
+
   return <dialog ref={dialogRef} onCancel={event => event.preventDefault()} aria-labelledby="terminal-title" className="terminal-dialog h-[88dvh] max-h-[100dvh] w-[calc(100%-1rem)] max-w-6xl overflow-hidden rounded-xl border border-line-strong bg-terminal p-0 text-primary shadow-2xl sm:w-[calc(100%-3rem)]">
     <div className="flex h-full min-h-0 flex-col">
       <header className="flex flex-wrap items-center gap-x-4 gap-y-3 border-b border-line bg-elevated px-4 py-4 sm:px-5">
-        <div className="flex min-w-0 flex-1 items-center gap-3"><span className="hidden rounded-lg border border-line p-2 sm:block"><TerminalIcon size={17} className="text-accent" /></span><div className="min-w-0"><h2 id="terminal-title" className="flex items-center gap-2 text-sm font-medium"><TargetIcon size={14} className="shrink-0 text-muted" /><span className="truncate" title={request.identifier}>{request.targetType === 'pr' ? `PR #${request.identifier}` : request.identifier}</span></h2><p className="mt-1 truncate font-mono text-[10px] text-muted" title={request.repoPath}>{request.repoPath}</p></div></div>
+        <div className="flex min-w-0 flex-1 items-center gap-3"><span className="hidden rounded-lg border border-line p-2 sm:block"><TerminalIcon size={17} className="text-accent" /></span><div className="min-w-0"><h2 id="terminal-title" className="flex items-center gap-2 text-sm font-medium"><TargetIcon size={14} className="shrink-0 text-muted" /><span className="truncate" title={sessionTitle}>{sessionTitle}</span></h2><p className="mt-1 truncate font-mono text-[10px] text-muted" title={repoPath}>{repoPath}</p></div></div>
         <span role="status" className="flex items-center gap-2 text-[11px] text-muted"><span className={`size-1.5 rounded-full ${status === 'running' ? 'bg-accent' : status === 'connecting' ? 'animate-pulse bg-warning' : 'bg-slate-500'}`} />{labels[status]}{exitCode !== undefined && ` · ${exitCode}`}</span>
         <div className="flex flex-wrap gap-2"><ThemeToggle theme={theme} onToggle={onToggleTheme} /><button className="modal-button" onClick={() => void copyOutput()}>{copied ? <Check size={13} /> : <Copy size={13} />}<span>{copied ? 'Copiado!' : 'Copiar saída'}</span></button><button className="modal-button border-danger/20 text-danger hover:bg-danger/10" onClick={onClose}><Square size={11} />Encerrar sessão</button></div>
       </header>
       {error && <div role="alert" className="border-b border-danger/15 bg-danger/5 px-5 py-3 text-xs leading-5 text-danger">{error}</div>}
-      {history && <div className="border-b border-line bg-surface px-5 py-2 text-[11px] leading-5 text-muted" role="status">
-        <p className="break-all"><span className={history.state === 'saved' ? 'text-accent' : ''}>{history.state === 'saved' ? 'Parecer salvo' : history.state === 'incomplete' ? 'Review incompleto' : 'Parecer em elaboração'}:</span> <span className="font-mono">{history.reportPath}</span></p>
-        <p className="break-all">Registro automático da sessão: <span className="font-mono">{history.sessionPath}</span></p>
+      {history && <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line bg-surface px-5 py-2 text-[11px] leading-5 text-muted" role="status">
+        <div className="min-w-0 flex-1">
+          <p className="break-all"><span className={history.state === 'saved' ? 'text-accent' : ''}>{savedLabel}:</span> <span className="font-mono">{history.reportPath}</span></p>
+          <p className="break-all">Registro automático da sessão: <span className="font-mono">{history.sessionPath}</span></p>
+        </div>
+        {history.state === 'saved' && onViewMarkdown && (
+          <button type="button" className="modal-button border-accent/40 text-accent hover:bg-selected" onClick={() => onViewMarkdown(history.reportPath)}>
+            <FileText size={13} />
+            Ver Markdown
+          </button>
+        )}
       </div>}
       <div className="min-h-0 flex-1 p-3 sm:p-5"><div ref={containerRef} className="h-full w-full overflow-hidden" aria-label="Terminal interativo do Claude Code" /></div>
       <footer className="flex flex-wrap items-center justify-between gap-2 border-t border-line-subtle px-5 py-2.5 text-[10px] text-muted"><span>Claude Code · PTY local · MCPs do ambiente</span><span>Ctrl+C copia seleção ou interrompe · Ctrl+V cola · Esc controla a TUI</span></footer>

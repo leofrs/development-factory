@@ -1,0 +1,163 @@
+import assert from 'node:assert/strict';
+import { once } from 'node:events';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmod, copyFile, mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { basename, dirname, join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
+import { test } from 'node:test';
+import { WebSocket } from 'ws';
+import {
+  ClientMessageSchema,
+  HistoryFileSchema,
+  ServerMessageSchema,
+  type ServerMessage,
+} from '@development-factory/shared';
+import { buildFactoryPlanPrompt } from '../src/prompts/factory-plan.js';
+import { createReviewServer } from '../src/server.js';
+
+async function until<T>(probe: () => T | undefined, label: string): Promise<T> {
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    const result = probe();
+    if (result !== undefined) return result;
+    await delay(15);
+  }
+  throw new Error(`Timeout: ${label}`);
+}
+
+test('ClientMessageSchema valida entradas de start_factory', () => {
+  const validUrl = ClientMessageSchema.safeParse({
+    type: 'start_factory',
+    inputType: 'jira_url',
+    value: 'https://empresa.atlassian.net/browse/PROD-1234',
+    repoPath: '/tmp/repo',
+    cols: 80,
+    rows: 24,
+  });
+  assert.equal(validUrl.success, true);
+
+  const invalidUrl = ClientMessageSchema.safeParse({
+    type: 'start_factory',
+    inputType: 'jira_url',
+    value: 'nao-e-url',
+    repoPath: '/tmp/repo',
+    cols: 80,
+    rows: 24,
+  });
+  assert.equal(invalidUrl.success, false);
+
+  const validKey = ClientMessageSchema.safeParse({
+    type: 'start_factory',
+    inputType: 'jira_key',
+    value: 'PROD-1234',
+    repoPath: '/tmp/repo',
+    cols: 80,
+    rows: 24,
+  });
+  assert.equal(validKey.success, true);
+
+  const invalidKey = ClientMessageSchema.safeParse({
+    type: 'start_factory',
+    inputType: 'jira_key',
+    value: 'PROD',
+    repoPath: '/tmp/repo',
+    cols: 80,
+    rows: 24,
+  });
+  assert.equal(invalidKey.success, false);
+
+  const validTitle = ClientMessageSchema.safeParse({
+    type: 'start_factory',
+    inputType: 'title',
+    value: 'Implementar roadmap inicial da fábrica',
+    repoPath: '/tmp/repo',
+    cols: 80,
+    rows: 24,
+  });
+  assert.equal(validTitle.success, true);
+});
+
+test('buildFactoryPlanPrompt inclui tipo, valor e caminho do relatório', () => {
+  const prompt = buildFactoryPlanPrompt('jira_key', 'PROD-1234', '/tmp/repo/.code-reviews/plano.md');
+  assert(prompt.includes('Chave da tarefa no JIRA: "PROD-1234"'));
+  assert(prompt.includes('/tmp/repo/.code-reviews/plano.md'));
+});
+
+test('start_factory executa PTY, salva plano em Markdown e permite leitura formatada via API', { timeout: 30000 }, async context => {
+  const directory = await mkdtemp(join(tmpdir(), 'factory-pty-'));
+  const previousPath = process.env.PATH;
+  const { server, shutdown } = createReviewServer({ dbPath: join(directory, 'reviews.db') });
+  const sockets: WebSocket[] = [];
+
+  context.after(async () => {
+    sockets.forEach(socket => socket.terminate());
+    shutdown();
+    process.env.PATH = previousPath;
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  await copyFile(new URL('./fixtures/claude.ts', import.meta.url), join(directory, 'claude'));
+  await chmod(join(directory, 'claude'), 0o755);
+  process.env.PATH = `${directory}:${previousPath ?? ''}`;
+
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  assert(address && typeof address !== 'string');
+  const httpUrl = `http://127.0.0.1:${address.port}`;
+  const wsUrl = `ws://127.0.0.1:${address.port}/ws/terminal`;
+
+  const socket = new WebSocket(wsUrl, { origin: 'http://localhost:5173' });
+  sockets.push(socket);
+  const messages: ServerMessage[] = [];
+  let output = '';
+
+  socket.on('message', raw => {
+    const parsed = ServerMessageSchema.parse(JSON.parse(raw.toString()) as unknown);
+    messages.push(parsed);
+    if (parsed.type === 'output') {
+      output += parsed.data;
+    }
+  });
+
+  await once(socket, 'open');
+  socket.send(JSON.stringify({
+    type: 'start_factory',
+    inputType: 'jira_key',
+    value: 'PROD-1234',
+    repoPath: directory,
+    cols: 90,
+    rows: 25,
+  }));
+
+  const pendingHistory = await until(
+    () => messages.find((m): m is Extract<ServerMessage, { type: 'history' }> => m.type === 'history' && m.state === 'pending'),
+    'history pending',
+  );
+  assert.equal(existsSync(pendingHistory.reportPath), true);
+
+  await until(() => (output.includes('PROD-1234') ? true : undefined), 'prompt output');
+
+  const planMarkdown = '# Plano PROD-1234\n\n## Resumo da tarefa\n- Implementar fluxo inicial.\n';
+  writeFileSync(pendingHistory.reportPath, planMarkdown);
+
+  await until(
+    () => messages.find(m => m.type === 'history' && m.state === 'saved'),
+    'history saved',
+  );
+
+  const fileParams = new URLSearchParams({
+    path: dirname(pendingHistory.reportPath),
+    name: basename(pendingHistory.reportPath),
+  });
+  const fileResponse = await fetch(`${httpUrl}/api/history/file?${fileParams.toString()}`, {
+    headers: { Origin: 'http://localhost:5173' },
+  });
+  assert.equal(fileResponse.status, 200);
+  const fileData = HistoryFileSchema.parse(await fileResponse.json());
+  assert.equal(fileData.content, planMarkdown);
+  assert.equal(readFileSync(pendingHistory.reportPath, 'utf8'), planMarkdown);
+
+  socket.close();
+});

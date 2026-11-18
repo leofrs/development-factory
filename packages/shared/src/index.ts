@@ -10,15 +10,43 @@ export type FactoryInputType = z.infer<typeof FactoryInputTypeSchema>;
 const columns = z.number().int().min(2).max(500);
 const rows = z.number().int().min(1).max(300);
 
+const repoPathSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(4096)
+  .refine(value => value.startsWith('/') && !value.includes('\0'), 'Use um caminho absoluto no WSL');
+
 export const ClientMessageSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('start_review'),
     targetType: TargetTypeSchema,
     identifier: z.string().trim().min(1).max(500).refine(value => !/[\x00-\x1f\x7f]/.test(value), 'Identificador inválido'),
-    repoPath: z.string().trim().min(1).max(4096).refine(value => value.startsWith('/') && !value.includes('\0'), 'Use um caminho absoluto no WSL'),
+    repoPath: repoPathSchema,
     cols: columns,
     rows,
   }).refine(value => value.targetType !== 'pr' || /^[1-9]\d*$/.test(value.identifier), 'Informe um número de PR positivo'),
+  z.object({
+    type: z.literal('start_factory'),
+    inputType: FactoryInputTypeSchema,
+    value: z.string().trim().min(1, 'Informe os dados da tarefa').max(1000).refine(value => !/[\x00-\x1f\x7f]/.test(value), 'Entrada inválida'),
+    repoPath: repoPathSchema,
+    cols: columns,
+    rows,
+  }).superRefine((val, ctx) => {
+    if (val.inputType === 'jira_url') {
+      try {
+        const parsed = new URL(val.value);
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Informe uma URL HTTP ou HTTPS válida da tarefa no JIRA' });
+        }
+      } catch {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Informe uma URL válida da tarefa no JIRA' });
+      }
+    } else if (val.inputType === 'jira_key' && !/^[A-Z][A-Z0-9_]*-\d+$/i.test(val.value)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Informe uma chave JIRA válida, como PROD-1234' });
+    }
+  }),
   z.object({ type: z.literal('input'), data: z.string().max(262144) }),
   z.object({ type: z.literal('resize'), cols: columns, rows }),
 ]);
@@ -49,3 +77,4 @@ export type HistoryFile = z.infer<typeof HistoryFileSchema>;
 export type ClientMessage = z.infer<typeof ClientMessageSchema>;
 export type ServerMessage = z.infer<typeof ServerMessageSchema>;
 export type ReviewRequest = Omit<Extract<ClientMessage, { type: 'start_review' }>, 'type' | 'cols' | 'rows'>;
+export type FactoryRequest = Omit<Extract<ClientMessage, { type: 'start_factory' }>, 'type' | 'cols' | 'rows'>;

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { appendFileSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, watchFile, unwatchFile, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { stripVTControlCharacters } from 'node:util';
-import type { ReviewRequest } from '@development-factory/shared';
+import type { FactoryRequest, ReviewRequest } from '@development-factory/shared';
 
 type HistoryState = 'pending' | 'saved' | 'incomplete';
 
@@ -16,19 +16,25 @@ export interface ReviewHistoryOptions {
   };
 }
 
-export function createReviewHistory(
-  request: ReviewRequest,
+interface SessionHistoryConfig {
+  readonly repoPath: string;
+  readonly slugSource: string;
+  readonly prefix: string;
+  readonly metadata: string;
+  readonly reportPlaceholderTitle: string;
+  readonly reportPlaceholderNote: string;
+  readonly sessionTitle: string;
+  readonly incompleteTitle: string;
+  readonly incompleteNote: string;
+  readonly prepared?: ReviewHistoryOptions['prepared'];
+}
+
+function createSessionHistory(
+  config: SessionHistoryConfig,
   onChange: (state: HistoryState) => void,
   onError: (message: string) => void,
-  options: ReviewHistoryOptions = {},
 ) {
-  const startedAt = options.prepared?.startedAt ?? new Date().toISOString();
-  const target = `${request.targetType === 'pr' ? 'PR #' : 'Branch '}${request.identifier}`;
-  const reviewMetadata = [
-    options.reviewId ? `- Review ID: ${options.reviewId}\n` : '',
-    options.executionId ? `- Execução ID: ${options.executionId}\n` : '',
-  ].join('');
-  const metadata = `${reviewMetadata}- Alvo: ${JSON.stringify(target)}\n- Repositório: ${JSON.stringify(request.repoPath)}\n- Início: ${startedAt}\n`;
+  const startedAt = config.prepared?.startedAt ?? new Date().toISOString();
 
   let reportPath: string;
   let sessionPath: string;
@@ -36,30 +42,30 @@ export function createReviewHistory(
   let placeholder: string;
   let descriptor = -1;
 
-  if (options.prepared) {
-    reportPath = options.prepared.reportPath;
-    sessionPath = options.prepared.sessionPath;
+  if (config.prepared) {
+    reportPath = config.prepared.reportPath;
+    sessionPath = config.prepared.sessionPath;
     fileBasename = basename(sessionPath, '.session.md');
     placeholder = readFileSync(reportPath, 'utf8');
     descriptor = openSync(sessionPath, 'a', 0o600);
   } else {
-    const directory = join(realpathSync(request.repoPath), '.code-reviews');
+    const directory = join(realpathSync(config.repoPath), '.code-reviews');
     if (!existsSync(directory)) mkdirSync(directory, { mode: 0o700 });
     if (lstatSync(directory).isSymbolicLink() || !lstatSync(directory).isDirectory()) {
       throw new Error('.code-reviews precisa ser um diretório real dentro do repositório.');
     }
-    const slug = request.identifier.replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 60) || 'review';
-    fileBasename = `${startedAt.replace(/[:.]/g, '-')}-${request.targetType}-${slug}-${randomUUID()}`;
+    const slug = config.slugSource.replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 60) || config.prefix;
+    fileBasename = `${startedAt.replace(/[:.]/g, '-')}-${config.prefix}-${slug}-${randomUUID()}`;
     reportPath = join(directory, `${fileBasename}.md`);
     sessionPath = join(directory, `${fileBasename}.session.md`);
-    placeholder = `# Code review\n\n${metadata}\n> Review em andamento. O parecer final será salvo aqui pelo Claude Code.\n`;
+    placeholder = `# ${config.reportPlaceholderTitle}\n\n${config.metadata}\n> ${config.reportPlaceholderNote}\n`;
     writeFileSync(reportPath, placeholder, { flag: 'wx', mode: 0o600 });
     try {
       descriptor = openSync(sessionPath, 'wx', 0o600);
-      appendFileSync(descriptor, `# Registro da sessão de code review\n\n${metadata}\n> Registro textual da TUI; pode conter redesenhos e repetições. O parecer final fica em ${JSON.stringify(reportPath)}.\n\n## Saída do terminal\n\n    `);
+      appendFileSync(descriptor, `# ${config.sessionTitle}\n\n${config.metadata}\n> Registro textual da TUI; pode conter redesenhos e repetições. O arquivo final fica em ${JSON.stringify(reportPath)}.\n\n## Saída do terminal\n\n    `);
     } catch (error) {
       if (descriptor !== -1) closeSync(descriptor);
-      writeFileSync(reportPath, `# Code review não iniciado\n\n${metadata}\nNão foi possível criar o registro da sessão.\n`);
+      writeFileSync(reportPath, `# ${config.reportPlaceholderTitle} não iniciado\n\n${config.metadata}\nNão foi possível criar o registro da sessão.\n`);
       throw error;
     }
   }
@@ -100,11 +106,73 @@ export function createReviewHistory(
     try {
       appendFileSync(descriptor, `\n\n- Encerramento: ${reason}\n- Fim: ${new Date().toISOString()}\n`);
       if (!saved) {
-        writeFileSync(reportPath, `# Code review incompleto\n\n${metadata}\nO parecer final não foi salvo pelo Claude antes do encerramento (${reason}).\n\nConsulte o registro da sessão: [${fileBasename}.session.md](./${fileBasename}.session.md).\n`);
+        writeFileSync(reportPath, `# ${config.incompleteTitle}\n\n${config.metadata}\n${config.incompleteNote} (${reason}).\n\nConsulte o registro da sessão: [${fileBasename}.session.md](./${fileBasename}.session.md).\n`);
         onChange('incomplete');
       }
     } catch { onError('Falha ao finalizar os arquivos de histórico. Verifique o espaço e as permissões do repositório.'); }
     finally { closeSync(descriptor); }
   };
   return { reportPath, sessionPath, record, finish };
+}
+
+export function createReviewHistory(
+  request: ReviewRequest,
+  onChange: (state: HistoryState) => void,
+  onError: (message: string) => void,
+  options: ReviewHistoryOptions = {},
+) {
+  const startedAt = options.prepared?.startedAt ?? new Date().toISOString();
+  const target = `${request.targetType === 'pr' ? 'PR #' : 'Branch '}${request.identifier}`;
+  const reviewMetadata = [
+    options.reviewId ? `- Review ID: ${options.reviewId}\n` : '',
+    options.executionId ? `- Execução ID: ${options.executionId}\n` : '',
+  ].join('');
+  const metadata = `${reviewMetadata}- Alvo: ${JSON.stringify(target)}\n- Repositório: ${JSON.stringify(request.repoPath)}\n- Início: ${startedAt}\n`;
+
+  return createSessionHistory(
+    {
+      repoPath: request.repoPath,
+      slugSource: request.identifier,
+      prefix: request.targetType,
+      metadata,
+      reportPlaceholderTitle: 'Code review',
+      reportPlaceholderNote: 'Review em andamento. O parecer final será salvo aqui pelo Claude Code.',
+      sessionTitle: 'Registro da sessão de code review',
+      incompleteTitle: 'Code review incompleto',
+      incompleteNote: 'O parecer final não foi salvo pelo Claude antes do encerramento',
+      prepared: options.prepared,
+    },
+    onChange,
+    onError,
+  );
+}
+
+export function createFactoryHistory(
+  request: FactoryRequest,
+  onChange: (state: HistoryState) => void,
+  onError: (message: string) => void,
+) {
+  const startedAt = new Date().toISOString();
+  const labels: Record<FactoryRequest['inputType'], string> = {
+    jira_url: 'URL JIRA',
+    jira_key: 'Chave JIRA',
+    title: 'Título da tarefa',
+  };
+  const metadata = `- Origem: ${labels[request.inputType]}\n- Tarefa: ${JSON.stringify(request.value)}\n- Repositório: ${JSON.stringify(request.repoPath)}\n- Início: ${startedAt}\n`;
+
+  return createSessionHistory(
+    {
+      repoPath: request.repoPath,
+      slugSource: request.value,
+      prefix: `factory-${request.inputType}`,
+      metadata,
+      reportPlaceholderTitle: 'Plano da tarefa',
+      reportPlaceholderNote: 'Planejamento em andamento. O plano final será salvo aqui pelo Claude Code.',
+      sessionTitle: 'Registro da sessão de planejamento (Factory)',
+      incompleteTitle: 'Plano da tarefa incompleto',
+      incompleteNote: 'O plano final não foi salvo pelo Claude antes do encerramento',
+    },
+    onChange,
+    onError,
+  );
 }

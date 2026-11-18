@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
-import { ArrowRight, Check, ChevronRight, Code2, FolderGit2, GitBranch, GitPullRequest, History, Layers3, LockKeyhole, ScanLine, Terminal } from 'lucide-react';
-import { ClientMessageSchema, type ReviewRequest, type TargetType } from '@development-factory/shared';
-import { TerminalModal } from './components/TerminalModal';
-import { ThemeToggle } from './components/ThemeToggle';
+import { ArrowRight, Check, ChevronRight, FolderGit2, GitBranch, GitPullRequest, Layers3, LockKeyhole, ScanLine, Terminal } from 'lucide-react';
+import { ClientMessageSchema, type TargetType } from '@development-factory/shared';
+import { TerminalModal, type TerminalSession } from './components/TerminalModal';
 import { readSavedTheme, themeStorageKey } from './theme';
 import { DirectoryPicker } from './components/DirectoryPicker';
 import { HistoryModal } from './components/HistoryModal';
+import { FloatingDock, type AppView } from './components/FloatingDock';
+import { FactoryPage } from './components/FactoryPage';
+import { FactoryTaskModal } from './components/FactoryTaskModal';
+import { MarkdownViewerModal } from './components/MarkdownViewerModal';
 
 const storageKey = 'development-factory.repoPath';
 const steps = [
@@ -22,12 +25,16 @@ export default function App() {
     document.querySelector('meta[name="theme-color"]')?.setAttribute('content', theme === 'dark' ? '#0d1117' : '#f6f8fa');
     try { localStorage.setItem(themeStorageKey, theme); } catch { /* O tema continua funcionando sem persistência. */ }
   }, [theme]);
+  const [view, setView] = useState<AppView>('factory');
   const [targetType, setTargetType] = useState<TargetType>('pr');
   const [identifier, setIdentifier] = useState('');
   const [repoPath, setRepoPath] = useState(() => {
     try { return localStorage.getItem(storageKey) ?? localStorage.getItem('make-and-review.repoPath') ?? ''; } catch { return ''; }
   });
-  const [request, setRequest] = useState<ReviewRequest | null>(null);
+  const [session, setSession] = useState<TerminalSession | null>(null);
+  const [configuringFactoryTask, setConfiguringFactoryTask] = useState(false);
+  const [savedPlanPath, setSavedPlanPath] = useState<string | null>(null);
+  const [viewingMarkdownPath, setViewingMarkdownPath] = useState<string | null>(null);
   const [pickingDirectory, setPickingDirectory] = useState(false);
   const [viewingHistory, setViewingHistory] = useState(false);
   const [error, setError] = useState('');
@@ -37,7 +44,10 @@ export default function App() {
     try { localStorage.setItem(storageKey, repoPath); setStorageError(false); }
     catch { setStorageError(true); }
   }, [repoPath]);
-  const closeModal = useCallback(() => { setRequest(null); submitRef.current?.focus(); }, []);
+  const closeModal = useCallback(() => { setSession(null); submitRef.current?.focus(); }, []);
+  const handleSavedReport = useCallback((reportPath: string) => {
+    setSavedPlanPath(reportPath);
+  }, []);
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -46,26 +56,24 @@ export default function App() {
     if (!parsed.success) { setError(parsed.error.issues[0]?.message ?? 'Verifique os campos.'); return; }
     if (parsed.data.type !== 'start_review') return;
     setError('');
-    setRequest({ targetType: parsed.data.targetType, identifier: parsed.data.identifier, repoPath: parsed.data.repoPath });
+    setSession({
+      mode: 'review',
+      request: { targetType: parsed.data.targetType, identifier: parsed.data.identifier, repoPath: parsed.data.repoPath },
+    });
   }
 
   return (
     <div className="min-h-screen bg-page text-primary">
-      <header className="border-b border-line-subtle">
-        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-4 px-6 py-5 sm:px-10">
-          <a href="/" className="flex items-center gap-3 font-semibold tracking-tight" aria-label="development-factory, início">
-            <span className="grid size-9 place-items-center rounded-xl bg-accent text-on-accent"><Code2 size={21} /></span>
-            development-factory
-          </a>
-          <nav className="ml-auto flex items-center gap-3" aria-label="Menu principal">
-            <span className="hidden items-center gap-2 rounded-full border border-line px-3 py-1.5 font-mono text-[10px] uppercase tracking-widest text-muted sm:flex"><span className="size-1.5 rounded-full bg-accent" /> Ambiente local</span>
-            <button type="button" className="modal-button" onClick={() => setViewingHistory(true)} aria-haspopup="dialog"><History size={15} />Histórico</button>
-            <ThemeToggle theme={theme} onToggle={toggleTheme} />
-          </nav>
-        </div>
-      </header>
-
-      <main className="mx-auto max-w-6xl px-6 pb-16 pt-12 sm:px-10 sm:pt-20">
+      {view === 'factory' ? (
+        <FactoryPage
+          repoPath={repoPath}
+          savedPlanPath={savedPlanPath}
+          onPickDirectory={() => setPickingDirectory(true)}
+          onOpenInitialNode={() => setConfiguringFactoryTask(true)}
+          onViewPlan={path => setViewingMarkdownPath(path)}
+        />
+      ) : (
+        <main className="mx-auto max-w-6xl px-6 pb-28 pt-12 sm:px-10 sm:pt-20">
         <div className="mb-10 flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.18em] text-accent"><ScanLine size={14} /> Seu código. Todo o contexto.</div>
         <div className="grid gap-12 lg:grid-cols-[1fr_1.08fr] lg:gap-16">
           <section className="lg:pt-3">
@@ -111,8 +119,44 @@ export default function App() {
           <span className="flex items-center gap-2"><Layers3 size={14} /> Claude Code · Agente default · MCPs locais</span>
           <span className="flex items-center gap-2 font-mono">xterm.js <ChevronRight size={12} /> WebSocket <ChevronRight size={12} /> PTY real</span>
         </div>
-      </main>
-      {request && <TerminalModal request={request} onClose={closeModal} theme={theme} onToggleTheme={toggleTheme} />}
+        </main>
+      )}
+
+      <FloatingDock
+        activeView={view}
+        onSelectView={setView}
+        onOpenHistory={() => setViewingHistory(true)}
+        theme={theme}
+        onToggleTheme={toggleTheme}
+      />
+
+      {configuringFactoryTask && (
+        <FactoryTaskModal
+          repoPath={repoPath}
+          onPickDirectory={() => setPickingDirectory(true)}
+          onClose={() => setConfiguringFactoryTask(false)}
+          onStart={factoryRequest => {
+            setConfiguringFactoryTask(false);
+            setSession({ mode: 'factory', request: factoryRequest });
+          }}
+        />
+      )}
+      {session && (
+        <TerminalModal
+          session={session}
+          onClose={closeModal}
+          theme={theme}
+          onToggleTheme={toggleTheme}
+          onSavedReport={session.mode === 'factory' ? handleSavedReport : undefined}
+          onViewMarkdown={path => setViewingMarkdownPath(path)}
+        />
+      )}
+      {viewingMarkdownPath && (
+        <MarkdownViewerModal
+          filePath={viewingMarkdownPath}
+          onClose={() => setViewingMarkdownPath(null)}
+        />
+      )}
       {pickingDirectory && <DirectoryPicker initialPath={repoPath} onClose={() => setPickingDirectory(false)} onSelect={path => { setRepoPath(path); setError(''); setPickingDirectory(false); }} />}
       {viewingHistory && <HistoryModal initialPath={repoPath} onClose={() => setViewingHistory(false)} />}
     </div>

@@ -9,7 +9,8 @@ import {
   type ServerMessage,
 } from '@development-factory/shared';
 import { buildCodeReviewPrompt } from '../prompts/code-review.js';
-import { createReviewHistory } from '../history.js';
+import { buildFactoryPlanPrompt } from '../prompts/factory-plan.js';
+import { createFactoryHistory, createReviewHistory } from '../history.js';
 import { ReviewServiceError, type ReviewService } from '../review-service.js';
 
 interface ActiveSession {
@@ -385,6 +386,90 @@ export function handleTerminalConnection(ws: WebSocket, reviewService: ReviewSer
           executionId: started.execution.id,
           state: started.review.state,
         });
+        send({ type: 'status', state: 'running' });
+      } else if (msg.type === 'start_factory') {
+        if (!existsSync(msg.repoPath) || !statSync(msg.repoPath).isDirectory()) {
+          send({ type: 'error', message: 'O caminho do repositório não existe ou não é um diretório no WSL.' });
+          return;
+        }
+
+        await stopActiveSession('sessão encerrada pelo usuário ou conexão fechada', true);
+
+        let factoryHistory: ReturnType<typeof createFactoryHistory>;
+        try {
+          factoryHistory = createFactoryHistory(
+            msg,
+            state => {
+              send({
+                type: 'history',
+                reportPath: factoryHistory.reportPath,
+                sessionPath: factoryHistory.sessionPath,
+                state,
+              });
+            },
+            message => send({ type: 'error', message }),
+          );
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : 'Falha desconhecida';
+          send({ type: 'error', message: `Não foi possível preparar os arquivos do planejamento: ${detail}` });
+          return;
+        }
+
+        if (closed) {
+          factoryHistory.finish('conexão fechada antes de iniciar o processo PTY');
+          return;
+        }
+
+        history = factoryHistory;
+        send({
+          type: 'history',
+          reportPath: factoryHistory.reportPath,
+          sessionPath: factoryHistory.sessionPath,
+          state: 'pending',
+        });
+
+        let child: pty.IPty;
+        try {
+          child = pty.spawn(
+            'claude',
+            [buildFactoryPlanPrompt(msg.inputType, msg.value, factoryHistory.reportPath)],
+            {
+              name: 'xterm-256color',
+              cols: msg.cols,
+              rows: msg.rows,
+              cwd: msg.repoPath,
+              env: { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' },
+            },
+          );
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : 'Falha desconhecida';
+          history = undefined;
+          factoryHistory.finish(`falha ao iniciar processo PTY: ${detail}`);
+          send({
+            type: 'error',
+            message: `Não foi possível operar o terminal: ${detail}. Verifique o caminho e se claude está no PATH do servidor.`,
+          });
+          return;
+        }
+
+        ptyProcess = child;
+        subscriptions = [
+          child.onData(data => {
+            if (ptyProcess === child) {
+              factoryHistory.record(data);
+              send({ type: 'output', data });
+            }
+          }),
+          child.onExit(({ exitCode }) => {
+            if (ptyProcess !== child) {
+              return;
+            }
+            disposePty(false);
+            history = undefined;
+            factoryHistory.finish(`processo finalizado com código ${exitCode}`);
+            send({ type: 'status', state: 'exited', exitCode });
+          }),
+        ];
         send({ type: 'status', state: 'running' });
       } else if (!ptyProcess) {
         send({ type: 'error', message: 'Nenhuma sessão PTY ativa. Abra uma nova sessão.' });
