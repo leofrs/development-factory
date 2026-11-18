@@ -2,11 +2,16 @@ import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import {
   REVIEW_CONTRACT_VERSION,
+  ReviewArtifactSchema,
   ReviewEventSchema,
   ReviewExecutionSchema,
   ReviewSchema,
+  isFinalReviewState,
   transitionReview,
   type Review,
+  type ReviewArtifact,
+  type ReviewArtifactKind,
+  type ReviewError,
   type ReviewEvent,
   type ReviewExecution,
   type ReviewState,
@@ -93,6 +98,21 @@ interface EventRow {
   payload_json: string;
 }
 
+interface ArtifactRow {
+  id: string;
+  review_id: string;
+  execution_id: string;
+  contract_version: number;
+  kind: string;
+  format: string;
+  path: string;
+  version: number;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  error_json: string | null;
+}
+
 function parseJson(raw: string, contextLabel: string): unknown {
   try {
     return JSON.parse(raw);
@@ -171,6 +191,31 @@ function rowToEvent(row: EventRow): ReviewEvent {
     throw new ReviewStorageError(
       'STORAGE_CORRUPTED_DATA',
       `O registro do evento ${row.id} no banco local viola o contrato atual.`,
+    );
+  }
+  return parsed.data;
+}
+
+function rowToArtifact(row: ArtifactRow): ReviewArtifact {
+  const parsed = ReviewArtifactSchema.safeParse({
+    contractVersion: row.contract_version,
+    id: row.id,
+    reviewId: row.review_id,
+    executionId: row.execution_id,
+    kind: row.kind,
+    format: row.format,
+    path: row.path,
+    version: row.version,
+    status: row.status,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    error: row.error_json === null ? null : parseJson(row.error_json, `erro do artefato ${row.id}`),
+  });
+
+  if (!parsed.success) {
+    throw new ReviewStorageError(
+      'STORAGE_CORRUPTED_DATA',
+      `O registro do artefato ${row.id} no banco local viola o contrato atual.`,
     );
   }
   return parsed.data;
@@ -630,6 +675,156 @@ export class SqliteReviewRepository {
     return rows.map(rowToEvent);
   }
 
+  getNextArtifactVersion(reviewId: string, executionId: string, kind: ReviewArtifactKind): number {
+    this.ensureOpen();
+    const row = this.db.prepare(`
+      SELECT COALESCE(MAX(version), 0) AS maxVersion
+      FROM review_artifacts
+      WHERE review_id = ? AND execution_id = ? AND kind = ?
+    `).get(reviewId, executionId, kind) as { maxVersion: number };
+    return row.maxVersion + 1;
+  }
+
+  saveArtifact(artifact: ReviewArtifact, event?: ExecutionEventInput): ReviewArtifact {
+    return this.runInTransaction(() => {
+      const saved = this.upsertArtifactRow(artifact);
+      if (event) {
+        this.insertEventRow({
+          contractVersion: REVIEW_CONTRACT_VERSION,
+          id: randomUUID(),
+          reviewId: saved.reviewId,
+          executionId: saved.executionId,
+          type: event.type,
+          occurredAt: event.occurredAt ?? saved.updatedAt,
+          payload: event.payload ?? {
+            artifactId: saved.id,
+            kind: saved.kind,
+            path: saved.path,
+            version: saved.version,
+            status: saved.status,
+          },
+        });
+      }
+      return saved;
+    });
+  }
+
+  saveArtifacts(artifacts: readonly ReviewArtifact[], event?: ExecutionEventInput): ReviewArtifact[] {
+    return this.runInTransaction(() => {
+      const saved = artifacts.map(artifact => this.upsertArtifactRow(artifact));
+      if (event && saved.length > 0) {
+        const first = saved[0];
+        if (first) {
+          this.insertEventRow({
+            contractVersion: REVIEW_CONTRACT_VERSION,
+            id: randomUUID(),
+            reviewId: first.reviewId,
+            executionId: first.executionId,
+            type: event.type,
+            occurredAt: event.occurredAt ?? first.updatedAt,
+            payload: event.payload ?? {
+              artifacts: saved.map(item => ({
+                id: item.id,
+                kind: item.kind,
+                path: item.path,
+                version: item.version,
+                status: item.status,
+              })),
+            },
+          });
+        }
+      }
+      return saved;
+    });
+  }
+
+  saveArtifactsAndFailReview(
+    reviewId: string,
+    executionId: string,
+    artifacts: readonly ReviewArtifact[],
+    error: ReviewError,
+    at: string,
+    reason: string,
+  ): { review: Review; artifacts: ReviewArtifact[] } {
+    return this.runInTransaction(() => {
+      const current = this.getReviewById(reviewId);
+      if (!current) {
+        throw new ReviewStorageError('STORAGE_NOT_FOUND', `Review ${reviewId} não encontrado.`);
+      }
+
+      const savedArtifacts = artifacts.map(artifact => this.upsertArtifactRow(artifact));
+
+      let nextReview = current;
+      if (!isFinalReviewState(current.state)) {
+        nextReview = transitionReview(current, {
+          to: 'failed',
+          at,
+          reason,
+          error,
+        });
+
+        this.db.prepare(`
+          UPDATE reviews
+          SET state = ?, updated_at = ?, finished_at = ?, current_execution_id = ?,
+              transitions_json = ?, result_json = ?, error_json = ?
+          WHERE id = ?
+        `).run(
+          nextReview.state,
+          nextReview.updatedAt,
+          nextReview.finishedAt,
+          nextReview.currentExecutionId,
+          JSON.stringify(nextReview.transitions),
+          nextReview.result === null ? null : JSON.stringify(nextReview.result),
+          nextReview.error === null ? null : JSON.stringify(nextReview.error),
+          nextReview.id,
+        );
+      }
+
+      this.insertEventRow({
+        contractVersion: REVIEW_CONTRACT_VERSION,
+        id: randomUUID(),
+        reviewId,
+        executionId,
+        type: 'review_artifact_creation_failed',
+        occurredAt: at,
+        payload: {
+          reason,
+          error,
+          artifacts: savedArtifacts.map(item => ({
+            id: item.id,
+            kind: item.kind,
+            path: item.path,
+            version: item.version,
+            status: item.status,
+          })),
+        },
+      });
+
+      return { review: nextReview, artifacts: savedArtifacts };
+    });
+  }
+
+  listArtifactsByReviewId(reviewId: string, executionId?: string): ReviewArtifact[] {
+    this.ensureOpen();
+    const rows = (
+      executionId !== undefined
+        ? this.db.prepare(`
+            SELECT id, review_id, execution_id, contract_version, kind, format, path, version, status, created_at, updated_at, error_json
+            FROM review_artifacts
+            WHERE review_id = ? AND execution_id = ?
+            ORDER BY created_at ASC, version ASC, id ASC
+          `).all(reviewId, executionId)
+        : this.db.prepare(`
+            SELECT id, review_id, execution_id, contract_version, kind, format, path, version, status, created_at, updated_at, error_json
+            FROM review_artifacts
+            WHERE review_id = ?
+            ORDER BY created_at ASC, version ASC, id ASC
+          `).all(reviewId)
+    ) as unknown as ArtifactRow[];
+
+    return rows.map(rowToArtifact);
+  }
+
   getAppliedMigrations(): AppliedMigration[] {
     this.ensureOpen();
     return this.db
@@ -718,5 +913,70 @@ export class SqliteReviewRepository {
     }
 
     return event;
+  }
+
+  private upsertArtifactRow(artifactInput: ReviewArtifact): ReviewArtifact {
+    const parsed = ReviewArtifactSchema.safeParse(artifactInput);
+    if (!parsed.success) {
+      throw new ReviewStorageError(
+        'STORAGE_INVALID_INPUT',
+        `Os dados do artefato são inválidos: ${parsed.error.issues.map(issue => issue.message).join('; ')}`,
+      );
+    }
+    const artifact = parsed.data;
+
+    const executionRow = this.db
+      .prepare('SELECT review_id FROM review_executions WHERE id = ?')
+      .get(artifact.executionId) as { review_id: string } | undefined;
+
+    if (!executionRow) {
+      throw new ReviewStorageError(
+        'STORAGE_NOT_FOUND',
+        `Execução ${artifact.executionId} não encontrada para associar o artefato.`,
+      );
+    }
+    if (executionRow.review_id !== artifact.reviewId) {
+      throw new ReviewStorageError(
+        'STORAGE_CONFLICT',
+        `A execução ${artifact.executionId} não pertence ao review ${artifact.reviewId}.`,
+      );
+    }
+
+    try {
+      this.db.prepare(`
+        INSERT INTO review_artifacts (
+          id, review_id, execution_id, contract_version, kind, format, path, version,
+          status, created_at, updated_at, error_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          status = excluded.status,
+          updated_at = excluded.updated_at,
+          error_json = excluded.error_json
+      `).run(
+        artifact.id,
+        artifact.reviewId,
+        artifact.executionId,
+        artifact.contractVersion,
+        artifact.kind,
+        artifact.format,
+        artifact.path,
+        artifact.version,
+        artifact.status,
+        artifact.createdAt,
+        artifact.updatedAt,
+        artifact.error === null ? null : JSON.stringify(artifact.error),
+      );
+    } catch (error) {
+      if (isConstraintError(error)) {
+        throw new ReviewStorageError(
+          'STORAGE_CONFLICT',
+          `Já existe um artefato ${artifact.kind} v${artifact.version} registrado para a execução ${artifact.executionId}.`,
+          { cause: error },
+        );
+      }
+      throw error;
+    }
+
+    return artifact;
   }
 }

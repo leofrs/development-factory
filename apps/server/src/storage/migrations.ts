@@ -83,6 +83,32 @@ export const REVIEW_MIGRATIONS: readonly Migration[] = [
       `);
     },
   },
+  {
+    version: 3,
+    name: 'add_review_artifacts',
+    up(db) {
+      db.exec(`
+        CREATE TABLE review_artifacts (
+          id TEXT PRIMARY KEY,
+          review_id TEXT NOT NULL REFERENCES reviews(id) ON DELETE RESTRICT,
+          execution_id TEXT NOT NULL REFERENCES review_executions(id) ON DELETE RESTRICT,
+          contract_version INTEGER NOT NULL,
+          kind TEXT NOT NULL,
+          format TEXT NOT NULL,
+          path TEXT NOT NULL,
+          version INTEGER NOT NULL,
+          status TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          error_json TEXT,
+          UNIQUE (review_id, execution_id, kind, version)
+        ) STRICT;
+
+        CREATE INDEX idx_review_artifacts_review_exec ON review_artifacts (review_id, execution_id, kind, version DESC);
+        CREATE INDEX idx_review_artifacts_path ON review_artifacts (path);
+      `);
+    },
+  },
 ];
 
 function validateMigrations(migrations: readonly Migration[]): void {

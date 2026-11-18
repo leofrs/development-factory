@@ -4,18 +4,32 @@ import {
   CreateReviewRequestSchema,
   IdempotencyKeySchema,
   ListReviewsFilterSchema,
+  PrepareReviewArtifactsRequestSchema,
   REVIEW_CONTRACT_VERSION,
+  RegisterReviewArtifactRequestSchema,
+  ReviewArtifactSchema,
   ReviewDomainError,
+  ReviewErrorSchema,
   ReviewExecutionSchema,
   ReviewSchema,
   TransitionReviewRequestSchema,
+  isFinalReviewState,
   type CreateReviewResponse,
   type CreateReviewTargetInput,
+  type PrepareReviewArtifactsResponse,
+  type RegisterReviewArtifactResponse,
   type Review,
   type ReviewApiErrorCode,
+  type ReviewArtifact,
+  type ReviewArtifactListResponse,
   type ReviewDetails,
   type ReviewListResponse,
 } from '@development-factory/shared';
+import {
+  ArtifactPreparationError,
+  defaultReviewArtifactFileWriter,
+  type ReviewArtifactFileWriter,
+} from './artifacts.js';
 import {
   ReviewStorageError,
   type SaveTransitionOptions,
@@ -27,6 +41,7 @@ const ReviewIdSchema = z.string().uuid('Identificador de review inválido.');
 export interface ReviewServiceOptions {
   readonly now?: () => string;
   readonly generateId?: () => string;
+  readonly artifactWriter?: ReviewArtifactFileWriter;
 }
 
 export interface CreateReviewCommandOptions {
@@ -104,6 +119,7 @@ function mapUnexpectedError(error: unknown): ReviewServiceError {
 export class ReviewService {
   private readonly now: () => string;
   private readonly generateId: () => string;
+  private readonly artifactWriter: ReviewArtifactFileWriter;
 
   constructor(
     private readonly repository: SqliteReviewRepository,
@@ -111,6 +127,7 @@ export class ReviewService {
   ) {
     this.now = options.now ?? (() => new Date().toISOString());
     this.generateId = options.generateId ?? randomUUID;
+    this.artifactWriter = options.artifactWriter ?? defaultReviewArtifactFileWriter;
   }
 
   async createReview(
@@ -234,12 +251,14 @@ export class ReviewService {
 
       const executions = this.repository.listExecutionsByReviewId(review.id);
       const events = this.repository.listEventsByReviewId(review.id);
+      const artifacts = this.repository.listArtifactsByReviewId(review.id);
 
       return {
         contractVersion: REVIEW_CONTRACT_VERSION,
         review,
         executions,
         events,
+        artifacts,
       };
     } catch (error) {
       throw mapUnexpectedError(error);
@@ -308,6 +327,277 @@ export class ReviewService {
         this.repository.saveReviewTransition(parsedId.data, command, saveOptions),
       );
     } catch (error) {
+      throw mapUnexpectedError(error);
+    }
+  }
+
+  listArtifacts(reviewIdInput: string, executionIdInput?: string): ReviewArtifactListResponse {
+    const parsedReviewId = ReviewIdSchema.safeParse(reviewIdInput);
+    if (!parsedReviewId.success) {
+      throw new ReviewServiceError(
+        'REVIEW_INVALID_INPUT',
+        'O identificador do review deve ser um UUID válido.',
+        400,
+        formatZodIssues(parsedReviewId.error),
+      );
+    }
+
+    let executionId: string | undefined;
+    if (executionIdInput !== undefined) {
+      const parsedExecId = ReviewIdSchema.safeParse(executionIdInput);
+      if (!parsedExecId.success) {
+        throw new ReviewServiceError(
+          'REVIEW_INVALID_INPUT',
+          'O identificador da execução deve ser um UUID válido.',
+          400,
+          formatZodIssues(parsedExecId.error),
+        );
+      }
+      executionId = parsedExecId.data;
+    }
+
+    try {
+      const review = this.repository.getReviewById(parsedReviewId.data);
+      if (!review) {
+        throw new ReviewServiceError(
+          'REVIEW_NOT_FOUND',
+          `Review ${parsedReviewId.data} não encontrado.`,
+          404,
+        );
+      }
+      const artifacts = this.repository.listArtifactsByReviewId(review.id, executionId);
+      return {
+        contractVersion: REVIEW_CONTRACT_VERSION,
+        artifacts,
+      };
+    } catch (error) {
+      throw mapUnexpectedError(error);
+    }
+  }
+
+  async registerArtifact(
+    reviewIdInput: string,
+    input: unknown,
+  ): Promise<RegisterReviewArtifactResponse> {
+    const parsedId = ReviewIdSchema.safeParse(reviewIdInput);
+    if (!parsedId.success) {
+      throw new ReviewServiceError(
+        'REVIEW_INVALID_INPUT',
+        'O identificador do review deve ser um UUID válido.',
+        400,
+        formatZodIssues(parsedId.error),
+      );
+    }
+
+    const parsedInput = RegisterReviewArtifactRequestSchema.safeParse(input);
+    if (!parsedInput.success) {
+      throw new ReviewServiceError(
+        'REVIEW_INVALID_INPUT',
+        'Os dados para registrar o artefato são inválidos.',
+        400,
+        formatZodIssues(parsedInput.error),
+      );
+    }
+
+    const at = parsedInput.data.at ?? this.now();
+    const format = parsedInput.data.format ??
+      (parsedInput.data.kind === 'structured_result' ? 'json' : 'markdown');
+
+    try {
+      const artifact = await this.repository.withWriteLock(() => {
+        const review = this.repository.getReviewById(parsedId.data);
+        if (!review) {
+          throw new ReviewServiceError(
+            'REVIEW_NOT_FOUND',
+            `Review ${parsedId.data} não encontrado.`,
+            404,
+          );
+        }
+
+        const version = parsedInput.data.version ??
+          this.repository.getNextArtifactVersion(review.id, parsedInput.data.executionId, parsedInput.data.kind);
+
+        const candidate = ReviewArtifactSchema.safeParse({
+          contractVersion: REVIEW_CONTRACT_VERSION,
+          id: this.generateId(),
+          reviewId: review.id,
+          executionId: parsedInput.data.executionId,
+          kind: parsedInput.data.kind,
+          format,
+          path: parsedInput.data.path,
+          version,
+          status: parsedInput.data.status,
+          createdAt: at,
+          updatedAt: at,
+          error: parsedInput.data.error ?? null,
+        });
+
+        if (!candidate.success) {
+          throw new ReviewServiceError(
+            'REVIEW_INVALID_CONTRACT',
+            'Os dados do artefato violam o contrato do review.',
+            400,
+            formatZodIssues(candidate.error),
+          );
+        }
+
+        return this.repository.saveArtifact(candidate.data, {
+          type: 'review_artifact_registered',
+          occurredAt: at,
+        });
+      });
+
+      return {
+        contractVersion: REVIEW_CONTRACT_VERSION,
+        artifact,
+      };
+    } catch (error) {
+      throw mapUnexpectedError(error);
+    }
+  }
+
+  async prepareExecutionArtifacts(
+    reviewIdInput: string,
+    input: unknown = {},
+  ): Promise<PrepareReviewArtifactsResponse> {
+    const parsedId = ReviewIdSchema.safeParse(reviewIdInput);
+    if (!parsedId.success) {
+      throw new ReviewServiceError(
+        'REVIEW_INVALID_INPUT',
+        'O identificador do review deve ser um UUID válido.',
+        400,
+        formatZodIssues(parsedId.error),
+      );
+    }
+
+    const parsedInput = PrepareReviewArtifactsRequestSchema.safeParse(input);
+    if (!parsedInput.success) {
+      throw new ReviewServiceError(
+        'REVIEW_INVALID_INPUT',
+        'Os parâmetros para preparar os artefatos são inválidos.',
+        400,
+        formatZodIssues(parsedInput.error),
+      );
+    }
+
+    const review = this.repository.getReviewById(parsedId.data);
+    if (!review) {
+      throw new ReviewServiceError(
+        'REVIEW_NOT_FOUND',
+        `Review ${parsedId.data} não encontrado.`,
+        404,
+      );
+    }
+
+    if (isFinalReviewState(review.state)) {
+      throw new ReviewServiceError(
+        'REVIEW_INVALID_TRANSITION',
+        'Não é possível preparar artefatos para um review já finalizado.',
+        409,
+      );
+    }
+
+    const executionId = parsedInput.data.executionId ?? review.currentExecutionId;
+    if (!executionId) {
+      throw new ReviewServiceError(
+        'REVIEW_CONFLICT',
+        'O review não possui execução ativa para associar artefatos.',
+        409,
+      );
+    }
+
+    const execution = this.repository.getExecutionById(executionId);
+    if (!execution || execution.reviewId !== review.id) {
+      throw new ReviewServiceError(
+        'REVIEW_NOT_FOUND',
+        `Execução ${executionId} não encontrada para o review ${review.id}.`,
+        404,
+      );
+    }
+
+    const createdAt = this.now();
+
+    try {
+      const targets = this.artifactWriter.prepareExecutionFiles(review, execution, {
+        includeStructuredResult: parsedInput.data.includeStructuredResult,
+        createdAt,
+      });
+
+      const artifacts = await this.repository.withWriteLock(() => {
+        const items: ReviewArtifact[] = targets.map(target => ReviewArtifactSchema.parse({
+          contractVersion: REVIEW_CONTRACT_VERSION,
+          id: this.generateId(),
+          reviewId: review.id,
+          executionId: execution.id,
+          kind: target.kind,
+          format: target.format,
+          path: target.path,
+          version: this.repository.getNextArtifactVersion(review.id, execution.id, target.kind),
+          status: 'pending',
+          createdAt,
+          updatedAt: createdAt,
+          error: null,
+        }));
+
+        return this.repository.saveArtifacts(items, {
+          type: 'review_artifacts_prepared',
+          occurredAt: createdAt,
+        });
+      });
+
+      return {
+        contractVersion: REVIEW_CONTRACT_VERSION,
+        artifacts,
+      };
+    } catch (error) {
+      if (error instanceof ArtifactPreparationError) {
+        const failedAt = this.now();
+        const reviewError = ReviewErrorSchema.parse({
+          contractVersion: REVIEW_CONTRACT_VERSION,
+          code: 'ARTIFACT_CREATION_FAILED',
+          message: error.message,
+          occurredAt: failedAt,
+          retryable: false,
+        });
+
+        const failedArtifacts: ReviewArtifact[] = error.targets.map(target => {
+          const wasCreated = error.createdKinds.has(target.kind);
+          return ReviewArtifactSchema.parse({
+            contractVersion: REVIEW_CONTRACT_VERSION,
+            id: this.generateId(),
+            reviewId: review.id,
+            executionId: execution.id,
+            kind: target.kind,
+            format: target.format,
+            path: target.path,
+            version: this.repository.getNextArtifactVersion(review.id, execution.id, target.kind),
+            status: wasCreated ? 'incomplete' : 'failed',
+            createdAt,
+            updatedAt: failedAt,
+            error: reviewError,
+          });
+        });
+
+        await this.repository.withWriteLock(() =>
+          this.repository.saveArtifactsAndFailReview(
+            review.id,
+            execution.id,
+            failedArtifacts,
+            reviewError,
+            failedAt,
+            error.message,
+          ),
+        );
+
+        throw new ReviewServiceError(
+          'REVIEW_ARTIFACT_FAILED',
+          error.message,
+          500,
+          undefined,
+          { cause: error },
+        );
+      }
+
       throw mapUnexpectedError(error);
     }
   }

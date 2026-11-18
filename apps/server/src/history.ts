@@ -6,7 +6,17 @@ import type { ReviewRequest } from '@development-factory/shared';
 
 type HistoryState = 'pending' | 'saved' | 'incomplete';
 
-export function createReviewHistory(request: ReviewRequest, onChange: (state: HistoryState) => void, onError: (message: string) => void) {
+export interface ReviewHistoryOptions {
+  readonly reviewId?: string;
+  readonly executionId?: string;
+}
+
+export function createReviewHistory(
+  request: ReviewRequest,
+  onChange: (state: HistoryState) => void,
+  onError: (message: string) => void,
+  options: ReviewHistoryOptions = {},
+) {
   const directory = join(realpathSync(request.repoPath), '.code-reviews');
   if (!existsSync(directory)) mkdirSync(directory, { mode: 0o700 });
   if (lstatSync(directory).isSymbolicLink() || !lstatSync(directory).isDirectory()) {
@@ -18,7 +28,11 @@ export function createReviewHistory(request: ReviewRequest, onChange: (state: Hi
   const reportPath = join(directory, `${basename}.md`);
   const sessionPath = join(directory, `${basename}.session.md`);
   const target = `${request.targetType === 'pr' ? 'PR #' : 'Branch '}${request.identifier}`;
-  const metadata = `- Alvo: ${JSON.stringify(target)}\n- Repositório: ${JSON.stringify(request.repoPath)}\n- Início: ${startedAt}\n`;
+  const reviewMetadata = [
+    options.reviewId ? `- Review ID: ${options.reviewId}\n` : '',
+    options.executionId ? `- Execução ID: ${options.executionId}\n` : '',
+  ].join('');
+  const metadata = `${reviewMetadata}- Alvo: ${JSON.stringify(target)}\n- Repositório: ${JSON.stringify(request.repoPath)}\n- Início: ${startedAt}\n`;
   const placeholder = `# Code review\n\n${metadata}\n> Review em andamento. O parecer final será salvo aqui pelo Claude Code.\n`;
   writeFileSync(reportPath, placeholder, { flag: 'wx', mode: 0o600 });
   let descriptor = -1;

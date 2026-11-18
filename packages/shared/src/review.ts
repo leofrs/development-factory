@@ -289,11 +289,107 @@ export const CreateReviewResponseSchema = z.strictObject({
 });
 export type CreateReviewResponse = z.infer<typeof CreateReviewResponseSchema>;
 
+export const ReviewArtifactKindSchema = z.enum(['report', 'structured_result', 'session_log']);
+export type ReviewArtifactKind = z.infer<typeof ReviewArtifactKindSchema>;
+
+export const ReviewArtifactFormatSchema = z.enum(['markdown', 'json']);
+export type ReviewArtifactFormat = z.infer<typeof ReviewArtifactFormatSchema>;
+
+export const ReviewArtifactStatusSchema = z.enum(['pending', 'ready', 'incomplete', 'failed']);
+export type ReviewArtifactStatus = z.infer<typeof ReviewArtifactStatusSchema>;
+
+const artifactPathSchema = text
+  .max(4096)
+  .refine(value => value.startsWith('/') && !value.includes('\0'), 'Use um caminho absoluto no WSL');
+
+export const ReviewArtifactSchema = z.strictObject({
+  contractVersion: version,
+  id,
+  reviewId: id,
+  executionId: id,
+  kind: ReviewArtifactKindSchema,
+  format: ReviewArtifactFormatSchema,
+  path: artifactPathSchema,
+  version: z.number().int().positive(),
+  status: ReviewArtifactStatusSchema,
+  createdAt: timestamp,
+  updatedAt: timestamp,
+  error: ReviewErrorSchema.nullable(),
+}).superRefine((artifact, context) => {
+  if (time(artifact.updatedAt) < time(artifact.createdAt)) {
+    context.addIssue({
+      code: 'custom',
+      path: ['updatedAt'],
+      message: 'A atualização do artefato não pode anteceder sua criação',
+    });
+  }
+  const expectedFormat: ReviewArtifactFormat = artifact.kind === 'structured_result' ? 'json' : 'markdown';
+  if (artifact.format !== expectedFormat) {
+    context.addIssue({
+      code: 'custom',
+      path: ['format'],
+      message: `O artefato ${artifact.kind} deve usar o formato ${expectedFormat}`,
+    });
+  }
+  if ((artifact.status === 'failed' || artifact.status === 'incomplete') && artifact.error === null) {
+    context.addIssue({
+      code: 'custom',
+      path: ['error'],
+      message: 'Informe o motivo da falha ou artefato incompleto',
+    });
+  }
+  if ((artifact.status === 'pending' || artifact.status === 'ready') && artifact.error !== null) {
+    context.addIssue({
+      code: 'custom',
+      path: ['error'],
+      message: 'Artefatos pendentes ou prontos não devem possuir erro associado',
+    });
+  }
+});
+export type ReviewArtifact = z.infer<typeof ReviewArtifactSchema>;
+
+export const RegisterReviewArtifactRequestSchema = z.strictObject({
+  executionId: id,
+  kind: ReviewArtifactKindSchema,
+  format: ReviewArtifactFormatSchema.optional(),
+  path: artifactPathSchema,
+  version: z.number().int().positive().optional(),
+  status: ReviewArtifactStatusSchema.default('pending'),
+  error: ReviewErrorSchema.nullable().optional(),
+  at: timestamp.optional(),
+});
+export type RegisterReviewArtifactRequest = z.infer<typeof RegisterReviewArtifactRequestSchema>;
+
+export const RegisterReviewArtifactResponseSchema = z.strictObject({
+  contractVersion: version,
+  artifact: ReviewArtifactSchema,
+});
+export type RegisterReviewArtifactResponse = z.infer<typeof RegisterReviewArtifactResponseSchema>;
+
+export const PrepareReviewArtifactsRequestSchema = z.strictObject({
+  executionId: id.optional(),
+  includeStructuredResult: z.boolean().optional(),
+});
+export type PrepareReviewArtifactsRequest = z.infer<typeof PrepareReviewArtifactsRequestSchema>;
+
+export const PrepareReviewArtifactsResponseSchema = z.strictObject({
+  contractVersion: version,
+  artifacts: z.array(ReviewArtifactSchema),
+});
+export type PrepareReviewArtifactsResponse = z.infer<typeof PrepareReviewArtifactsResponseSchema>;
+
+export const ReviewArtifactListResponseSchema = z.strictObject({
+  contractVersion: version,
+  artifacts: z.array(ReviewArtifactSchema),
+});
+export type ReviewArtifactListResponse = z.infer<typeof ReviewArtifactListResponseSchema>;
+
 export const ReviewDetailsSchema = z.strictObject({
   contractVersion: version,
   review: ReviewSchema,
   executions: z.array(ReviewExecutionSchema),
   events: z.array(ReviewEventSchema),
+  artifacts: z.array(ReviewArtifactSchema),
 });
 export type ReviewDetails = z.infer<typeof ReviewDetailsSchema>;
 
@@ -337,6 +433,7 @@ export const ReviewApiErrorCodeSchema = z.enum([
   'REVIEW_NOT_FOUND',
   'REVIEW_IDEMPOTENCY_CONFLICT',
   'REVIEW_CONFLICT',
+  'REVIEW_ARTIFACT_FAILED',
   'REVIEW_INTERNAL_ERROR',
 ]);
 export type ReviewApiErrorCode = z.infer<typeof ReviewApiErrorCodeSchema>;

@@ -163,6 +163,32 @@ export function createReviewServer(options?: ReviewRepositoryOptions) {
           return;
         }
 
+        const artifactsMatch = /^\/api\/reviews\/([^/]+)\/artifacts$/.exec(url.pathname);
+        if (artifactsMatch?.[1] !== undefined) {
+          const reviewId = decodeURIComponent(artifactsMatch[1]);
+          if (req.method === 'GET') {
+            const executionId = url.searchParams.get('executionId') ?? undefined;
+            const result = reviewService.listArtifacts(reviewId, executionId);
+            res.writeHead(200).end(JSON.stringify(result));
+            return;
+          }
+          if (req.method === 'POST') {
+            const body = await readJsonBody(req);
+            const result = await reviewService.registerArtifact(reviewId, body);
+            res.writeHead(201).end(JSON.stringify(result));
+            return;
+          }
+        }
+
+        const prepareArtifactsMatch = /^\/api\/reviews\/([^/]+)\/artifacts\/prepare$/.exec(url.pathname);
+        if (req.method === 'POST' && prepareArtifactsMatch?.[1] !== undefined) {
+          const reviewId = decodeURIComponent(prepareArtifactsMatch[1]);
+          const body = await readJsonBody(req);
+          const result = await reviewService.prepareExecutionArtifacts(reviewId, body);
+          res.writeHead(201).end(JSON.stringify(result));
+          return;
+        }
+
         sendApiError(res, 404, { code: 'REVIEW_NOT_FOUND', message: 'Rota de review não encontrada.' });
       } catch (error) {
         if (error instanceof ReviewServiceError) {
