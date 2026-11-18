@@ -23,22 +23,41 @@ do problema proposto ou apenas mascara o sintoma. Compare a entrega aos critéri
 Etapa 3 — Varredura Completa de Entorno ("por onde toda a água do rio escorre")
 Não se limite aos arquivos alterados no diff. Rastreie todo o fluxo de ponta a ponta:
 callers, consumidores, endpoints/componentes irmãos, validações paralelas, tipos compartilhados,
-hooks, filas/jobs e migrations. Descubra se o problema central foi atacado em um ponto mas o
-entorno continuou quebrado, inconsistente ou desprotegido. Fundamente achados em caminhos reais
-e descreva quais fluxos foram examinados e quais permaneceram sem verificação.
+hooks, filas/jobs e migrations. Verifique também compatibilidade retroativa e contratos de dados
+(payloads de API/WebSocket, schemas, formatos em disco, estado persistido e migrations) para
+garantir que dados ou clientes existentes não quebrem. Descubra se o problema central foi atacado
+em um ponto mas o entorno continuou quebrado, inconsistente ou desprotegido. Fundamente achados
+em caminhos reais e descreva quais fluxos foram examinados e quais permaneceram sem verificação.
 
-Etapa 4 — Edge Cases e Resiliência
-Avalie valores nulos/vazios, concorrência/race conditions, permissões, estados parciais,
-fallbacks e tratamento de erro. Examine os testes existentes e execute verificações pertinentes
-quando seguras. Diferencie evidência estática, testes executados e hipóteses.
+Etapa 4 — Edge Cases, Resiliência, Segurança e Padrões do Projeto
+Avalie valores nulos/vazios, concorrência/race conditions, idempotência (retry, duplo clique,
+reconexão), estados parciais, ciclo de vida e limpeza de recursos (listeners, timers, processos
+filhos, conexões e locks em erro ou cancelamento). Verifique tratamento de erro e observabilidade
+(sem catch vazio ou fallback que mascare falhas reais; diagnóstico claro). Avalie segurança nas
+fronteiras de entrada/saída (travessia de diretórios/symlinks, injeções, validação de
+origem/permissões e exposição de segredos ou caminhos internos em logs e respostas).
+Consulte as documentações e configurações de padrão do repositório (como README.md, AGENTS.md,
+CLAUDE.md, CONTRIBUTING.md, docs/ADRs, tsconfig, ESLint/Prettier ou equivalentes) e verifique se
+o código alterado segue os padrões de código, tipagem, arquitetura e qualidade documentados.
+Examine a qualidade real dos testes (se testam comportamento real e cenários de erro/regressão,
+sem mocks excessivos, asserções frouxas, skip ou enfraquecimento de testes existentes) e execute
+verificações pertinentes quando seguras (typecheck, testes, lint, build).
+Diferencie claramente evidência estática, testes executados e hipóteses.
 
 Etapa 5 — Feedback Final Estruturado
 Entregue em português:
 1. Veredito: APROVADO | AJUSTES NECESSÁRIOS | INVESTIGAÇÃO ADICIONAL.
 2. Resumo da tarefa vs. entrega e critérios de aceite atendidos ou pendentes.
 3. Análise do problema central e da causa raiz.
-4. Lista de problemas de entorno e edge cases por severidade: Crítico, Alto, Médio, Baixo.
-   Para cada problema, informe arquivo e linha, cenário de reprodução, impacto e evidência.
-5. Recomendações acionáveis, testes realizados e limitações da investigação.
+4. Conformidade com padrões e documentações do projeto: quais documentos/regras foram
+   consultados, o que está aderente e eventuais desvios (citando documento/regra, arquivo e linha).
+5. Achados por severidade, separando explicitamente:
+   - Bloqueantes para merge (Crítico, Alto)
+   - Não bloqueantes / Melhorias (Médio, Baixo)
+   Inclua problemas de entorno, contratos/compatibilidade, edge cases, segurança, ciclo de vida,
+   qualidade de testes e não conformidades. Para cada item, informe arquivo e linha, cenário de
+   reprodução, impacto e evidência.
+6. Recomendações acionáveis, verificações/testes efetivamente executados vs. leitura estática
+   e limitações da investigação.
 Não crie problemas sem evidência e não aprove conclusivamente se faltar informação essencial.`;
 }
