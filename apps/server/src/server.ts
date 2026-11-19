@@ -1,11 +1,15 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { REVIEW_CONTRACT_VERSION, type ReviewApiErrorResponse } from '@development-factory/shared';
+import {
+  BackgroundSessionSummarySchema,
+  REVIEW_CONTRACT_VERSION,
+  type ReviewApiErrorResponse,
+} from '@development-factory/shared';
 import { handleTerminalConnection } from './ws/terminal-handler.js';
 import { listDirectories } from './directories.js';
 import { listHistory, readHistoryFile } from './history-reader.js';
 import { ReviewService, ReviewServiceError } from './review-service.js';
-import { SessionManager } from './session-manager.js';
+import { SessionManager, SessionManagerError } from './session-manager.js';
 import { SqliteReviewRepository, type ReviewRepositoryOptions } from './storage/index.js';
 
 const allowedOrigins = new Set(['http://localhost:5173', 'http://127.0.0.1:5173']);
@@ -21,6 +25,89 @@ function sendApiError(
     error,
   };
   res.writeHead(statusCode).end(JSON.stringify(payload));
+}
+
+function sendSessionError(
+  res: ServerResponse,
+  statusCode: number,
+  code: string,
+  message: string,
+): void {
+  res.writeHead(statusCode).end(JSON.stringify({ error: { code, message } }));
+}
+
+function decodeRouteParam(raw: string): string | null {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return null;
+  }
+}
+
+async function handleSessionApiRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+  sessionManager: SessionManager,
+): Promise<void> {
+  if (!applyCorsHeaders(req, res)) {
+    sendSessionError(res, 403, 'ORIGIN_FORBIDDEN', 'Origem não permitida.');
+    return;
+  }
+
+  try {
+    if (req.method === 'GET' && url.pathname === '/api/sessions') {
+      const sessions = BackgroundSessionSummarySchema.array().parse(sessionManager.listSessions());
+      res.writeHead(200).end(JSON.stringify({ sessions }));
+      return;
+    }
+
+    const sessionIdMatch = /^\/api\/sessions\/([^/]+)$/.exec(url.pathname);
+    if (req.method === 'GET' && sessionIdMatch?.[1] !== undefined) {
+      const sessionId = decodeRouteParam(sessionIdMatch[1]);
+      if (sessionId === null) {
+        sendSessionError(res, 400, 'SESSION_INVALID_INPUT', 'Identificador de sessão inválido.');
+        return;
+      }
+
+      const summary = sessionManager.getSessionSummary(sessionId);
+      if (!summary) {
+        sendSessionError(res, 404, 'SESSION_NOT_FOUND', `Sessão ${sessionId} não encontrada.`);
+        return;
+      }
+
+      const session = BackgroundSessionSummarySchema.parse(summary);
+      res.writeHead(200).end(JSON.stringify({ session }));
+      return;
+    }
+
+    const stopMatch = /^\/api\/sessions\/([^/]+)\/stop$/.exec(url.pathname);
+    if (req.method === 'POST' && stopMatch?.[1] !== undefined) {
+      const sessionId = decodeRouteParam(stopMatch[1]);
+      if (sessionId === null) {
+        sendSessionError(res, 400, 'SESSION_INVALID_INPUT', 'Identificador de sessão inválido.');
+        return;
+      }
+
+      const summary = await sessionManager.stopSession(sessionId);
+      const session = BackgroundSessionSummarySchema.parse(summary);
+      res.writeHead(200).end(JSON.stringify({ session }));
+      return;
+    }
+
+    sendSessionError(res, 404, 'SESSION_NOT_FOUND', 'Rota de sessão não encontrada.');
+  } catch (error) {
+    if (error instanceof SessionManagerError) {
+      sendSessionError(res, error.statusCode, error.code, error.message);
+      return;
+    }
+    sendSessionError(
+      res,
+      500,
+      'SESSION_INTERNAL_ERROR',
+      'Erro interno inesperado ao processar a requisição de sessão.',
+    );
+  }
 }
 
 function applyCorsHeaders(req: IncomingMessage, res: ServerResponse): string | null {
@@ -206,6 +293,11 @@ export function createReviewServer(options?: ReviewRepositoryOptions) {
           message: 'Erro interno inesperado ao processar a requisição de review.',
         });
       }
+      return;
+    }
+
+    if (url.pathname === '/api/sessions' || url.pathname.startsWith('/api/sessions/')) {
+      await handleSessionApiRequest(req, res, url, sessionManager);
       return;
     }
 
