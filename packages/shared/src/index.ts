@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { ReviewReportDirectoryPathSchema, ReviewStateSchema } from './review.js';
 
 export * from './review.js';
+export * from './factory.js';
 
 export const TargetTypeSchema = z.enum(['pr', 'branch']);
 export type TargetType = z.infer<typeof TargetTypeSchema>;
