@@ -112,7 +112,10 @@ test('HTTP, origem, protocolo e ciclo completo com WebSocket e PTY reais', { tim
   assert.equal(info.color, 'truecolor');
   assert.equal(info.args.length, 1);
   assert(info.args[0]?.includes(start.identifier));
-  assert(info.args[0]?.includes('Etapa 5'));
+  assert(info.args[0]?.includes('# FORMATO OBRIGATÓRIO DO OUTPUT'));
+  assert(info.args[0]?.includes('Requisitos no Jira (MCP)'));
+  assert(info.args[0]?.includes('Máximo de 555 caracteres'));
+  assert(info.args[0]?.includes(initialHistory.reportPath));
   assert.equal(existsSync(join(directory, 'SHOULD_NOT_EXIST')), false);
   send({ type: 'input', data: 'olá PTY' });
   await until(() => output.includes('INPUT:olá PTY') ? true : undefined, 'entrada interativa');
