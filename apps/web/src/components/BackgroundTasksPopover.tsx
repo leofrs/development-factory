@@ -8,10 +8,11 @@ import {
   Terminal,
   X,
 } from 'lucide-react';
-import type {
-  BackgroundSessionStatus,
-  BackgroundSessionSummary,
-} from '@development-factory/shared';
+import type { BackgroundSessionSummary } from '@development-factory/shared';
+import {
+  getSessionStatusPresentation,
+  isSessionActivelyRunning,
+} from '../utils/session-status';
 
 interface BackgroundTasksPopoverProps {
   id: string;
@@ -24,32 +25,6 @@ interface BackgroundTasksPopoverProps {
   onStopSession: (sessionId: string) => Promise<BackgroundSessionSummary>;
   onClose: () => void;
 }
-
-const statusMeta: Record<
-  BackgroundSessionStatus,
-  { label: string; dotClass: string; textClass: string }
-> = {
-  running: {
-    label: 'Em execução',
-    dotClass: 'bg-accent animate-pulse',
-    textClass: 'text-accent',
-  },
-  exited: {
-    label: 'Encerrada',
-    dotClass: 'bg-slate-400',
-    textClass: 'text-muted',
-  },
-  failed: {
-    label: 'Falhou',
-    dotClass: 'bg-danger',
-    textClass: 'text-danger',
-  },
-  cancelled: {
-    label: 'Cancelada',
-    dotClass: 'bg-warning',
-    textClass: 'text-warning',
-  },
-};
 
 export function BackgroundTasksPopover({
   id,
@@ -65,7 +40,7 @@ export function BackgroundTasksPopover({
   const [stoppingIds, setStoppingIds] = useState<Set<string>>(() => new Set());
   const [actionError, setActionError] = useState<string | null>(null);
 
-  const runningCount = sessions.filter(session => session.status === 'running').length;
+  const runningCount = sessions.filter(isSessionActivelyRunning).length;
 
   async function handleStop(sessionId: string) {
     if (stoppingIds.has(sessionId)) {
@@ -147,7 +122,7 @@ export function BackgroundTasksPopover({
         ) : (
           <ul className="space-y-2.5">
             {sessions.map(session => {
-              const meta = statusMeta[session.status];
+              const meta = getSessionStatusPresentation(session);
               const isFactory = session.mode === 'factory';
               const isStopping = stoppingIds.has(session.sessionId);
               const isActive = activeSessionId === session.sessionId;

@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
-import { Activity, Code2, Factory, GitPullRequest, History, Loader2 } from 'lucide-react';
+import { Activity, Code2, Factory, GitPullRequest, History, Loader2, Scale } from 'lucide-react';
 import type { BackgroundSessionSummary } from '@development-factory/shared';
 import { BackgroundTasksPopover } from './BackgroundTasksPopover';
 import { ThemeToggle } from './ThemeToggle';
 import type { Theme } from '../theme';
+import { isSessionActivelyRunning } from '../utils/session-status';
 
 export type AppView = 'factory' | 'review';
 
@@ -11,6 +12,7 @@ interface FloatingDockProps {
   activeView: AppView;
   onSelectView: (view: AppView) => void;
   onOpenHistory: () => void;
+  onOpenSeverityMatrix: () => void;
   sessions: BackgroundSessionSummary[];
   activeSessionId?: string;
   loadingSessions?: boolean;
@@ -28,6 +30,7 @@ export function FloatingDock({
   activeView,
   onSelectView,
   onOpenHistory,
+  onOpenSeverityMatrix,
   sessions,
   activeSessionId,
   loadingSessions,
@@ -41,7 +44,7 @@ export function FloatingDock({
   const [popoverOpen, setPopoverOpen] = useState(false);
   const dockContainerRef = useRef<HTMLDivElement>(null);
 
-  const runningCount = sessions.filter(session => session.status === 'running').length;
+  const runningCount = sessions.filter(isSessionActivelyRunning).length;
   const statusLabel =
     runningCount > 0
       ? `${runningCount} em execução`
@@ -174,6 +177,19 @@ export function FloatingDock({
           <History size={15} />
           <span>Histórico</span>
         </button>
+
+        {activeView === 'review' && (
+          <button
+            type="button"
+            className="modal-button rounded-xl px-2.5"
+            onClick={onOpenSeverityMatrix}
+            aria-label="Matriz de severidade por categoria"
+            aria-haspopup="dialog"
+            title="Matriz de severidade por categoria"
+          >
+            <Scale size={15} />
+          </button>
+        )}
 
         <ThemeToggle theme={theme} onToggle={onToggleTheme} />
       </nav>

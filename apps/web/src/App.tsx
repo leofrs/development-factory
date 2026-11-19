@@ -10,6 +10,7 @@ import { FactoryPage } from './components/FactoryPage';
 import { FactoryTaskModal } from './components/FactoryTaskModal';
 import { MarkdownViewerModal } from './components/MarkdownViewerModal';
 import { NotificationToastCenter } from './components/NotificationToastCenter';
+import { SeverityMatrixModal } from './components/SeverityMatrixModal';
 import { useBackgroundOperations } from './hooks/useBackgroundOperations';
 
 const storageKey = 'development-factory.repoPath';
@@ -54,6 +55,7 @@ export default function App() {
   const [viewingMarkdownPath, setViewingMarkdownPath] = useState<string | null>(null);
   const [pickingDirectory, setPickingDirectory] = useState(false);
   const [viewingHistory, setViewingHistory] = useState(false);
+  const [viewingSeverityMatrix, setViewingSeverityMatrix] = useState(false);
   const [error, setError] = useState('');
   const [storageError, setStorageError] = useState(false);
   const submitRef = useRef<HTMLButtonElement>(null);
@@ -162,6 +164,7 @@ export default function App() {
         activeView={view}
         onSelectView={setView}
         onOpenHistory={() => setViewingHistory(true)}
+        onOpenSeverityMatrix={() => setViewingSeverityMatrix(true)}
         sessions={sessions}
         activeSessionId={activeTerminalSession?.sessionId}
         loadingSessions={loadingSessions}
@@ -209,6 +212,9 @@ export default function App() {
       )}
       {pickingDirectory && <DirectoryPicker initialPath={repoPath} onClose={() => setPickingDirectory(false)} onSelect={path => { setRepoPath(path); setError(''); setPickingDirectory(false); }} />}
       {viewingHistory && <HistoryModal initialPath={repoPath} onClose={() => setViewingHistory(false)} />}
+      {viewingSeverityMatrix && (
+        <SeverityMatrixModal onClose={() => setViewingSeverityMatrix(false)} />
+      )}
     </div>
   );
 }

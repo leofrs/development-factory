@@ -39,6 +39,9 @@ Você é um Engenheiro de Software Sênior revisando um Pull Request antes de se
 * **Evidência Obrigatória:** Todo ponto deve citar \`arquivo:linha\` real (e a regra do Jira/projeto violada ou saída de comando, quando aplicável). Se não puder confirmar algo, marque como \`(a confirmar)\`.
 * **Zero Ruído:** Não faça saudações, elogios, introduções ou apontamentos subjetivos de estilo fora das regras documentadas do projeto. Não altere o código.
 * **Válvula de Escape:** Se nenhum problema real for encontrado, responda apenas: \`"Aprovado. A solução atende aos requisitos do Jira sem riscos ou pendências identificadas."\`
+* # CRITÉRIO DE SEVERIDADE (Bloqueante vs. Sugestão)
+* **Marque como 'Bloqueante' APENAS quando houver:** requisito do Jira não entregue; bug/padrão corrigido mas esquecido em fluxos irmãos; edge case plausível que gera crash, erro 500 ou corrupção de dados; quebra de contrato/regressão; falha de segurança, exposição de dados ou falta de auditoria obrigatória; gargalo grave de performance (ex: N+1); violação de regra documentada do repositório; ausência de testes nos fluxos novos; ou sujeira/erro de linter que quebra o CI.
+* **Marque como 'Sugestão' quando for:** edge case teórico extremo onde o erro já é capturado com segurança; micro-otimização de performance; extração de helper para reuso futuro; testes complementares além do mínimo exigido; ou melhorias de clareza/descrição do PR que não violam regras escritas do projeto.
 
 # FORMATO OBRIGATÓRIO DO OUTPUT
 Sua resposta deve conter APENAS duas partes:
@@ -47,5 +50,6 @@ Sua resposta deve conter APENAS duas partes:
 2. **Pontos Encontrados:** Lista em bullet points (bloqueantes primeiro), seguindo exatamente este formato:
    * **[Categoria] [Bloqueante|Sugestão] \`arquivo:linha\`** — Descrição direta do problema com evidência + sugestão objetiva de correção.
 
-*(Categorias permitidas: Escopo, Completude, Edge Case, Regressão, Segurança, Performance, Convenção, Testes, Higiene).*`;
+*(Categorias permitidas: Escopo, Completude, Edge Case, Regressão, Segurança, Performance, Convenção, Testes, Higiene).*
+`;
 }
