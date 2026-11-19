@@ -78,3 +78,54 @@ export type ClientMessage = z.infer<typeof ClientMessageSchema>;
 export type ServerMessage = z.infer<typeof ServerMessageSchema>;
 export type ReviewRequest = Omit<Extract<ClientMessage, { type: 'start_review' }>, 'type' | 'cols' | 'rows'>;
 export type FactoryRequest = Omit<Extract<ClientMessage, { type: 'start_factory' }>, 'type' | 'cols' | 'rows'>;
+
+const uuidSchema = z.string().uuid();
+const isoDatetimeSchema = z.iso.datetime();
+const nonEmptyTextSchema = z.string().trim().min(1);
+
+export const BackgroundSessionModeSchema = z.enum(['review', 'factory']);
+export type BackgroundSessionMode = z.infer<typeof BackgroundSessionModeSchema>;
+
+export const BackgroundSessionStatusSchema = z.enum(['running', 'exited', 'failed', 'cancelled']);
+export type BackgroundSessionStatus = z.infer<typeof BackgroundSessionStatusSchema>;
+
+export const BackgroundSessionHistoryStateSchema = z.enum(['pending', 'saved', 'incomplete']);
+export type BackgroundSessionHistoryState = z.infer<typeof BackgroundSessionHistoryStateSchema>;
+
+export const BackgroundSessionSummarySchema = z.strictObject({
+  sessionId: uuidSchema,
+  mode: BackgroundSessionModeSchema,
+  title: nonEmptyTextSchema,
+  repoPath: repoPathSchema,
+  status: BackgroundSessionStatusSchema,
+  historyState: BackgroundSessionHistoryStateSchema,
+  reportPath: nonEmptyTextSchema.nullable().optional(),
+  sessionPath: nonEmptyTextSchema.nullable().optional(),
+  reviewId: uuidSchema.nullable().optional(),
+  executionId: uuidSchema.nullable().optional(),
+  startedAt: isoDatetimeSchema,
+  finishedAt: isoDatetimeSchema.nullable(),
+  exitCode: z.number().int().nullable().optional(),
+  error: nonEmptyTextSchema.nullable().optional(),
+});
+export type BackgroundSessionSummary = z.infer<typeof BackgroundSessionSummarySchema>;
+
+export const AppEventSchema = z.discriminatedUnion('type', [
+  z.strictObject({
+    type: z.literal('session.started'),
+    session: BackgroundSessionSummarySchema,
+  }),
+  z.strictObject({
+    type: z.literal('session.updated'),
+    session: BackgroundSessionSummarySchema,
+  }),
+  z.strictObject({
+    type: z.literal('session.history_saved'),
+    session: BackgroundSessionSummarySchema,
+  }),
+  z.strictObject({
+    type: z.literal('session.finished'),
+    session: BackgroundSessionSummarySchema,
+  }),
+]);
+export type AppEvent = z.infer<typeof AppEventSchema>;
