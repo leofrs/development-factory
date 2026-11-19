@@ -1,8 +1,10 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { WebSocketServer, type WebSocket } from 'ws';
 import {
+  AppEventSchema,
   BackgroundSessionSummarySchema,
   REVIEW_CONTRACT_VERSION,
+  type AppEvent,
   type ReviewApiErrorResponse,
 } from '@development-factory/shared';
 import { handleTerminalConnection } from './ws/terminal-handler.js';
@@ -14,6 +16,7 @@ import { SqliteReviewRepository, type ReviewRepositoryOptions } from './storage/
 
 const allowedOrigins = new Set(['http://localhost:5173', 'http://127.0.0.1:5173']);
 const MAX_JSON_BODY_BYTES = 64 * 1024;
+const SSE_HEARTBEAT_INTERVAL_MS = 30_000;
 
 function sendApiError(
   res: ServerResponse,
@@ -191,10 +194,76 @@ function getIdempotencyHeader(req: IncomingMessage): string | undefined {
   return value;
 }
 
+function handleEventsStreamRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  sessionManager: SessionManager,
+  sseClients: Set<() => void>,
+): void {
+  if (req.method !== 'GET') {
+    if (!applyCorsHeaders(req, res)) {
+      sendSessionError(res, 403, 'ORIGIN_FORBIDDEN', 'Origem não permitida.');
+      return;
+    }
+    sendSessionError(res, 405, 'METHOD_NOT_ALLOWED', 'Método não permitido para /api/events.');
+    return;
+  }
+
+  if (!applyCorsHeaders(req, res)) {
+    sendSessionError(res, 403, 'ORIGIN_FORBIDDEN', 'Origem não permitida.');
+    return;
+  }
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-store, no-transform',
+    Connection: 'keep-alive',
+  });
+  res.flushHeaders?.();
+
+  const writeSseChunk = (chunk: string): void => {
+    if (!res.writableEnded && !res.destroyed) {
+      res.write(chunk);
+    }
+  };
+
+  writeSseChunk(`event: heartbeat\ndata: ${JSON.stringify({ connectedAt: new Date().toISOString() })}\n\n`);
+
+  const unsubscribe = sessionManager.onEvent((event: AppEvent) => {
+    const validated = AppEventSchema.parse(event);
+    writeSseChunk(`data: ${JSON.stringify(validated)}\n\n`);
+  });
+
+  const heartbeatTimer = setInterval(() => {
+    writeSseChunk(': heartbeat\n\n');
+  }, SSE_HEARTBEAT_INTERVAL_MS);
+  heartbeatTimer.unref();
+
+  let closed = false;
+  const cleanup = (): void => {
+    if (closed) {
+      return;
+    }
+    closed = true;
+    clearInterval(heartbeatTimer);
+    unsubscribe();
+    sseClients.delete(cleanup);
+    if (!res.writableEnded && !res.destroyed) {
+      res.end();
+    }
+  };
+
+  sseClients.add(cleanup);
+  req.once('close', cleanup);
+  res.once('close', cleanup);
+  res.once('error', cleanup);
+}
+
 export function createReviewServer(options?: ReviewRepositoryOptions) {
   const reviewRepository = SqliteReviewRepository.open(options);
   const reviewService = new ReviewService(reviewRepository);
   const sessionManager = new SessionManager(reviewService);
+  const sseClients = new Set<() => void>();
   const server = createServer(async (req, res) => {
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     res.setHeader('Cache-Control', 'no-store');
@@ -296,6 +365,11 @@ export function createReviewServer(options?: ReviewRepositoryOptions) {
       return;
     }
 
+    if (url.pathname === '/api/events') {
+      handleEventsStreamRequest(req, res, sessionManager, sseClients);
+      return;
+    }
+
     if (url.pathname === '/api/sessions' || url.pathname.startsWith('/api/sessions/')) {
       await handleSessionApiRequest(req, res, url, sessionManager);
       return;
@@ -351,6 +425,9 @@ export function createReviewServer(options?: ReviewRepositoryOptions) {
     }
     shutdownPromise = (async () => {
       await sessionManager.shutdownAll();
+      for (const closeSse of sseClients) {
+        closeSse();
+      }
       for (const [ws, stop] of sessions) {
         stop();
         ws.terminate();
