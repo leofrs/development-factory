@@ -5,6 +5,7 @@ import { handleTerminalConnection } from './ws/terminal-handler.js';
 import { listDirectories } from './directories.js';
 import { listHistory, readHistoryFile } from './history-reader.js';
 import { ReviewService, ReviewServiceError } from './review-service.js';
+import { SessionManager } from './session-manager.js';
 import { SqliteReviewRepository, type ReviewRepositoryOptions } from './storage/index.js';
 
 const allowedOrigins = new Set(['http://localhost:5173', 'http://127.0.0.1:5173']);
@@ -106,6 +107,7 @@ function getIdempotencyHeader(req: IncomingMessage): string | undefined {
 export function createReviewServer(options?: ReviewRepositoryOptions) {
   const reviewRepository = SqliteReviewRepository.open(options);
   const reviewService = new ReviewService(reviewRepository);
+  const sessionManager = new SessionManager(reviewService);
   const server = createServer(async (req, res) => {
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     res.setHeader('Cache-Control', 'no-store');
@@ -250,11 +252,22 @@ export function createReviewServer(options?: ReviewRepositoryOptions) {
     sessions.set(ws, handleTerminalConnection(ws, reviewService));
     ws.once('close', () => sessions.delete(ws));
   });
-  const shutdown = () => {
-    for (const [ws, stop] of sessions) { stop(); ws.terminate(); }
-    wss.close();
-    server.close();
-    reviewRepository.close();
+  let shutdownPromise: Promise<void> | undefined;
+  const shutdown = (): Promise<void> => {
+    if (shutdownPromise) {
+      return shutdownPromise;
+    }
+    shutdownPromise = (async () => {
+      await sessionManager.shutdownAll();
+      for (const [ws, stop] of sessions) {
+        stop();
+        ws.terminate();
+      }
+      wss.close();
+      server.close();
+      reviewRepository.close();
+    })();
+    return shutdownPromise;
   };
-  return { server, shutdown, reviewRepository, reviewService };
+  return { server, shutdown, reviewRepository, reviewService, sessionManager };
 }
