@@ -36,8 +36,11 @@ export default function App() {
     sessions,
     sessionsById,
     activeTerminalSession,
+    loadingSessions,
+    sessionsError,
     startReview,
     startFactory,
+    openTerminal,
     minimizeTerminal,
     bindActiveSessionId,
     stopSession,
@@ -147,6 +150,13 @@ export default function App() {
         activeView={view}
         onSelectView={setView}
         onOpenHistory={() => setViewingHistory(true)}
+        sessions={sessions}
+        activeSessionId={activeTerminalSession?.sessionId}
+        loadingSessions={loadingSessions}
+        sessionsError={sessionsError}
+        onOpenTerminal={openTerminal}
+        onViewReport={path => setViewingMarkdownPath(path)}
+        onStopSession={stopSession}
         theme={theme}
         onToggleTheme={toggleTheme}
       />
