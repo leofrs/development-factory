@@ -47,13 +47,18 @@ export default function App() {
   const {
     sessions,
     sessionsById,
+    factoryFlows,
     activeTerminalSession,
     notifications,
     loadingSessions,
     sessionsError,
+    loadingFactoryFlows,
+    factoryFlowsError,
     startReview,
     startFactory,
+    cancelFlow,
     openTerminal,
+    openFlowTerminal,
     minimizeTerminal,
     bindActiveSessionId,
     stopSession,
@@ -218,6 +223,7 @@ export default function App() {
       <NotificationToastCenter
         notifications={notifications}
         onOpenTerminal={openTerminal}
+        onOpenFlowTerminal={openFlowTerminal}
         onViewReport={path => setViewingMarkdownPath(path)}
         onDismiss={dismissNotification}
         onClearAll={clearAllNotifications}
@@ -229,12 +235,17 @@ export default function App() {
         onOpenHistory={() => setViewingHistory(true)}
         onOpenSeverityMatrix={() => setViewingSeverityMatrix(true)}
         sessions={sessions}
+        factoryFlows={factoryFlows}
         activeSessionId={activeTerminalSession?.sessionId}
         loadingSessions={loadingSessions}
         sessionsError={sessionsError}
+        loadingFactoryFlows={loadingFactoryFlows}
+        factoryFlowsError={factoryFlowsError}
         onOpenTerminal={openTerminal}
+        onOpenFlowTerminal={openFlowTerminal}
         onViewReport={path => setViewingMarkdownPath(path)}
         onStopSession={stopSession}
+        onCancelFlow={cancelFlow}
         theme={theme}
         onToggleTheme={toggleTheme}
       />

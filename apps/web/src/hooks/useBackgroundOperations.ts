@@ -1,19 +1,36 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
+  AdvanceFactoryStageRequest,
   AppEvent,
   BackgroundSessionHistoryState,
   BackgroundSessionMode,
   BackgroundSessionStatus,
   BackgroundSessionSummary,
+  CancelFactoryFlowRequest,
+  CreateFactoryFlowRequest,
+  FactoryFlow,
   FactoryRequest,
+  FactoryStageName,
+  RerunFactoryStageRequest,
   ReviewRequest,
 } from '@development-factory/shared';
+import {
+  advanceFactoryFlowStage,
+  cancelFactoryFlow,
+  createFactoryFlow,
+  fetchFactoryFlows,
+  rerunFactoryFlowStage,
+  type AdvanceFactoryFlowResult,
+  type CreateFactoryFlowResult,
+  type RerunFactoryFlowResult,
+} from '../api/factory-flows';
 import {
   fetchSessions,
   getEventsStreamUrl,
   parseAppEventMessage,
   stopSessionRequest,
 } from '../api/sessions';
+import { getFactoryStageLabel } from '../utils/factory-flow-status';
 
 const INITIAL_RECONNECT_DELAY_MS = 1_000;
 const MAX_RECONNECT_DELAY_MS = 10_000;
@@ -27,7 +44,9 @@ export type ActiveTerminalSession =
 /** Notificação in-app gerada por marcos das operações em background. */
 export interface AppNotification {
   id: string;
-  sessionId: string;
+  sessionId: string | null;
+  flowId?: string | null;
+  stage?: FactoryStageName | null;
   mode: BackgroundSessionMode;
   title: string;
   kind: 'history_saved' | 'finished';
@@ -43,17 +62,33 @@ export interface AppNotification {
 export interface BackgroundOperationsState {
   sessions: BackgroundSessionSummary[];
   sessionsById: ReadonlyMap<string, BackgroundSessionSummary>;
+  factoryFlows: FactoryFlow[];
+  factoryFlowsById: ReadonlyMap<string, FactoryFlow>;
   activeTerminalSession: ActiveTerminalSession | null;
   notifications: AppNotification[];
   loadingSessions: boolean;
   sessionsError: string | null;
+  loadingFactoryFlows: boolean;
+  factoryFlowsError: string | null;
   startReview: (request: ReviewRequest) => void;
   startFactory: (request: FactoryRequest) => void;
+  createFlow: (request: CreateFactoryFlowRequest) => Promise<CreateFactoryFlowResult>;
+  advanceFlowStage: (
+    flowId: string,
+    request?: AdvanceFactoryStageRequest,
+  ) => Promise<AdvanceFactoryFlowResult>;
+  rerunFlowStage: (
+    flowId: string,
+    request?: RerunFactoryStageRequest,
+  ) => Promise<RerunFactoryFlowResult>;
+  cancelFlow: (flowId: string, request?: CancelFactoryFlowRequest) => Promise<FactoryFlow>;
   openTerminal: (sessionId: string) => void;
+  openFlowTerminal: (flowId: string) => boolean;
   minimizeTerminal: () => void;
   bindActiveSessionId: (sessionId: string) => void;
   stopSession: (sessionId: string) => Promise<BackgroundSessionSummary>;
   refreshSessions: () => Promise<void>;
+  refreshFactoryFlows: () => Promise<void>;
   dismissNotification: (id: string) => void;
   clearAllNotifications: () => void;
 }
@@ -66,18 +101,31 @@ function sortSessionsByRecent(
   );
 }
 
+function sortFactoryFlowsByRecent(flowsMap: ReadonlyMap<string, FactoryFlow>): FactoryFlow[] {
+  return Array.from(flowsMap.values()).sort(
+    (a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt),
+  );
+}
+
 function buildNotification(
   session: BackgroundSessionSummary,
   kind: 'history_saved' | 'finished',
 ): AppNotification {
   const id = `${session.sessionId}:${kind}`;
-  const reportPath = session.mode === 'factory' || session.historyState === 'saved' ? session.reportPath ?? null : null;
+  const reportPath =
+    session.mode === 'factory' || session.historyState === 'saved'
+      ? (session.reportPath ?? null)
+      : null;
+  const flowId = session.flowId ?? null;
+  const stage = session.stage ?? null;
 
   if (kind === 'history_saved') {
     const message = session.mode === 'factory' ? 'Plano salvo' : 'Parecer salvo';
     return {
       id,
       sessionId: session.sessionId,
+      flowId,
+      stage,
       mode: session.mode,
       title: session.title,
       kind,
@@ -94,6 +142,8 @@ function buildNotification(
     return {
       id,
       sessionId: session.sessionId,
+      flowId,
+      stage,
       mode: session.mode,
       title: session.title,
       kind,
@@ -110,6 +160,8 @@ function buildNotification(
     return {
       id,
       sessionId: session.sessionId,
+      flowId,
+      stage,
       mode: session.mode,
       title: session.title,
       kind,
@@ -126,6 +178,8 @@ function buildNotification(
     return {
       id,
       sessionId: session.sessionId,
+      flowId,
+      stage,
       mode: session.mode,
       title: session.title,
       kind,
@@ -141,6 +195,8 @@ function buildNotification(
   return {
     id,
     sessionId: session.sessionId,
+    flowId,
+    stage,
     mode: session.mode,
     title: session.title,
     kind,
@@ -153,16 +209,78 @@ function buildNotification(
   };
 }
 
+function buildFlowNotification(
+  flow: FactoryFlow,
+  linkedSession?: BackgroundSessionSummary,
+): AppNotification {
+  const stageLabel = getFactoryStageLabel(flow.currentStage);
+
+  if (flow.state === 'failed') {
+    return {
+      id: `flow:${flow.id}:finished`,
+      sessionId: linkedSession?.sessionId ?? flow.currentSessionId,
+      flowId: flow.id,
+      stage: flow.currentStage,
+      mode: 'factory',
+      title: flow.title,
+      kind: 'finished',
+      status: 'failed',
+      historyState: linkedSession?.historyState ?? 'incomplete',
+      reportPath: linkedSession?.reportPath ?? null,
+      message: `Falha na etapa ${stageLabel}`,
+      severity: 'error',
+      createdAt: flow.finishedAt ?? flow.updatedAt,
+    };
+  }
+
+  if (flow.state === 'cancelled') {
+    return {
+      id: `flow:${flow.id}:finished`,
+      sessionId: linkedSession?.sessionId ?? flow.currentSessionId,
+      flowId: flow.id,
+      stage: flow.currentStage,
+      mode: 'factory',
+      title: flow.title,
+      kind: 'finished',
+      status: 'cancelled',
+      historyState: linkedSession?.historyState ?? 'incomplete',
+      reportPath: linkedSession?.reportPath ?? null,
+      message: 'Fluxo cancelado',
+      severity: 'warning',
+      createdAt: flow.finishedAt ?? flow.updatedAt,
+    };
+  }
+
+  return {
+    id: `flow:${flow.id}:finished`,
+    sessionId: linkedSession?.sessionId ?? flow.currentSessionId,
+    flowId: flow.id,
+    stage: flow.currentStage,
+    mode: 'factory',
+    title: flow.title,
+    kind: 'finished',
+    status: 'exited',
+    historyState: linkedSession?.historyState ?? 'saved',
+    reportPath: linkedSession?.reportPath ?? null,
+    message: `Fluxo concluído (${stageLabel})`,
+    severity: 'success',
+    createdAt: flow.finishedAt ?? flow.updatedAt,
+  };
+}
+
 function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === 'AbortError';
 }
 
 /**
- * Gerencia o estado global das operações em background, stream SSE de eventos,
- * sessão ativa no TerminalModal e fila de notificações in-app.
+ * Gerencia o estado global das operações em background (sessões e fluxos da Factory),
+ * stream SSE de eventos, sessão ativa no TerminalModal e fila de notificações in-app.
  */
 export function useBackgroundOperations(): BackgroundOperationsState {
   const [sessionsMap, setSessionsMap] = useState<Map<string, BackgroundSessionSummary>>(
+    () => new Map(),
+  );
+  const [factoryFlowsMap, setFactoryFlowsMap] = useState<Map<string, FactoryFlow>>(
     () => new Map(),
   );
   const [activeTerminalSession, setActiveTerminalSession] =
@@ -170,11 +288,18 @@ export function useBackgroundOperations(): BackgroundOperationsState {
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [loadingSessions, setLoadingSessions] = useState(true);
   const [sessionsError, setSessionsError] = useState<string | null>(null);
+  const [loadingFactoryFlows, setLoadingFactoryFlows] = useState(true);
+  const [factoryFlowsError, setFactoryFlowsError] = useState<string | null>(null);
 
   const sessionsMapRef = useRef(sessionsMap);
   useEffect(() => {
     sessionsMapRef.current = sessionsMap;
   }, [sessionsMap]);
+
+  const factoryFlowsMapRef = useRef(factoryFlowsMap);
+  useEffect(() => {
+    factoryFlowsMapRef.current = factoryFlowsMap;
+  }, [factoryFlowsMap]);
 
   const activeTerminalRef = useRef(activeTerminalSession);
   useEffect(() => {
@@ -182,6 +307,24 @@ export function useBackgroundOperations(): BackgroundOperationsState {
   }, [activeTerminalSession]);
 
   const notifiedMilestonesRef = useRef<Set<string>>(new Set());
+
+  const upsertSession = useCallback((session: BackgroundSessionSummary) => {
+    setSessionsMap((current) => {
+      const next = new Map(current);
+      next.set(session.sessionId, session);
+      sessionsMapRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const upsertFactoryFlow = useCallback((flow: FactoryFlow) => {
+    setFactoryFlowsMap((current) => {
+      const next = new Map(current);
+      next.set(flow.id, flow);
+      factoryFlowsMapRef.current = next;
+      return next;
+    });
+  }, []);
 
   const hydrateSessions = useCallback(async (signal?: AbortSignal) => {
     try {
@@ -194,6 +337,7 @@ export function useBackgroundOperations(): BackgroundOperationsState {
       for (const item of list) {
         next.set(item.sessionId, item);
       }
+      sessionsMapRef.current = next;
       setSessionsMap(next);
       setSessionsError(null);
     } catch (error) {
@@ -206,6 +350,36 @@ export function useBackgroundOperations(): BackgroundOperationsState {
     } finally {
       if (!signal?.aborted) {
         setLoadingSessions(false);
+      }
+    }
+  }, []);
+
+  const hydrateFactoryFlows = useCallback(async (signal?: AbortSignal) => {
+    try {
+      const list = await fetchFactoryFlows(undefined, signal);
+      if (signal?.aborted) {
+        return;
+      }
+
+      const next = new Map<string, FactoryFlow>();
+      for (const item of list) {
+        next.set(item.id, item);
+      }
+      factoryFlowsMapRef.current = next;
+      setFactoryFlowsMap(next);
+      setFactoryFlowsError(null);
+    } catch (error) {
+      if (isAbortError(error) || signal?.aborted) {
+        return;
+      }
+      setFactoryFlowsError(
+        error instanceof Error
+          ? error.message
+          : 'Não foi possível carregar os fluxos da Factory.',
+      );
+    } finally {
+      if (!signal?.aborted) {
+        setLoadingFactoryFlows(false);
       }
     }
   }, []);
@@ -228,17 +402,45 @@ export function useBackgroundOperations(): BackgroundOperationsState {
     [],
   );
 
+  const maybeNotifyFlowFinished = useCallback((flow: FactoryFlow) => {
+    const flowMilestoneKey = `flow:${flow.id}:finished`;
+    if (notifiedMilestonesRef.current.has(flowMilestoneKey)) {
+      return;
+    }
+
+    if (
+      flow.currentSessionId &&
+      (notifiedMilestonesRef.current.has(`${flow.currentSessionId}:finished`) ||
+        activeTerminalRef.current?.sessionId === flow.currentSessionId)
+    ) {
+      notifiedMilestonesRef.current.add(flowMilestoneKey);
+      return;
+    }
+
+    notifiedMilestonesRef.current.add(flowMilestoneKey);
+    const linkedSession = flow.currentSessionId
+      ? sessionsMapRef.current.get(flow.currentSessionId)
+      : undefined;
+    const notification = buildFlowNotification(flow, linkedSession);
+    setNotifications((current) => [notification, ...current]);
+  }, []);
+
   const handleAppEvent = useCallback(
     (event: AppEvent) => {
-      if (!('session' in event)) {
+      if (
+        event.type === 'factory_flow.created' ||
+        event.type === 'factory_flow.updated' ||
+        event.type === 'factory_flow.finished'
+      ) {
+        upsertFactoryFlow(event.flow);
+        if (event.type === 'factory_flow.finished') {
+          maybeNotifyFlowFinished(event.flow);
+        }
         return;
       }
+
       const { session } = event;
-      setSessionsMap((current) => {
-        const next = new Map(current);
-        next.set(session.sessionId, session);
-        return next;
-      });
+      upsertSession(session);
 
       if (event.type === 'session.started') {
         setActiveTerminalSession((current) => {
@@ -265,16 +467,17 @@ export function useBackgroundOperations(): BackgroundOperationsState {
         maybeNotify(session, 'finished');
       }
     },
-    [maybeNotify],
+    [maybeNotify, maybeNotifyFlowFinished, upsertFactoryFlow, upsertSession],
   );
 
   useEffect(() => {
     const abortController = new AbortController();
     void hydrateSessions(abortController.signal);
+    void hydrateFactoryFlows(abortController.signal);
     return () => {
       abortController.abort();
     };
-  }, [hydrateSessions]);
+  }, [hydrateFactoryFlows, hydrateSessions]);
 
   useEffect(() => {
     let disposed = false;
@@ -299,6 +502,7 @@ export function useBackgroundOperations(): BackgroundOperationsState {
           reconnectAbortController?.abort();
           reconnectAbortController = new AbortController();
           void hydrateSessions(reconnectAbortController.signal);
+          void hydrateFactoryFlows(reconnectAbortController.signal);
         }
       };
 
@@ -338,7 +542,7 @@ export function useBackgroundOperations(): BackgroundOperationsState {
       reconnectAbortController?.abort();
       eventSource?.close();
     };
-  }, [handleAppEvent, hydrateSessions]);
+  }, [handleAppEvent, hydrateFactoryFlows, hydrateSessions]);
 
   const startReview = useCallback((request: ReviewRequest) => {
     setActiveTerminalSession({ mode: 'review', request });
@@ -348,6 +552,55 @@ export function useBackgroundOperations(): BackgroundOperationsState {
     setActiveTerminalSession({ mode: 'factory', request });
   }, []);
 
+  const createFlow = useCallback(
+    async (request: CreateFactoryFlowRequest): Promise<CreateFactoryFlowResult> => {
+      const result = await createFactoryFlow(request);
+      upsertFactoryFlow(result.flow);
+      if (result.session) {
+        upsertSession(result.session);
+      }
+      return result;
+    },
+    [upsertFactoryFlow, upsertSession],
+  );
+
+  const advanceFlowStage = useCallback(
+    async (
+      flowId: string,
+      request?: AdvanceFactoryStageRequest,
+    ): Promise<AdvanceFactoryFlowResult> => {
+      const result = await advanceFactoryFlowStage(flowId, request);
+      upsertFactoryFlow(result.flow);
+      if (result.session) {
+        upsertSession(result.session);
+      }
+      return result;
+    },
+    [upsertFactoryFlow, upsertSession],
+  );
+
+  const rerunFlowStage = useCallback(
+    async (
+      flowId: string,
+      request?: RerunFactoryStageRequest,
+    ): Promise<RerunFactoryFlowResult> => {
+      const result = await rerunFactoryFlowStage(flowId, request);
+      upsertFactoryFlow(result.flow);
+      upsertSession(result.session);
+      return result;
+    },
+    [upsertFactoryFlow, upsertSession],
+  );
+
+  const cancelFlow = useCallback(
+    async (flowId: string, request?: CancelFactoryFlowRequest): Promise<FactoryFlow> => {
+      const updated = await cancelFactoryFlow(flowId, request);
+      upsertFactoryFlow(updated);
+      return updated;
+    },
+    [upsertFactoryFlow],
+  );
+
   const openTerminal = useCallback((sessionId: string) => {
     const existing = sessionsMapRef.current.get(sessionId);
     if (!existing) {
@@ -355,6 +608,27 @@ export function useBackgroundOperations(): BackgroundOperationsState {
     }
     setActiveTerminalSession({ mode: existing.mode, sessionId: existing.sessionId });
   }, []);
+
+  const openFlowTerminal = useCallback(
+    (flowId: string): boolean => {
+      const flow = factoryFlowsMapRef.current.get(flowId);
+      if (flow?.currentSessionId && sessionsMapRef.current.has(flow.currentSessionId)) {
+        openTerminal(flow.currentSessionId);
+        return true;
+      }
+
+      const matchingSession = sortSessionsByRecent(sessionsMapRef.current).find(
+        (item) => item.flowId === flowId,
+      );
+      if (!matchingSession) {
+        return false;
+      }
+
+      openTerminal(matchingSession.sessionId);
+      return true;
+    },
+    [openTerminal],
+  );
 
   const minimizeTerminal = useCallback(() => {
     setActiveTerminalSession(null);
@@ -369,19 +643,22 @@ export function useBackgroundOperations(): BackgroundOperationsState {
     });
   }, []);
 
-  const stopSession = useCallback(async (sessionId: string): Promise<BackgroundSessionSummary> => {
-    const updated = await stopSessionRequest(sessionId);
-    setSessionsMap((current) => {
-      const next = new Map(current);
-      next.set(updated.sessionId, updated);
-      return next;
-    });
-    return updated;
-  }, []);
+  const stopSession = useCallback(
+    async (sessionId: string): Promise<BackgroundSessionSummary> => {
+      const updated = await stopSessionRequest(sessionId);
+      upsertSession(updated);
+      return updated;
+    },
+    [upsertSession],
+  );
 
   const refreshSessions = useCallback(async () => {
     await hydrateSessions();
   }, [hydrateSessions]);
+
+  const refreshFactoryFlows = useCallback(async () => {
+    await hydrateFactoryFlows();
+  }, [hydrateFactoryFlows]);
 
   const dismissNotification = useCallback((id: string) => {
     setNotifications((current) => current.filter((item) => item.id !== id));
@@ -392,21 +669,32 @@ export function useBackgroundOperations(): BackgroundOperationsState {
   }, []);
 
   const sessions = useMemo(() => sortSessionsByRecent(sessionsMap), [sessionsMap]);
+  const factoryFlows = useMemo(() => sortFactoryFlowsByRecent(factoryFlowsMap), [factoryFlowsMap]);
 
   return {
     sessions,
     sessionsById: sessionsMap,
+    factoryFlows,
+    factoryFlowsById: factoryFlowsMap,
     activeTerminalSession,
     notifications,
     loadingSessions,
     sessionsError,
+    loadingFactoryFlows,
+    factoryFlowsError,
     startReview,
     startFactory,
+    createFlow,
+    advanceFlowStage,
+    rerunFlowStage,
+    cancelFlow,
     openTerminal,
+    openFlowTerminal,
     minimizeTerminal,
     bindActiveSessionId,
     stopSession,
     refreshSessions,
+    refreshFactoryFlows,
     dismissNotification,
     clearAllNotifications,
   };

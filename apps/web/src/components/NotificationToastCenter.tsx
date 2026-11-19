@@ -10,10 +10,12 @@ import {
   X,
 } from 'lucide-react';
 import type { AppNotification } from '../hooks/useBackgroundOperations';
+import { getFactoryStageLabel, getFactoryStageStep } from '../utils/factory-flow-status';
 
 interface NotificationToastCenterProps {
   notifications: AppNotification[];
   onOpenTerminal: (sessionId: string) => void;
+  onOpenFlowTerminal?: (flowId: string) => void;
   onViewReport: (reportPath: string) => void;
   onDismiss: (id: string) => void;
   onClearAll?: () => void;
@@ -76,6 +78,7 @@ function getSeverityPresentation(severity: AppNotification['severity']) {
 export function NotificationToastCenter({
   notifications,
   onOpenTerminal,
+  onOpenFlowTerminal,
   onViewReport,
   onDismiss,
   onClearAll,
@@ -138,16 +141,24 @@ export function NotificationToastCenter({
 
               <div className="min-w-0 flex-1">
                 <div className="flex items-center justify-between gap-2">
-                  <span
-                    className={`inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-medium ${
-                      isFactory
-                        ? 'border-accent/30 bg-selected text-accent'
-                        : 'border-line bg-elevated text-secondary'
-                    }`}
-                  >
-                    {isFactory ? <Compass size={10} /> : <GitPullRequest size={10} />}
-                    {isFactory ? 'Factory' : 'Review'}
-                  </span>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span
+                      className={`inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-medium ${
+                        isFactory
+                          ? 'border-accent/30 bg-selected text-accent'
+                          : 'border-line bg-elevated text-secondary'
+                      }`}
+                    >
+                      {isFactory ? <Compass size={10} /> : <GitPullRequest size={10} />}
+                      {isFactory ? 'Factory' : 'Review'}
+                    </span>
+                    {isFactory && notification.stage && (
+                      <span className="inline-flex items-center rounded-md border border-line bg-elevated px-1.5 py-0.5 font-mono text-[10px] text-secondary">
+                        {getFactoryStageStep(notification.stage)} ·{' '}
+                        {getFactoryStageLabel(notification.stage)}
+                      </span>
+                    )}
+                  </div>
 
                   <div className="flex items-center gap-2">
                     <time
@@ -188,21 +199,33 @@ export function NotificationToastCenter({
                       }}
                     >
                       <FileText size={12} />
-                      <span>{isFactory ? 'Ver plano' : 'Ver parecer'}</span>
+                      <span>
+                        {isFactory
+                          ? notification.stage && notification.stage !== 'triage'
+                            ? 'Ver artefato'
+                            : 'Ver plano'
+                          : 'Ver parecer'}
+                      </span>
                     </button>
                   )}
 
-                  <button
-                    type="button"
-                    className="modal-button px-2.5 py-1 text-[11px]"
-                    onClick={() => {
-                      onOpenTerminal(notification.sessionId);
-                      onDismiss(notification.id);
-                    }}
-                  >
-                    <Terminal size={12} />
-                    <span>Abrir terminal</span>
-                  </button>
+                  {(notification.sessionId || (notification.flowId && onOpenFlowTerminal)) && (
+                    <button
+                      type="button"
+                      className="modal-button px-2.5 py-1 text-[11px]"
+                      onClick={() => {
+                        if (notification.sessionId) {
+                          onOpenTerminal(notification.sessionId);
+                        } else if (notification.flowId) {
+                          onOpenFlowTerminal?.(notification.flowId);
+                        }
+                        onDismiss(notification.id);
+                      }}
+                    >
+                      <Terminal size={12} />
+                      <span>Abrir terminal</span>
+                    </button>
+                  )}
 
                   <button
                     type="button"

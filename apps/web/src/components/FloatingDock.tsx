@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Activity, Code2, Factory, GitPullRequest, History, Loader2, Scale } from 'lucide-react';
-import type { BackgroundSessionSummary } from '@development-factory/shared';
+import type { BackgroundSessionSummary, FactoryFlow } from '@development-factory/shared';
 import { BackgroundTasksPopover } from './BackgroundTasksPopover';
 import { ThemeToggle } from './ThemeToggle';
 import type { Theme } from '../theme';
+import { isFactoryFlowActivelyRunning } from '../utils/factory-flow-status';
 import { isSessionActivelyRunning } from '../utils/session-status';
 
 export type AppView = 'factory' | 'review';
@@ -14,12 +15,17 @@ interface FloatingDockProps {
   onOpenHistory: () => void;
   onOpenSeverityMatrix: () => void;
   sessions: BackgroundSessionSummary[];
+  factoryFlows?: FactoryFlow[];
   activeSessionId?: string;
   loadingSessions?: boolean;
   sessionsError?: string | null;
+  loadingFactoryFlows?: boolean;
+  factoryFlowsError?: string | null;
   onOpenTerminal: (sessionId: string) => void;
+  onOpenFlowTerminal?: (flowId: string) => void;
   onViewReport: (reportPath: string) => void;
   onStopSession: (sessionId: string) => Promise<BackgroundSessionSummary>;
+  onCancelFlow?: (flowId: string) => Promise<FactoryFlow>;
   theme: Theme;
   onToggleTheme: () => void;
 }
@@ -32,24 +38,60 @@ export function FloatingDock({
   onOpenHistory,
   onOpenSeverityMatrix,
   sessions,
+  factoryFlows = [],
   activeSessionId,
   loadingSessions,
   sessionsError,
+  loadingFactoryFlows,
+  factoryFlowsError,
   onOpenTerminal,
+  onOpenFlowTerminal,
   onViewReport,
   onStopSession,
+  onCancelFlow,
   theme,
   onToggleTheme,
 }: FloatingDockProps) {
   const [popoverOpen, setPopoverOpen] = useState(false);
   const dockContainerRef = useRef<HTMLDivElement>(null);
 
-  const runningCount = sessions.filter(isSessionActivelyRunning).length;
+  const { runningCount, totalCount } = useMemo(() => {
+    const flowIds = new Set(factoryFlows.map(flow => flow.id));
+    const sessionsById = new Map(sessions.map(session => [session.sessionId, session]));
+    let running = 0;
+    let total = 0;
+
+    for (const flow of factoryFlows) {
+      total += 1;
+      const linkedSession = flow.currentSessionId
+        ? sessionsById.get(flow.currentSessionId)
+        : undefined;
+      if (
+        isFactoryFlowActivelyRunning(flow) ||
+        (linkedSession ? isSessionActivelyRunning(linkedSession) : false)
+      ) {
+        running += 1;
+      }
+    }
+
+    for (const session of sessions) {
+      if (session.flowId && flowIds.has(session.flowId)) {
+        continue;
+      }
+      total += 1;
+      if (isSessionActivelyRunning(session)) {
+        running += 1;
+      }
+    }
+
+    return { runningCount: running, totalCount: total };
+  }, [factoryFlows, sessions]);
+
   const statusLabel =
     runningCount > 0
       ? `${runningCount} em execução`
-      : sessions.length > 0
-        ? `${sessions.length} ${sessions.length === 1 ? 'operação' : 'operações'}`
+      : totalCount > 0
+        ? `${totalCount} ${totalCount === 1 ? 'operação' : 'operações'}`
         : 'Operações';
 
   useEffect(() => {
@@ -85,12 +127,17 @@ export function FloatingDock({
           <BackgroundTasksPopover
             id={POPOVER_ID}
             sessions={sessions}
+            factoryFlows={factoryFlows}
             activeSessionId={activeSessionId}
             loadingSessions={loadingSessions}
             sessionsError={sessionsError}
+            loadingFactoryFlows={loadingFactoryFlows}
+            factoryFlowsError={factoryFlowsError}
             onOpenTerminal={onOpenTerminal}
+            onOpenFlowTerminal={onOpenFlowTerminal}
             onViewReport={onViewReport}
             onStopSession={onStopSession}
+            onCancelFlow={onCancelFlow}
             onClose={() => setPopoverOpen(false)}
           />
         )}
@@ -163,7 +210,7 @@ export function FloatingDock({
           {runningCount > 0 ? (
             <Loader2 size={13} className="animate-spin text-accent" />
           ) : (
-            <Activity size={13} className={sessions.length > 0 ? 'text-accent' : 'text-muted'} />
+            <Activity size={13} className={totalCount > 0 ? 'text-accent' : 'text-muted'} />
           )}
           <span>{statusLabel}</span>
         </button>
