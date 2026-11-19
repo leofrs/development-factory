@@ -9,6 +9,7 @@ import { FloatingDock, type AppView } from './components/FloatingDock';
 import { FactoryPage } from './components/FactoryPage';
 import { FactoryTaskModal } from './components/FactoryTaskModal';
 import { MarkdownViewerModal } from './components/MarkdownViewerModal';
+import { NotificationToastCenter } from './components/NotificationToastCenter';
 import { useBackgroundOperations } from './hooks/useBackgroundOperations';
 
 const storageKey = 'development-factory.repoPath';
@@ -36,6 +37,7 @@ export default function App() {
     sessions,
     sessionsById,
     activeTerminalSession,
+    notifications,
     loadingSessions,
     sessionsError,
     startReview,
@@ -44,6 +46,8 @@ export default function App() {
     minimizeTerminal,
     bindActiveSessionId,
     stopSession,
+    dismissNotification,
+    clearAllNotifications,
   } = useBackgroundOperations();
   const [configuringFactoryTask, setConfiguringFactoryTask] = useState(false);
   const [savedPlanPath, setSavedPlanPath] = useState<string | null>(null);
@@ -145,6 +149,14 @@ export default function App() {
         </div>
         </main>
       )}
+
+      <NotificationToastCenter
+        notifications={notifications}
+        onOpenTerminal={openTerminal}
+        onViewReport={path => setViewingMarkdownPath(path)}
+        onDismiss={dismissNotification}
+        onClearAll={clearAllNotifications}
+      />
 
       <FloatingDock
         activeView={view}
