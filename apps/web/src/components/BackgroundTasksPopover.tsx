@@ -14,6 +14,7 @@ import {
   type FactoryFlow,
 } from '@development-factory/shared';
 import {
+  canOpenTerminalForFactoryStage,
   getFactoryFlowStatePresentation,
   getFactoryStageLabel,
   getFactoryStageStep,
@@ -265,7 +266,9 @@ export function BackgroundTasksPopover({
                 const canStop =
                   !isFinalFactoryFlowState(flow.state) &&
                   (Boolean(onCancelFlow) || linkedSession?.status === 'running');
-                const canOpenTerminal = Boolean(linkedSession) || Boolean(onOpenFlowTerminal);
+                const canOpenTerminal =
+                  canOpenTerminalForFactoryStage(flow.currentStage) &&
+                  (Boolean(linkedSession) || Boolean(onOpenFlowTerminal));
 
                 return (
                   <li

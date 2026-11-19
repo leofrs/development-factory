@@ -15,6 +15,7 @@ import {
 } from '../src/api/factory-flows';
 import { parseAppEventMessage } from '../src/api/sessions';
 import {
+  canOpenTerminalForFactoryStage,
   getFactoryArtifactKindLabel,
   getFactoryArtifactStatusPresentation,
   getFactoryFlowStatePresentation,
@@ -90,6 +91,13 @@ test('utilitários de factory-flow-status retornam rótulos e estados consistent
   assert.equal(getFactoryFlowStatePresentation('waiting_action').label, 'Aguardando ação');
   assert.equal(getFactoryStageStatePresentation('completed').label, 'Concluída');
   assert.equal(getFactoryArtifactStatusPresentation('ready').label, 'Pronto');
+
+  assert.equal(canOpenTerminalForFactoryStage('triage'), false);
+  assert.equal(canOpenTerminalForFactoryStage('planning'), false);
+  assert.equal(canOpenTerminalForFactoryStage('development'), true);
+  assert.equal(canOpenTerminalForFactoryStage('tests'), true);
+  assert.equal(canOpenTerminalForFactoryStage('review'), true);
+  assert.equal(canOpenTerminalForFactoryStage('pr'), true);
 });
 
 test('parseAppEventMessage valida eventos de fluxo da Factory via SSE', () => {

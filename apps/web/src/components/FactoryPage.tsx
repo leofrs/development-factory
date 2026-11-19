@@ -37,6 +37,7 @@ import {
 } from '@development-factory/shared';
 import { fetchFactoryFlowDetails } from '../api/factory-flows';
 import {
+  canOpenTerminalForFactoryStage,
   getFactoryArtifactKindLabel,
   getFactoryArtifactStatusPresentation,
   getFactoryFlowStatePresentation,
@@ -661,7 +662,8 @@ export function FactoryPage({
                 (flow.currentSessionId ? sessionsById.get(flow.currentSessionId) : undefined) ??
                 latestSessionByFlowId.get(flow.id);
               const hasTerminal =
-                flow.currentSessionId !== null || linkedSession !== undefined;
+                canOpenTerminalForFactoryStage(flow.currentStage) &&
+                (flow.currentSessionId !== null || linkedSession !== undefined);
               const reportPath =
                 linkedSession?.reportPath ??
                 (isSelected
@@ -866,10 +868,12 @@ export function FactoryPage({
                         item => item.format === 'markdown' && item.status !== 'failed',
                       )?.path ??
                       null;
-                    const stageHasTerminal = Boolean(
-                      stageRecord?.sessionId ||
-                        (isCurrentStage && effectiveSelectedFlow?.currentSessionId),
-                    );
+                    const stageHasTerminal =
+                      canOpenTerminalForFactoryStage(stage.id) &&
+                      Boolean(
+                        stageRecord?.sessionId ||
+                          (isCurrentStage && effectiveSelectedFlow?.currentSessionId),
+                      );
                     const busyAction = effectiveSelectedFlow
                       ? busyFlowIds.get(effectiveSelectedFlow.id)
                       : undefined;

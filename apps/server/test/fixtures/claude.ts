@@ -12,7 +12,8 @@ process.stdin.on('data', chunk => {
   if (text === 'EXIT0') process.exit(0);
   if (text === 'EXIT') process.exit(7);
   if (text === 'SAVE') {
-    const match = process.argv[2]?.match(/no arquivo ("(?:\\.|[^"\\])*")\./);
+    const promptArg = process.argv.slice(2).find(arg => arg.includes('no arquivo '));
+    const match = promptArg?.match(/no arquivo ("(?:\\.|[^"\\])*")\./);
     if (match?.[1]) writeFileSync(JSON.parse(match[1]), '# Parecer final\n\nAPROVADO\n');
   }
   console.log(`INPUT:${text}`);

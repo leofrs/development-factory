@@ -326,8 +326,10 @@ test('API REST /api/factory/flows valida origem, idempotência, filtros e ciclo 
       event =>
         event.type === 'factory_flow.updated' &&
         event.flow.id === flowAId &&
-        event.flow.state === 'waiting_action' &&
-        event.flow.currentSessionId === null,
+        event.flow.currentStage === 'planning' &&
+        event.flow.state === 'running' &&
+        event.flow.currentSessionId !== null &&
+        event.flow.currentSessionId !== sessionAId,
     ),
   );
 
@@ -336,8 +338,9 @@ test('API REST /api/factory/flows valida origem, idempotência, filtros e ciclo 
   });
   assert.equal(detailsARes.status, 200);
   const detailsA = FactoryFlowDetailsSchema.parse(await detailsARes.json());
-  assert.equal(detailsA.flow.state, 'waiting_action');
-  assert.equal(detailsA.flow.currentStage, 'triage');
+  assert.equal(detailsA.flow.state, 'running');
+  assert.equal(detailsA.flow.currentStage, 'planning');
+  assert.ok(detailsA.flow.currentSessionId && detailsA.flow.currentSessionId !== sessionAId);
   assert.ok(
     detailsA.artifacts.some(
       artifact =>
@@ -355,7 +358,41 @@ test('API REST /api/factory/flows valida origem, idempotência, filtros e ciclo 
     ),
   );
 
-  // 6. Reexecuta a etapa atual (triage) do Fluxo A via /rerun, depois finaliza e avança para planning.
+  const autoPlanningSessionId = detailsA.flow.currentSessionId;
+  await waitFor(() =>
+    Boolean(sessionManager.getSession(autoPlanningSessionId)?.buffer.replay().includes('READY:')),
+  );
+  const planningBuffer = sessionManager.getSession(autoPlanningSessionId)?.buffer.replay() ?? '';
+  const readyLine = planningBuffer.split(/\r?\n/).find(line => line.includes('READY:'));
+  assert.ok(readyLine, 'Sessão automática da etapa planning deve emitir READY com os argumentos do prompt');
+  const readyJson = readyLine.slice(readyLine.indexOf('READY:') + 'READY:'.length);
+  const readyPayload = JSON.parse(readyJson) as { args?: string[] };
+  const args = readyPayload.args ?? [];
+  assert.ok(args.includes('--verbose'));
+  assert.ok(args.includes('--allowedTools'));
+  const allowedToolsArg = args[args.indexOf('--allowedTools') + 1] ?? '';
+  assert.ok(allowedToolsArg.includes('Read,Glob,Grep'));
+  assert.equal(allowedToolsArg.includes('mcp__claude_ai_Atlassian_Rovo'), false);
+  const promptArgIndex = args.indexOf('-p') + 1;
+  assert.ok(promptArgIndex > 0);
+  const planningPrompt = args[promptArgIndex] ?? '';
+  assert.ok(planningPrompt.includes('# Entendimento do Problema'));
+  assert.ok(planningPrompt.includes('Fluxo A salvo.'));
+  assert.ok(planningPrompt.includes('Sub-etapa A'));
+
+  sessionManager.writeInput(autoPlanningSessionId, 'EXIT0');
+  await waitFor(() =>
+    events.some(
+      event =>
+        event.type === 'factory_flow.updated' &&
+        event.flow.id === flowAId &&
+        event.flow.currentStage === 'planning' &&
+        event.flow.state === 'waiting_action' &&
+        event.flow.currentSessionId === null,
+    ),
+  );
+
+  // 6. Reexecuta a etapa atual (planning) do Fluxo A via /rerun.
   const rerunRes = await fetch(`${baseUrl}/api/factory/flows/${flowAId}/rerun`, {
     method: 'POST',
     headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
@@ -367,30 +404,10 @@ test('API REST /api/factory/flows valida origem, idempotência, filtros e ciclo 
     session: BackgroundSessionSummary;
   };
   assert.equal(rerunBody.flow.state, 'running');
-  assert.equal(rerunBody.flow.currentStage, 'triage');
-  assert.notEqual(rerunBody.session.sessionId, sessionAId);
+  assert.equal(rerunBody.flow.currentStage, 'planning');
+  assert.notEqual(rerunBody.session.sessionId, autoPlanningSessionId);
 
   await waitFor(() => Boolean(sessionManager.getSession(rerunBody.session.sessionId)?.buffer.replay().includes('READY:')));
-  sessionManager.writeInput(rerunBody.session.sessionId, 'EXIT0');
-  await waitFor(() =>
-    events.some(
-      event => event.type === 'session.finished' && event.session.sessionId === rerunBody.session.sessionId,
-    ),
-  );
-
-  const advanceRes = await fetch(`${baseUrl}/api/factory/flows/${flowAId}/advance`, {
-    method: 'POST',
-    headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ startSession: true }),
-  });
-  assert.equal(advanceRes.status, 200, await advanceRes.clone().text());
-  const advanceBody = (await advanceRes.json()) as {
-    flow: { state: string; currentStage: string; currentSessionId: string | null };
-    session: BackgroundSessionSummary;
-  };
-  assert.equal(advanceBody.flow.currentStage, 'planning');
-  assert.equal(advanceBody.flow.state, 'running');
-  assert.equal(advanceBody.session.stage, 'planning');
 
   // 7. Cancela o Fluxo A em execução via POST /api/factory/flows/:id/cancel.
   const cancelRes = await fetch(`${baseUrl}/api/factory/flows/${flowAId}/cancel`, {
@@ -521,6 +538,18 @@ test(
       return s1?.status === 'exited' && s2?.status === 'exited';
     });
 
+    // Ambos avançam automaticamente para planning com novas sessões isoladas.
+    await waitFor(() => {
+      const sessions = sessionManager.listSessions();
+      const p1 = sessions.find(
+        session => session.flowId === createdOne.flow.id && session.stage === 'planning',
+      );
+      const p2 = sessions.find(
+        session => session.flowId === createdTwo.flow.id && session.stage === 'planning',
+      );
+      return Boolean(p1 && p2);
+    });
+
     const [detailsOneRes, detailsTwoRes] = await Promise.all([
       fetch(`${baseUrl}/api/factory/flows/${createdOne.flow.id}`, {
         headers: { Origin: ALLOWED_ORIGIN },
@@ -534,21 +563,51 @@ test(
 
     const detailsOne = FactoryFlowDetailsSchema.parse(await detailsOneRes.json());
     const detailsTwo = FactoryFlowDetailsSchema.parse(await detailsTwoRes.json());
-    assert.equal(detailsOne.flow.state, 'waiting_action');
-    assert.equal(detailsTwo.flow.state, 'waiting_action');
+    assert.equal(detailsOne.flow.currentStage, 'planning');
+    assert.equal(detailsTwo.flow.currentStage, 'planning');
+    assert.ok(detailsOne.flow.currentSessionId && detailsTwo.flow.currentSessionId);
 
-    const specOne = detailsOne.artifacts.find(
+    const planningSessionOne = detailsOne.flow.currentSessionId;
+    const planningSessionTwo = detailsTwo.flow.currentSessionId;
+    await waitFor(() => {
+      const p1 = sessionManager.getSession(planningSessionOne);
+      const p2 = sessionManager.getSession(planningSessionTwo);
+      return Boolean(p1?.buffer.replay().includes('READY:') && p2?.buffer.replay().includes('READY:'));
+    });
+
+    sessionManager.writeInput(planningSessionOne, 'EXIT0');
+    sessionManager.writeInput(planningSessionTwo, 'EXIT0');
+    await waitFor(() => {
+      const p1 = sessionManager.getSession(planningSessionOne);
+      const p2 = sessionManager.getSession(planningSessionTwo);
+      return p1?.status === 'exited' && p2?.status === 'exited';
+    });
+
+    const [afterPlanOneRes, afterPlanTwoRes] = await Promise.all([
+      fetch(`${baseUrl}/api/factory/flows/${createdOne.flow.id}`, {
+        headers: { Origin: ALLOWED_ORIGIN },
+      }),
+      fetch(`${baseUrl}/api/factory/flows/${createdTwo.flow.id}`, {
+        headers: { Origin: ALLOWED_ORIGIN },
+      }),
+    ]);
+    const afterPlanOne = FactoryFlowDetailsSchema.parse(await afterPlanOneRes.json());
+    const afterPlanTwo = FactoryFlowDetailsSchema.parse(await afterPlanTwoRes.json());
+    assert.equal(afterPlanOne.flow.state, 'waiting_action');
+    assert.equal(afterPlanTwo.flow.state, 'waiting_action');
+
+    const specOne = afterPlanOne.artifacts.find(
       artifact => artifact.stage === 'triage' && artifact.kind === 'specification',
     );
-    const specTwo = detailsTwo.artifacts.find(
+    const specTwo = afterPlanTwo.artifacts.find(
       artifact => artifact.stage === 'triage' && artifact.kind === 'specification',
     );
     assert(specOne && specTwo);
     assert.equal(specOne.path, createdOne.session.reportPath);
     assert.equal(specTwo.path, createdTwo.session.reportPath);
 
-    // Avança o Fluxo 1 por todas as etapas até concluir o PR enquanto o Fluxo 2 permanece em triagem.
-    const nextStages = ['planning', 'development', 'tests', 'review', 'pr'] as const;
+    // Avança o Fluxo 1 por todas as etapas restantes até concluir o PR enquanto o Fluxo 2 permanece em planning.
+    const nextStages = ['development', 'tests', 'review', 'pr'] as const;
     for (const expectedStage of nextStages) {
       const advRes = await fetch(`${baseUrl}/api/factory/flows/${createdOne.flow.id}/advance`, {
         method: 'POST',
@@ -575,7 +634,7 @@ test(
     });
     assert.equal(checkTwoRes.status, 200);
     const checkTwo = FactoryFlowDetailsSchema.parse(await checkTwoRes.json());
-    assert.equal(checkTwo.flow.currentStage, 'triage');
+    assert.equal(checkTwo.flow.currentStage, 'planning');
     assert.equal(checkTwo.flow.state, 'waiting_action');
   },
 );

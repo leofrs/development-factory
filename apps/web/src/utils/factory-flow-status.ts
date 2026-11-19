@@ -43,6 +43,13 @@ const ARTIFACT_KIND_LABELS: Record<FactoryFlowArtifactKind, string> = {
   session_log: 'Log da sessão',
 };
 
+const TERMINAL_HIDDEN_STAGES: ReadonlySet<FactoryStageName> = new Set(['triage', 'planning']);
+
+/** Indica se a etapa da Factory deve expor atalhos para abrir o terminal. */
+export function canOpenTerminalForFactoryStage(stage: FactoryStageName): boolean {
+  return !TERMINAL_HIDDEN_STAGES.has(stage);
+}
+
 /** Retorna o nome legível de uma etapa do ciclo da Factory. */
 export function getFactoryStageLabel(stage: FactoryStageName): string {
   return STAGE_LABELS[stage];

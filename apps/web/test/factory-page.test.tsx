@@ -167,12 +167,12 @@ test('FactoryPage lista múltiplos fluxos paralelos e alterna contexto e planos 
     }),
   );
 
-  // Todos os fluxos paralelos e concluídos aparecem na lista.
+  // Todos os fluxos paralelos e concluídos aparecem na lista; triage e planning ocultam o botão de terminal.
   assert.match(htmlWithFlowA, /AUTH-101 · Login SSO/);
   assert.match(htmlWithFlowA, /PAY-202 · Webhook Pix/);
   assert.match(htmlWithFlowA, /OBS-303 · Métricas/);
   assert.match(htmlWithFlowA, /Ver plano/);
-  assert.match(htmlWithFlowA, /Abrir terminal/);
+  assert.doesNotMatch(htmlWithFlowA, /Abrir terminal/);
   assert.match(htmlWithFlowA, /Parar/);
 
   // Alternando para o Fluxo B, o contexto selecionado muda para Planejamento e ações de etapa.
@@ -199,7 +199,44 @@ test('FactoryPage lista múltiplos fluxos paralelos e alterna contexto e planos 
   assert.match(htmlWithFlowB, /Avançar etapa/);
   assert.match(htmlWithFlowB, /Reexecutar/);
   assert.match(htmlWithFlowB, /Ver plano/);
+  assert.doesNotMatch(htmlWithFlowB, /Abrir terminal/);
   assert.match(htmlWithFlowB, /\/home\/dev\/repos\/payments-api/);
+
+  // A partir de development, o botão Abrir terminal volta a ser exibido.
+  const flowDev = createFlow({
+    id: '44444444-4444-4444-8444-444444444444',
+    title: 'DEV-404 · Implementação',
+    currentStage: 'development',
+    state: 'running',
+    currentSessionId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+  });
+  const htmlWithFlowDev = renderToStaticMarkup(
+    createElement(FactoryPage, {
+      repoPath: '/home/dev/repos/auth-service',
+      flows: [flowDev],
+      sessions: [
+        createSession({
+          sessionId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+          flowId: flowDev.id,
+          stage: 'development',
+          status: 'running',
+        }),
+      ],
+      selectedFlowId: flowDev.id,
+      loadingFlows: false,
+      flowsError: null,
+      onSelectFlow: noop,
+      onPickDirectory: noop,
+      onOpenNewFlow: noop,
+      onOpenFlowTerminal: noop,
+      onAdvanceFlowStage: noopAsync,
+      onRerunFlowStage: noopAsync,
+      onCancelFlow: noopAsync,
+      onRefreshFlows: noopAsync,
+      onViewMarkdown: noop,
+    }),
+  );
+  assert.match(htmlWithFlowDev, /Abrir terminal/);
 });
 
 test('BackgroundTasksPopover exibe múltiplos fluxos da Factory em paralelo com reviews ativos', () => {
@@ -295,5 +332,5 @@ test('NotificationToastCenter exibe notificações de fluxos da Factory com etap
   assert.match(html, /AUTH-101 · Login SSO/);
   assert.match(html, /01 · Triagem/);
   assert.match(html, /Ver plano/);
-  assert.match(html, /Abrir terminal/);
+  assert.doesNotMatch(html, /Abrir terminal/);
 });

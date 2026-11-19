@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { existsSync, statSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import * as pty from 'node-pty';
 import { WebSocket } from 'ws';
 import {
@@ -11,6 +12,7 @@ import {
   type AppEvent,
   type BackgroundSessionSummary,
   type FactoryFlowArtifactKind,
+  type FactoryFlowDetails,
   type FactoryFlowError,
   type FactoryRequest,
   type FactoryStageName,
@@ -23,6 +25,7 @@ import { resolveReviewReportDirectory } from './artifacts.js';
 import { FactoryFlowServiceError, type FactoryFlowService } from './factory-flow-service.js';
 import { createFactoryHistory } from './history.js';
 import { buildCodeReviewPrompt } from './prompts/code-review.js';
+import { buildFactoryArchitecturePrompt } from './prompts/factory-architecture.js';
 import { buildFactoryPlanPrompt } from './prompts/factory-plan.js';
 import { createReviewReportDraft } from './review-report.js';
 import { ReviewServiceError, type ReviewService } from './review-service.js';
@@ -123,6 +126,19 @@ function formatReviewTitle(request: ReviewRequest): string {
 function formatFactoryTitle(request: FactoryRequest): string {
   const trimmed = request.value.trim();
   return trimmed.length > 80 ? `${trimmed.slice(0, 77)}...` : trimmed;
+}
+
+function buildFactoryAllowedTools(stage: FactoryStageName, reportPath: string): string[] {
+  const reportPermissions = [
+    'Edit(.code-reviews/**)',
+    `Edit(${reportPath})`,
+  ];
+
+  if (stage === 'triage') {
+    return ['Read', 'mcp__claude_ai_Atlassian_Rovo__*', ...reportPermissions];
+  }
+
+  return ['Read', 'Glob', 'Grep', ...reportPermissions];
 }
 
 function validateRepoPath(repoPath: string): void {
@@ -502,6 +518,7 @@ export class SessionManager {
     this.#assertCapacity();
 
     let activeFactorySession: ActiveFactorySession | undefined;
+    let flowDetails: FactoryFlowDetails | undefined;
     if (this.#factoryFlowService) {
       if (input.flowId) {
         let details;
@@ -520,6 +537,7 @@ export class SessionManager {
             409,
           );
         }
+        flowDetails = details;
         activeFactorySession = {
           flowId: details.flow.id,
           stage: input.stage ?? details.flow.currentStage,
@@ -628,11 +646,21 @@ export class SessionManager {
     session.reportPath = factoryHistory.reportPath;
     session.sessionPath = factoryHistory.sessionPath;
 
+    const stage = activeFactorySession?.stage ?? input.stage ?? 'triage';
+    const prompt = await this.#buildFactoryStagePrompt(
+      input,
+      stage,
+      factoryHistory.reportPath,
+      flowDetails,
+    );
+
+    const allowedTools = buildFactoryAllowedTools(stage, factoryHistory.reportPath);
+
     let child: pty.IPty;
     try {
       child = pty.spawn(
         'claude',
-        [buildFactoryPlanPrompt(input.inputType, input.value, factoryHistory.reportPath)],
+        ['--verbose', '--allowedTools', allowedTools.join(','), '-p', prompt],
         {
           name: 'xterm-256color',
           cols: input.cols,
@@ -739,6 +767,95 @@ export class SessionManager {
       });
     } catch {
       // Preserva o erro original de criação da sessão.
+    }
+  }
+
+  async #buildFactoryStagePrompt(
+    input: StartFactorySessionInput,
+    stage: FactoryStageName,
+    reportPath: string,
+    flowDetails?: FactoryFlowDetails,
+  ): Promise<string> {
+    if (stage !== 'planning') {
+      return buildFactoryPlanPrompt(input.inputType, input.value, reportPath);
+    }
+
+    const triageArtifact = [...(flowDetails?.artifacts ?? [])]
+      .reverse()
+      .find(
+        artifact =>
+          artifact.stage === 'triage' &&
+          artifact.kind === 'specification' &&
+          artifact.status === 'ready',
+      );
+    const triageStage = flowDetails?.stages.find(item => item.name === 'triage');
+    const understandingReportPath = triageArtifact?.path ?? triageStage?.reportPath ?? undefined;
+
+    let understandingDocument: string | undefined;
+    if (understandingReportPath) {
+      try {
+        understandingDocument = await readFile(understandingReportPath, 'utf8');
+      } catch {
+        understandingDocument = undefined;
+      }
+    }
+
+    return buildFactoryArchitecturePrompt({
+      inputType: input.inputType,
+      value: input.value,
+      understandingDocument,
+      understandingReportPath,
+      reportPath,
+    });
+  }
+
+  async #autoAdvanceToPlanning(flowId: string, expectedUpdatedAt: string): Promise<void> {
+    if (!this.#factoryFlowService) {
+      return;
+    }
+
+    try {
+      const advanced = await this.#factoryFlowService.advanceStage(flowId, {
+        reason: 'Avanço automático da triagem para o planejamento',
+        expectedUpdatedAt,
+      });
+      this.#emitEvent({
+        type: 'factory_flow.updated',
+        flow: advanced.flow,
+      });
+      await this.startFactorySession({
+        inputType: advanced.flow.target.inputType,
+        value: advanced.flow.target.value,
+        repoPath: advanced.flow.target.repoPath,
+        flowId: advanced.flow.id,
+        stage: 'planning',
+        title: advanced.flow.title,
+        cols: 120,
+        rows: 36,
+      });
+    } catch (error) {
+      try {
+        const current = this.#factoryFlowService.getFlow(flowId).flow;
+        if (
+          !isFinalFactoryFlowState(current.state) &&
+          current.state === 'running' &&
+          current.currentSessionId === null
+        ) {
+          const detail = error instanceof Error ? error.message : 'Falha desconhecida';
+          const fallback = await this.#factoryFlowService.transitionFlow(flowId, {
+            to: 'waiting_action',
+            stage: current.currentStage,
+            reason: `Não foi possível iniciar automaticamente a etapa ${current.currentStage}: ${detail}`,
+            currentSessionId: null,
+          });
+          this.#emitEvent({
+            type: 'factory_flow.updated',
+            flow: fallback.flow,
+          });
+        }
+      } catch {
+        // Preserva o estado persistido caso o fluxo já tenha sido encerrado.
+      }
     }
   }
 
@@ -982,6 +1099,10 @@ export class SessionManager {
         stage,
         state: transitioned.flow.state,
       });
+
+      if (stage === 'triage' && session.historyState === 'saved') {
+        await this.#autoAdvanceToPlanning(flowId, transitioned.flow.updatedAt);
+      }
       return;
     }
 

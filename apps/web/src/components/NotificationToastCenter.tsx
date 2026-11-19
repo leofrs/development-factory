@@ -10,7 +10,11 @@ import {
   X,
 } from 'lucide-react';
 import type { AppNotification } from '../hooks/useBackgroundOperations';
-import { getFactoryStageLabel, getFactoryStageStep } from '../utils/factory-flow-status';
+import {
+  canOpenTerminalForFactoryStage,
+  getFactoryStageLabel,
+  getFactoryStageStep,
+} from '../utils/factory-flow-status';
 
 interface NotificationToastCenterProps {
   notifications: AppNotification[];
@@ -209,7 +213,10 @@ export function NotificationToastCenter({
                     </button>
                   )}
 
-                  {(notification.sessionId || (notification.flowId && onOpenFlowTerminal)) && (
+                  {(!isFactory ||
+                    !notification.stage ||
+                    canOpenTerminalForFactoryStage(notification.stage)) &&
+                    (notification.sessionId || (notification.flowId && onOpenFlowTerminal)) && (
                     <button
                       type="button"
                       className="modal-button px-2.5 py-1 text-[11px]"

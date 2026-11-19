@@ -13,6 +13,10 @@ import {
   ServerMessageSchema,
   type ServerMessage,
 } from '@development-factory/shared';
+import {
+  FACTORY_ARCHITECTURE_SYSTEM_PROMPT,
+  buildFactoryArchitecturePrompt,
+} from '../src/prompts/factory-architecture.js';
 import { buildFactoryPlanPrompt } from '../src/prompts/factory-plan.js';
 import { createReviewServer } from '../src/server.js';
 
@@ -82,6 +86,36 @@ test('buildFactoryPlanPrompt inclui tipo, valor e caminho do relatório', () => 
   const prompt = buildFactoryPlanPrompt('jira_key', 'PROD-1234', '/tmp/repo/.code-reviews/plano.md');
   assert(prompt.includes('Chave da tarefa no JIRA: "PROD-1234"'));
   assert(prompt.includes('/tmp/repo/.code-reviews/plano.md'));
+});
+
+test('buildFactoryArchitecturePrompt inclui saída do Bloco 1, destino e placeholder do Bloco 2', () => {
+  const prompt = buildFactoryArchitecturePrompt({
+    inputType: 'jira_key',
+    value: 'PROD-1234',
+    understandingDocument: '#### 1. Síntese Central (Core)\nQuando X, deve Y.',
+    understandingReportPath: '/tmp/repo/.code-reviews/entendimento.md',
+    reportPath: '/tmp/repo/.code-reviews/arquitetura.md',
+  });
+  assert(prompt.includes('Chave da tarefa no JIRA: "PROD-1234"'));
+  assert(prompt.includes('/tmp/repo/.code-reviews/arquitetura.md'));
+  assert(prompt.includes('/tmp/repo/.code-reviews/entendimento.md'));
+  assert(prompt.includes('#### 1. Síntese Central (Core)'));
+  assert(prompt.includes(FACTORY_ARCHITECTURE_SYSTEM_PROMPT));
+});
+
+test('buildFactoryArchitecturePrompt trata ausência de conteúdo prévio do Bloco 1', () => {
+  const withPathOnly = buildFactoryArchitecturePrompt({
+    inputType: 'title',
+    value: 'Ajustar fluxo',
+    understandingReportPath: '/tmp/repo/.code-reviews/entendimento.md',
+  });
+  assert(withPathOnly.includes('"/tmp/repo/.code-reviews/entendimento.md"'));
+
+  const withoutBlockOne = buildFactoryArchitecturePrompt({
+    inputType: 'title',
+    value: 'Ajustar fluxo',
+  });
+  assert(withoutBlockOne.includes('Nenhum documento prévio do Bloco 1 foi localizado automaticamente.'));
 });
 
 test('start_factory executa PTY, salva plano em Markdown e permite leitura formatada via API', { timeout: 30000 }, async context => {
