@@ -44,36 +44,25 @@ Use o botão de sol/lua no cabeçalho para alternar entre os temas claro e escur
 1. Escolha **Número da PR** ou **Nome da Branch**.
 2. Informe um número positivo, como `142`, ou uma branch, como `feat/minha-feature`.
 3. Clique em **Selecionar** no campo **Repositório no WSL**. Navegue pelas pastas e clique em **Selecionar esta pasta** no diretório do projeto. O seletor abre na última pasta utilizada ou na pasta pessoal do usuário WSL; permite subir até a raiz e navegar por `/mnt/c` quando necessário. O filtro procura subpastas apenas na localização atual.
-4. Clique em **Iniciar code review**. A pasta selecionada fica salva automaticamente em `localStorage`. Cada sessão cria arquivos de histórico no repositório.
+4. Em **Salvar code review em**, confirme a pasta padrão ou escolha outra pasta no WSL. O aplicativo lembra a última seleção neste navegador. Clique em **Iniciar code review**.
 5. Interaja com o Claude normalmente no terminal, inclusive com eventuais solicitações de confiança, login e ferramentas. O prompt solicita as cinco etapas de investigação e feedback em português.
 6. Teste redimensionar a janela, selecionar e copiar texto, colar e abrir links. **Ctrl+C** copia quando há seleção; sem seleção envia o controle de interrupção ao PTY. **Ctrl+V** lê o clipboard e usa `term.paste`, respeitando o bracketed paste da TUI. O navegador pode solicitar permissão de clipboard. **Esc** continua disponível para o Claude.
 7. **Copiar saída** copia o buffer ativo completo de até 15.000 linhas de scrollback, sem códigos de cores, com feedback visual. Em uma tela alternativa da TUI, o buffer ativo corresponde àquela tela; não é um histórico permanente de todos os quadros renderizados.
-8. **Encerrar sessão** fecha o modal e o WebSocket; o backend encerra o PTY. Fechar ou recarregar a aba também encerra a conexão. Não há reconexão automática nem restauração de sessões.
+8. Use **Segundo plano** para fechar o modal e manter o review em execução. Abra a sessão novamente pelo menu de operações em segundo plano ou use **Encerrar processo** para parar o PTY.
 
 Encerre os servidores com **Ctrl+C** no terminal onde executou `npm run dev`.
 
-## Histórico em Markdown
+## Pareceres em Markdown
 
-Cada review cria dois arquivos dentro de **`<repositório>/.code-reviews/`**, com data/hora, alvo e um identificador único no nome. Reviews anteriores não são sobrescritos.
+Em **Salvar code review em**, o destino inicial é `$XDG_DATA_HOME/development-factory/reviews/` ou, se a variável estiver vazia ou ausente, `~/.local/share/development-factory/reviews/`. É possível selecionar outra pasta a cada execução. O backend verifica se o destino permite gravação e fica fora do repositório analisado e do diretório do Development Factory antes de iniciar o Claude.
 
-- **`<sessão>.md`**: parecer final estruturado em Markdown. O prompt instrui o Claude a escrever e verificar esse arquivo ao concluir a análise. O CLI mantém suas permissões normais e pode pedir autorização para a escrita. O modal mostra **Parecer salvo** quando detecta conteúdo no arquivo; o estado inicial é **Parecer em elaboração**.
-- **`<sessão>.session.md`**: registro textual automático da saída do PTY, gravado pelo backend durante a sessão, mesmo quando o modal é fechado. Inclui alvo, repositório, início e motivo do encerramento; remove sequências ANSI, mas a TUI pode produzir repetições e redesenhos. Não é uma transcrição semântica da conversa.
-
-Se a sessão terminar antes de o Claude salvar o parecer, o primeiro arquivo é marcado **Code review incompleto**, com um link para o registro da sessão. O encerramento normal, o botão **Encerrar sessão**, a desconexão e a troca de sessão finalizam os registros. Em encerramento abrupto do sistema, o texto já gravado permanece no disco, mas a marcação final pode não existir.
-
-Os caminhos completos aparecem no modal. Abra os arquivos no seu editor pelo diretório do repositório, inclusive depois de recarregar a página. A aplicação não restaura processos PTY a partir desses arquivos. Se não for possível criar o histórico por falta de permissão, o review não é iniciado e o erro aparece no modal. Falhas durante a gravação também são exibidas.
+O Claude entrega o parecer em um arquivo temporário privado. O backend grava um único `.md` na pasta indicada em **Salvar code review em**, com o alvo e um identificador de execução no nome. O modal exibe **Parecer salvo** e o caminho completo após a gravação. O terminal continua disponível ao vivo e em segundo plano. O code review não salva uma transcrição. Se a sessão terminar sem entregar o Markdown, aparece **Parecer incompleto**.
 
 ### Consultar revisões pela interface
 
-Clique em **Histórico** no menu superior. O modal abre na última pasta consultada; na primeira utilização, usa o repositório selecionado e entra em `.code-reviews/` quando essa subpasta existe. Sem repositório selecionado, começa na pasta pessoal do WSL.
+Abra **Histórico** e selecione **Pareceres salvos** para consultar os reviews, inclusive quando estão em pastas diferentes. A busca aceita PR, branch, repositório e caminho do arquivo. Se um parecer tiver sido movido ou apagado, o Histórico informa que está indisponível.
 
-Navegue pelas pastas, use **Início** para retornar à pasta pessoal ou a seta para subir um nível. Os arquivos `.md` da pasta atual são exibidos do mais recente para o mais antigo, com nome e data de alteração. A busca filtra os nomes dos arquivos e permite localizar a PR ou branch registrada no nome. Ao clicar em um arquivo, o conteúdo Markdown aparece no próprio modal, incluindo pareceres incompletos e registros `.session.md`.
-
-O conteúdo é renderizado como Markdown formatado, com títulos, negrito, itálico, listas, citações, links, imagens, código inline e blocos de código. Também aceita tabelas, listas de tarefas, texto riscado e notas de rodapé do GitHub Flavored Markdown. A apresentação acompanha o tema claro/escuro, e tabelas e blocos de código largos têm rolagem horizontal. HTML embutido não é executado nem renderizado.
-
-A leitura não altera arquivos nem inicia uma sessão do Claude. O botão **Atualizar arquivos** recarrega a pasta; para acompanhar um arquivo que ainda está sendo escrito, atualize a lista e abra-o novamente. A pasta de consulta é lembrada separadamente do repositório usado para novos reviews. Arquivos acima de 5 MB e links simbólicos para arquivos não são abertos; nesse caso, use seu editor local.
-
-O único arquivo que o prompt autoriza o Claude a alterar é o parecer daquela sessão; o restante do código continua sob instrução de revisão sem alterações. A pasta `.code-reviews/` não é adicionada automaticamente ao `.gitignore` do repositório: se desejar manter o histórico fora dos commits, inclua-a no ignore local.
+Use **Arquivos locais** para navegar pelo WSL e consultar arquivos legados em `.code-reviews/` ou outros arquivos Markdown. Conteúdo Markdown é exibido com tabelas, listas de tarefas e blocos de código. A leitura aceita arquivos regulares de até 5 MiB e não renderiza HTML embutido.
 
 ## Verificações
 
@@ -86,7 +75,7 @@ curl http://127.0.0.1:3001/health
 
 O health check deve responder `{"ok":true}` com o backend em execução. `npm run build` valida a tipagem e gera a SPA em `apps/web/dist`; o fluxo integrado local documentado usa `npm run dev` e a origem 5173.
 
-Os testes usam servidor HTTP, WebSocket e **node-pty reais** em porta efêmera. Um executável de teste temporário chamado `claude`, escrito em TypeScript, substitui somente o CLI via PATH. Assim não fazem chamadas de IA nem acessam seus repositórios, credenciais ou MCPs. Cobrem health, origem ausente/indevida, rota de upgrade, JSON inválido, schema, diretório inexistente, argumentos sem shell, cwd, TERM, entrada, resize, substituição da sessão, exit code, seletor de diretórios e persistência dos arquivos após gravação do parecer ou desconexão. Testes adicionais verificam histórico incompleto, remoção de ANSI dividido entre chunks, arquivos distintos e recusa de symlink no diretório de histórico. O teste manual acima verifica a integração com seu Claude e seus MCPs.
+Os testes usam servidor HTTP, WebSocket e **node-pty reais** em porta efêmera. Um executável de teste temporário chamado `claude`, escrito em TypeScript, substitui somente o CLI via PATH. Assim não fazem chamadas de IA nem acessam seus repositórios, credenciais ou MCPs. Cobrem health, origem ausente/indevida, rota de upgrade, JSON inválido, schema, diretório inexistente, argumentos sem shell, cwd, TERM, entrada, resize, substituição da sessão, exit code, seletor de diretórios e salvamento em pasta externa, consulta após reiniciar o servidor e revisão interrompida sem salvar transcrição. Os testes também cobrem arquivos legados e a persistência de sessões de planejamento da Factory. O teste manual acima verifica a integração com seu Claude e seus MCPs.
 
 ## Padrão de lint e qualidade
 

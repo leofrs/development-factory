@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -12,7 +12,7 @@ import {
   ReviewArtifactSchema,
   ReviewDetailsSchema,
 } from '@development-factory/shared';
-import { ArtifactPreparationError, type ReviewArtifactFileWriter } from '../src/artifacts.js';
+import { defaultReviewReportDirectory } from '../src/artifacts.js';
 import { listHistory, readHistoryFile } from '../src/history-reader.js';
 import { ReviewService, ReviewServiceError } from '../src/review-service.js';
 import { createReviewServer } from '../src/server.js';
@@ -74,132 +74,87 @@ test('contrato de artefato exige formato compatível e motivo quando falho ou in
   );
 });
 
-test('prepara parecer, resultado estruturado e registro de sessão vinculados ao review e execução', async context => {
+test('prepara apenas a referência do parecer e reutiliza o registro em chamadas repetidas', async context => {
   const { rootDir, repoDir, dbPath } = createTempPaths('review-artifacts-ok-');
   context.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
   const repo = SqliteReviewRepository.open({ dbPath });
   context.after(() => repo.close());
   const service = new ReviewService(repo);
-
   const created = await service.createReview({
     target: { type: 'pr', identifier: '42', repoPath: repoDir },
   });
 
-  const prepared = await service.prepareExecutionArtifacts(created.review.id);
-  assert.equal(prepared.artifacts.length, 3);
-
-  const kinds = prepared.artifacts.map(item => item.kind).sort();
-  assert.deepEqual(kinds, ['report', 'session_log', 'structured_result']);
-
-  for (const artifact of prepared.artifacts) {
-    assert.equal(artifact.reviewId, created.review.id);
-    assert.equal(artifact.executionId, created.execution.id);
-    assert.equal(artifact.version, 1);
-    assert.equal(artifact.status, 'pending');
-    assert.equal(artifact.error, null);
-  }
-
-  const report = prepared.artifacts.find(item => item.kind === 'report');
-  const session = prepared.artifacts.find(item => item.kind === 'session_log');
-  const structured = prepared.artifacts.find(item => item.kind === 'structured_result');
-  assert.ok(report && session && structured);
-
-  const reportContent = readFileSync(report.path, 'utf8');
-  assert.match(reportContent, new RegExp(`Review ID: ${created.review.id}`));
-  assert.match(reportContent, new RegExp(`Execução ID: ${created.execution.id}`));
-  assert.match(reportContent, /# Code review/);
-
-  const sessionContent = readFileSync(session.path, 'utf8');
-  assert.match(sessionContent, new RegExp(`Review ID: ${created.review.id}`));
-  assert.match(sessionContent, /# Registro da sessão de code review/);
-
-  const structuredContent = JSON.parse(readFileSync(structured.path, 'utf8')) as Record<string, unknown>;
-  assert.equal(structuredContent.reviewId, created.review.id);
-  assert.equal(structuredContent.executionId, created.execution.id);
-  assert.equal(structuredContent.status, 'pending');
-
-  const details = ReviewDetailsSchema.parse(service.getReview(created.review.id));
-  assert.equal(details.artifacts.length, 3);
+  const [first, second] = await Promise.all([
+    service.prepareExecutionArtifacts(created.review.id, { reportDirectory: rootDir }),
+    service.prepareExecutionArtifacts(created.review.id, { reportDirectory: rootDir }),
+  ]);
+  assert.deepEqual(first, second);
+  assert.equal(first.artifacts.length, 1);
+  const report = first.artifacts[0];
+  assert.ok(report);
+  assert.equal(report.kind, 'report');
+  assert.equal(report.reviewId, created.review.id);
+  assert.equal(report.executionId, created.execution.id);
+  assert.equal(report.version, 1);
+  assert.equal(report.status, 'pending');
+  assert.match(report.path, /-pr-42-.*\.md$/);
+  assert.equal(existsSync(report.path), false);
+  assert.equal(existsSync(join(repoDir, '.code-reviews')), false);
+  assert.equal(ReviewDetailsSchema.parse(service.getReview(created.review.id)).artifacts.length, 1);
 });
 
-test('falha parcial na criação de artefatos registra motivo e impede review aparentemente ativo', async context => {
-  const { rootDir, repoDir, dbPath } = createTempPaths('review-artifacts-partial-');
+test('recusa pasta interna, link para o repositório e destino inexistente antes de preparar o parecer', async context => {
+  const { rootDir, repoDir, dbPath } = createTempPaths('review-artifacts-invalid-');
   context.after(() => rmSync(rootDir, { recursive: true, force: true }));
-
-  const repo = SqliteReviewRepository.open({ dbPath });
-  context.after(() => repo.close());
-
-  const failingWriter: ReviewArtifactFileWriter = {
-    prepareExecutionFiles(review, execution) {
-      const base = join(review.target.repoPath, '.code-reviews', execution.id);
-      throw new ArtifactPreparationError(
-        'Falha simulada ao criar o registro da sessão.',
-        [
-          { kind: 'report', format: 'markdown', path: `${base}.md` },
-          { kind: 'session_log', format: 'markdown', path: `${base}.session.md` },
-          { kind: 'structured_result', format: 'json', path: `${base}.result.json` },
-        ],
-        new Set(['report']),
-        'session_log',
-      );
-    },
-  };
-
-  const service = new ReviewService(repo, { artifactWriter: failingWriter });
-  const created = await service.createReview({
-    target: { type: 'branch', identifier: 'feat/artifacts', repoPath: repoDir },
-  });
-
-  await assert.rejects(
-    () => service.prepareExecutionArtifacts(created.review.id),
-    error => error instanceof ReviewServiceError && error.code === 'REVIEW_ARTIFACT_FAILED',
-  );
-
-  const details = service.getReview(created.review.id);
-  assert.equal(details.review.state, 'failed');
-  assert.ok(details.review.finishedAt !== null);
-  assert.equal(details.review.error?.code, 'ARTIFACT_CREATION_FAILED');
-  assert.match(details.review.error?.message ?? '', /sessão/);
-
-  assert.equal(details.artifacts.length, 3);
-  const report = details.artifacts.find(item => item.kind === 'report');
-  const session = details.artifacts.find(item => item.kind === 'session_log');
-  const structured = details.artifacts.find(item => item.kind === 'structured_result');
-  assert.equal(report?.status, 'incomplete');
-  assert.equal(report?.error?.code, 'ARTIFACT_CREATION_FAILED');
-  assert.equal(session?.status, 'failed');
-  assert.equal(session?.error?.code, 'ARTIFACT_CREATION_FAILED');
-  assert.equal(structured?.status, 'failed');
-  assert.equal(structured?.error?.code, 'ARTIFACT_CREATION_FAILED');
-
-  assert.ok(details.events.some(event => event.type === 'review_artifact_creation_failed'));
-});
-
-test('diretório .code-reviews inválido falha preparação e marca review como failed', async context => {
-  const { rootDir, repoDir, dbPath } = createTempPaths('review-artifacts-symlink-');
-  context.after(() => rmSync(rootDir, { recursive: true, force: true }));
-
-  const externalDir = join(rootDir, 'external');
-  mkdirSync(externalDir);
-  symlinkSync(externalDir, join(repoDir, '.code-reviews'));
+  const link = join(rootDir, 'link');
+  symlinkSync(repoDir, link);
 
   const repo = SqliteReviewRepository.open({ dbPath });
   context.after(() => repo.close());
   const service = new ReviewService(repo);
-
   const created = await service.createReview({
     target: { type: 'pr', identifier: '99', repoPath: repoDir },
   });
 
-  await assert.rejects(
-    () => service.prepareExecutionArtifacts(created.review.id),
-    error => error instanceof ReviewServiceError && error.code === 'REVIEW_ARTIFACT_FAILED',
-  );
+  for (const reportDirectory of [repoDir, link, join(rootDir, 'inexistente')]) {
+    await assert.rejects(
+      () => service.prepareExecutionArtifacts(created.review.id, { reportDirectory }),
+      error => error instanceof ReviewServiceError && error.code === 'REVIEW_ARTIFACT_FAILED' && error.statusCode === 400,
+    );
+  }
+  assert.deepEqual(service.getReview(created.review.id).artifacts, []);
+});
 
-  const details = service.getReview(created.review.id);
-  assert.equal(details.review.state, 'failed');
-  assert.equal(details.review.error?.code, 'ARTIFACT_CREATION_FAILED');
+test('cria a pasta padrão em XDG_DATA_HOME somente se o destino estiver fora do repositório', async context => {
+  const { rootDir, repoDir, dbPath } = createTempPaths('review-artifacts-default-');
+  const previous = process.env.XDG_DATA_HOME;
+  context.after(() => {
+    if (previous === undefined) {
+      delete process.env.XDG_DATA_HOME;
+    } else {
+      process.env.XDG_DATA_HOME = previous;
+    }
+    rmSync(rootDir, { recursive: true, force: true });
+  });
+
+  const repo = SqliteReviewRepository.open({ dbPath });
+  context.after(() => repo.close());
+  const service = new ReviewService(repo);
+  const created = await service.createReview({
+    target: { type: 'branch', identifier: 'feat/default', repoPath: repoDir },
+  });
+
+  process.env.XDG_DATA_HOME = join(repoDir, 'dados');
+  await assert.rejects(() => service.prepareExecutionArtifacts(created.review.id), /fora do repositório/);
+  assert.equal(existsSync(defaultReviewReportDirectory()), false);
+
+  process.env.XDG_DATA_HOME = join(rootDir, 'dados');
+  const expected = join(rootDir, 'dados', 'development-factory', 'reviews');
+  assert.equal(defaultReviewReportDirectory(), expected);
+  const prepared = await service.prepareExecutionArtifacts(created.review.id);
+  assert.equal(existsSync(expected), true);
+  assert.ok(prepared.artifacts[0]?.path.startsWith(`${expected}/`));
 });
 
 test('históricos Markdown anteriores continuam legíveis junto com artefatos novos', async context => {
@@ -218,7 +173,7 @@ test('históricos Markdown anteriores continuam legíveis junto com artefatos no
   const created = await service.createReview({
     target: { type: 'pr', identifier: '2', repoPath: repoDir },
   });
-  await service.prepareExecutionArtifacts(created.review.id);
+  await service.prepareExecutionArtifacts(created.review.id, { reportDirectory: rootDir });
 
   const listing = await listHistory(repoDir, true);
   assert.equal(listing.files.some(file => file.name === '2026-01-01T00-00-00-000Z-pr-1.md'), true);
@@ -257,7 +212,7 @@ test('API HTTP registra, prepara e lista artefatos associados ao review e à exe
   const prepareRes = await fetch(`${baseUrl}/api/reviews/${created.review.id}/artifacts/prepare`, {
     method: 'POST',
     headers: { Origin: TEST_ORIGIN, 'Content-Type': 'application/json' },
-    body: JSON.stringify({}),
+    body: JSON.stringify({ reportDirectory: rootDir }),
   });
   assert.equal(prepareRes.status, 201);
 
@@ -281,5 +236,5 @@ test('API HTTP registra, prepara e lista artefatos associados ao review e à exe
   });
   assert.equal(listRes.status, 200);
   const listed = ReviewArtifactListResponseSchema.parse(await listRes.json());
-  assert.equal(listed.artifacts.length, 4);
+  assert.equal(listed.artifacts.length, 2);
 });

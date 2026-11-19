@@ -89,6 +89,7 @@ test('API REST /api/sessions valida origem, lista sessões por ordem recente, de
     targetType: 'pr',
     identifier: '401',
     repoPath: repoDir,
+    reportDirectory: rootDir,
     cols: 80,
     rows: 24,
   });

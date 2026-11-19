@@ -6,6 +6,7 @@ import {
   ReviewEventSchema,
   ReviewExecutionSchema,
   ReviewSchema,
+  SavedReviewReportsSchema,
   isFinalReviewState,
   transitionReview,
   type Review,
@@ -16,6 +17,7 @@ import {
   type ReviewExecution,
   type ReviewState,
   type ReviewTransitionCommand,
+  type SavedReviewReport,
 } from '@development-factory/shared';
 import { resolveReviewDbPath } from './config.js';
 import { ReviewStorageError } from './errors.js';
@@ -823,6 +825,30 @@ export class SqliteReviewRepository {
     ) as unknown as ArtifactRow[];
 
     return rows.map(rowToArtifact);
+  }
+
+  listSavedReports(): SavedReviewReport[] {
+    this.ensureOpen();
+    const rows = this.db.prepare(`
+      SELECT artifact.id, artifact.path, artifact.updated_at,
+             review.contract_version, review.target_type, review.target_identifier, review.target_repo_path
+      FROM review_artifacts AS artifact
+      JOIN reviews AS review ON review.id = artifact.review_id
+      WHERE artifact.kind = 'report' AND artifact.format = 'markdown' AND artifact.status = 'ready'
+      ORDER BY artifact.updated_at DESC, artifact.id DESC
+    `).all();
+
+    return SavedReviewReportsSchema.parse(rows.map(row => ({
+      id: row.id,
+      path: row.path,
+      savedAt: row.updated_at,
+      target: {
+        contractVersion: row.contract_version,
+        type: row.target_type,
+        identifier: row.target_identifier,
+        repoPath: row.target_repo_path,
+      },
+    })));
   }
 
   getAppliedMigrations(): AppliedMigration[] {

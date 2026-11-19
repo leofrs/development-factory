@@ -54,7 +54,7 @@ test('getSessionStatusPresentation reflete cada etapa da execução de review e 
     status: 'exited',
     historyState: 'incomplete',
   });
-  assert.equal(reviewExitedIncomplete.label, 'Review incompleto');
+  assert.equal(reviewExitedIncomplete.label, 'Parecer incompleto');
   assert.equal(reviewExitedIncomplete.textClass, 'text-warning');
 
   const factoryExitedIncomplete = getSessionStatusPresentation({

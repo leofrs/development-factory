@@ -211,6 +211,7 @@ interface ServerTestHarness {
   readonly baseUrl: string;
   readonly wsUrl: string;
   readonly repoDir: string;
+  readonly reportDirectory: string;
   readonly sessionManager: SessionManager;
   readonly sockets: WebSocket[];
   readonly abortControllers: AbortController[];
@@ -257,6 +258,7 @@ async function setupServer(context: TestContext, prefix: string): Promise<Server
     baseUrl: `http://127.0.0.1:${address.port}`,
     wsUrl: `ws://127.0.0.1:${address.port}/ws/terminal`,
     repoDir,
+    reportDirectory: rootDir,
     sessionManager,
     sockets,
     abortControllers,
@@ -267,7 +269,7 @@ test(
   'Code Review via WebSocket continua em background após desconexão, salva parecer e entrega replay via attach_session',
   { timeout: 15000 },
   async context => {
-    const { wsUrl, repoDir, sessionManager, sockets } = await setupServer(
+    const { wsUrl, repoDir, reportDirectory, sessionManager, sockets } = await setupServer(
       context,
       'df-bg-reconnect-',
     );
@@ -278,6 +280,7 @@ test(
       targetType: 'pr',
       identifier: '701',
       repoPath: repoDir,
+      reportDirectory,
       cols: 80,
       rows: 24,
     });
@@ -355,7 +358,7 @@ test(
 
     assert(session.reportPath && existsSync(session.reportPath));
     assert(readFileSync(session.reportPath, 'utf8').includes('# Parecer final'));
-    assert(session.sessionPath && existsSync(session.sessionPath));
+    assert.equal(session.sessionPath, null);
 
     await ws2.close();
   },
@@ -365,7 +368,7 @@ test(
   'múltiplas sessões paralelas (review + review + factory) emitem eventos independentes em GET /api/events e GET /api/sessions',
   { timeout: 20000 },
   async context => {
-    const { baseUrl, wsUrl, repoDir, sessionManager, sockets, abortControllers } =
+    const { baseUrl, wsUrl, repoDir, reportDirectory, sessionManager, sockets, abortControllers } =
       await setupServer(context, 'df-bg-parallel-');
 
     const sse = await connectSse(baseUrl, abortControllers);
@@ -379,6 +382,7 @@ test(
       targetType: 'pr',
       identifier: '801',
       repoPath: repoDir,
+      reportDirectory,
       cols: 80,
       rows: 24,
     });
@@ -387,6 +391,7 @@ test(
       targetType: 'branch',
       identifier: 'feat/parallel-bg',
       repoPath: repoDir,
+      reportDirectory,
       cols: 80,
       rows: 24,
     });
@@ -526,7 +531,7 @@ test(
   'encerramento explícito via POST /api/sessions/:id/stop e stop_session transiciona para cancelled e encerra PTY',
   { timeout: 15000 },
   async context => {
-    const { baseUrl, wsUrl, repoDir, sessionManager, sockets, abortControllers } =
+    const { baseUrl, wsUrl, repoDir, reportDirectory, sessionManager, sockets, abortControllers } =
       await setupServer(context, 'df-bg-stop-');
 
     const sse = await connectSse(baseUrl, abortControllers);
@@ -538,6 +543,7 @@ test(
       targetType: 'pr',
       identifier: '901',
       repoPath: repoDir,
+      reportDirectory,
       cols: 80,
       rows: 24,
     });

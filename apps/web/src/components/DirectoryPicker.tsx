@@ -2,7 +2,12 @@ import { useEffect, useRef, useState } from 'react';
 import { ArrowUp, Check, ChevronRight, Folder, Home, LoaderCircle, X } from 'lucide-react';
 import { DirectoryListingSchema, type DirectoryListing } from '@development-factory/shared';
 
-export function DirectoryPicker({ initialPath, onSelect, onClose }: { initialPath: string; onSelect: (path: string) => void; onClose: () => void }) {
+export function DirectoryPicker({ initialPath, purpose, onSelect, onClose }: {
+  initialPath: string;
+  purpose: 'repository' | 'report';
+  onSelect: (path: string) => void;
+  onClose: () => void;
+}) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const [path, setPath] = useState<string | undefined>(initialPath || undefined);
   const [listing, setListing] = useState<DirectoryListing>();
@@ -43,7 +48,13 @@ export function DirectoryPicker({ initialPath, onSelect, onClose }: { initialPat
   const directories = listing?.directories.filter(directory => directory.name.toLocaleLowerCase().includes(filter.toLocaleLowerCase())) ?? [];
   return <dialog ref={dialogRef} onCancel={event => { event.preventDefault(); onClose(); }} aria-labelledby="directory-title" className="directory-dialog m-auto w-[calc(100%-2rem)] max-w-xl overflow-hidden rounded-xl border border-line-strong bg-surface p-0 text-primary shadow-2xl">
     <div className="flex max-h-[80dvh] flex-col">
-      <header className="flex items-center gap-3 border-b border-line px-5 py-4"><Folder size={19} className="text-accent" /><div className="flex-1"><h2 id="directory-title" className="text-sm font-semibold">Selecionar repositório no WSL</h2><p className="mt-1 text-xs text-muted">Navegue até a pasta do projeto.</p></div><button type="button" className="modal-button" onClick={onClose} aria-label="Fechar seletor"><X size={16} /></button></header>
+      <header className="flex items-center gap-3 border-b border-line px-5 py-4">
+        <Folder size={19} className="text-accent" />
+        <h2 id="directory-title" className="flex-1 text-sm font-semibold">
+          {purpose === 'report' ? 'Salvar code review em' : 'Selecionar repositório no WSL'}
+        </h2>
+        <button type="button" className="modal-button" onClick={onClose} aria-label="Fechar seletor"><X size={16} /></button>
+      </header>
       <div className="space-y-3 border-b border-line px-5 py-4">
         <div className="flex gap-2"><button type="button" className="modal-button" onClick={() => navigate()} disabled={loading} title="Pasta pessoal do WSL"><Home size={14} />Início</button><button type="button" className="modal-button" onClick={() => { if (listing?.parentPath) navigate(listing.parentPath); }} disabled={loading || !listing?.parentPath} title="Subir um nível"><ArrowUp size={14} />Voltar uma pasta</button></div>
         <p className="break-all font-mono text-xs leading-5 text-muted" aria-live="polite">{loading ? 'Abrindo pasta…' : error ? path || 'Pasta pessoal' : listing?.path}</p>

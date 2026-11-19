@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { ReviewStateSchema } from './review.js';
+import { ReviewReportDirectoryPathSchema, ReviewStateSchema } from './review.js';
 
 export * from './review.js';
 
@@ -74,6 +74,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     targetType: TargetTypeSchema,
     identifier: z.string().trim().min(1).max(500).refine(value => !/[\x00-\x1f\x7f]/.test(value), 'Identificador inválido'),
     repoPath: repoPathSchema,
+    reportDirectory: ReviewReportDirectoryPathSchema.optional(),
     cols: columns,
     rows,
   }).refine(value => value.targetType !== 'pr' || /^[1-9]\d*$/.test(value.identifier), 'Informe um número de PR positivo'),
@@ -108,7 +109,12 @@ export const ServerMessageSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('output'), data: z.string() }),
   z.object({ type: z.literal('status'), sessionId: uuidSchema.optional(), state: z.enum(['running', 'exited']), exitCode: z.number().int().optional() }),
   z.object({ type: z.literal('error'), message: z.string() }),
-  z.object({ type: z.literal('history'), reportPath: z.string(), sessionPath: z.string(), state: z.enum(['pending', 'saved', 'incomplete']) }),
+  z.object({
+    type: z.literal('history'),
+    reportPath: z.string(),
+    sessionPath: z.string().nullable().optional(),
+    state: BackgroundSessionHistoryStateSchema,
+  }),
   z.object({ type: z.literal('review'), reviewId: uuidSchema, executionId: uuidSchema, state: ReviewStateSchema }),
   z.strictObject({ type: z.literal('session_attached'), session: BackgroundSessionSummarySchema, replay: z.string() }),
 ]);
@@ -119,6 +125,8 @@ export const DirectoryListingSchema = z.object({
   directories: z.array(z.object({ name: z.string(), path: z.string() })),
 });
 export type DirectoryListing = z.infer<typeof DirectoryListingSchema>;
+
+export const ReviewDestinationSchema = z.strictObject({ path: ReviewReportDirectoryPathSchema });
 
 export const HistoryFileInfoSchema = z.object({
   name: z.string(), path: z.string(), size: z.number().nonnegative(), modifiedAt: z.string(),

@@ -302,6 +302,10 @@ const artifactPathSchema = text
   .max(4096)
   .refine(value => value.startsWith('/') && !value.includes('\0'), 'Use um caminho absoluto no WSL');
 
+export const ReviewReportDirectoryPathSchema = z.string()
+  .max(4096)
+  .refine(value => value.startsWith('/') && !value.includes('\0'), 'Use um caminho absoluto no WSL');
+
 export const ReviewArtifactSchema = z.strictObject({
   contractVersion: version,
   id,
@@ -368,7 +372,7 @@ export type RegisterReviewArtifactResponse = z.infer<typeof RegisterReviewArtifa
 
 export const PrepareReviewArtifactsRequestSchema = z.strictObject({
   executionId: id.optional(),
-  includeStructuredResult: z.boolean().optional(),
+  reportDirectory: ReviewReportDirectoryPathSchema.optional(),
 });
 export type PrepareReviewArtifactsRequest = z.infer<typeof PrepareReviewArtifactsRequestSchema>;
 
@@ -383,6 +387,14 @@ export const ReviewArtifactListResponseSchema = z.strictObject({
   artifacts: z.array(ReviewArtifactSchema),
 });
 export type ReviewArtifactListResponse = z.infer<typeof ReviewArtifactListResponseSchema>;
+
+export const SavedReviewReportsSchema = z.array(z.strictObject({
+  id,
+  path: artifactPathSchema,
+  savedAt: timestamp,
+  target: ReviewTargetSchema,
+}));
+export type SavedReviewReport = z.infer<typeof SavedReviewReportsSchema>[number];
 
 export const ReviewDetailsSchema = z.strictObject({
   contractVersion: version,

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react';
-import { ArrowRight, Check, ChevronRight, FolderGit2, GitBranch, GitPullRequest, Layers3, LockKeyhole, ScanLine, Terminal } from 'lucide-react';
-import { ClientMessageSchema, type TargetType } from '@development-factory/shared';
+import { ArrowRight, Check, ChevronRight, Folder, FolderGit2, GitBranch, GitPullRequest, Layers3, LockKeyhole, ScanLine, Terminal } from 'lucide-react';
+import { ClientMessageSchema, ReviewDestinationSchema } from '@development-factory/shared';
+import type { TargetType } from '@development-factory/shared';
 import { TerminalModal } from './components/TerminalModal';
 import { readSavedTheme, themeStorageKey } from './theme';
 import { DirectoryPicker } from './components/DirectoryPicker';
@@ -14,6 +15,7 @@ import { SeverityMatrixModal } from './components/SeverityMatrixModal';
 import { useBackgroundOperations } from './hooks/useBackgroundOperations';
 
 const storageKey = 'development-factory.repoPath';
+const reportDirectoryKey = 'development-factory.reportDirectory';
 const steps = [
   { title: 'Contexto antes de código', text: 'A tarefa original e seus critérios de aceite, via MCP.' },
   { title: 'Causa raiz e fluxo completo', text: 'O diff, seus consumidores e tudo que existe ao redor.' },
@@ -34,6 +36,14 @@ export default function App() {
   const [repoPath, setRepoPath] = useState(() => {
     try { return localStorage.getItem(storageKey) ?? localStorage.getItem('make-and-review.repoPath') ?? ''; } catch { return ''; }
   });
+  const [reportDirectory, setReportDirectory] = useState(() => {
+    try {
+      return localStorage.getItem(reportDirectoryKey) ?? '';
+    } catch {
+      return '';
+    }
+  });
+  const [defaultReportDirectory, setDefaultReportDirectory] = useState('');
   const {
     sessions,
     sessionsById,
@@ -53,7 +63,7 @@ export default function App() {
   const [configuringFactoryTask, setConfiguringFactoryTask] = useState(false);
   const [savedPlanPath, setSavedPlanPath] = useState<string | null>(null);
   const [viewingMarkdownPath, setViewingMarkdownPath] = useState<string | null>(null);
-  const [pickingDirectory, setPickingDirectory] = useState(false);
+  const [pickingDirectory, setPickingDirectory] = useState<'repository' | 'report' | null>(null);
   const [viewingHistory, setViewingHistory] = useState(false);
   const [viewingSeverityMatrix, setViewingSeverityMatrix] = useState(false);
   const [error, setError] = useState('');
@@ -63,6 +73,38 @@ export default function App() {
     try { localStorage.setItem(storageKey, repoPath); setStorageError(false); }
     catch { setStorageError(true); }
   }, [repoPath]);
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch('http://127.0.0.1:3001/api/review-destination', { signal: controller.signal })
+      .then(async response => {
+        if (response.ok) {
+          const body: unknown = await response.json();
+          const destination = ReviewDestinationSchema.parse(body);
+          if (!controller.signal.aborted) {
+            setDefaultReportDirectory(destination.path);
+          }
+        }
+      })
+      .catch(() => {
+        // O backend aplica o padrão mesmo quando o caminho não pôde ser exibido.
+      });
+    return () => controller.abort();
+  }, []);
+
+  function selectDirectory(path: string) {
+    if (pickingDirectory === 'report') {
+      setReportDirectory(path);
+      try {
+        localStorage.setItem(reportDirectoryKey, path);
+      } catch {
+        // A pasta vale para esta página mesmo sem armazenamento no navegador.
+      }
+    } else {
+      setRepoPath(path);
+    }
+    setError('');
+    setPickingDirectory(null);
+  }
   const closeModal = useCallback(() => {
     minimizeTerminal();
     submitRef.current?.focus();
@@ -81,7 +123,10 @@ export default function App() {
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!repoPath) { setError('Selecione a pasta do repositório no WSL.'); return; }
-    const parsed = ClientMessageSchema.safeParse({ type: 'start_review', targetType, identifier, repoPath, cols: 80, rows: 24 });
+    const parsed = ClientMessageSchema.safeParse({
+      type: 'start_review', targetType, identifier, repoPath,
+      reportDirectory: reportDirectory || undefined, cols: 80, rows: 24,
+    });
     if (!parsed.success) { setError(parsed.error.issues[0]?.message ?? 'Verifique os campos.'); return; }
     if (parsed.data.type !== 'start_review') return;
     setError('');
@@ -89,6 +134,7 @@ export default function App() {
       targetType: parsed.data.targetType,
       identifier: parsed.data.identifier,
       repoPath: parsed.data.repoPath,
+      reportDirectory: parsed.data.reportDirectory,
     });
   }
 
@@ -98,7 +144,7 @@ export default function App() {
         <FactoryPage
           repoPath={repoPath}
           savedPlanPath={effectiveSavedPlanPath}
-          onPickDirectory={() => setPickingDirectory(true)}
+          onPickDirectory={() => setPickingDirectory('repository')}
           onOpenInitialNode={() => setConfiguringFactoryTask(true)}
           onViewPlan={path => setViewingMarkdownPath(path)}
         />
@@ -134,9 +180,26 @@ export default function App() {
               </div>
               <div>
                 <label htmlFor="repoPath" className="mb-2.5 block text-xs font-medium text-secondary">Repositório no WSL</label>
-                <button id="repoPath" type="button" onClick={() => setPickingDirectory(true)} className="field flex items-center gap-3 px-3 text-left" aria-describedby="path-help" aria-haspopup="dialog"><FolderGit2 size={16} className="shrink-0 text-accent" /><span className="min-w-0 flex-1 break-all">{repoPath || 'Selecione a pasta do repositório'}</span><span className="shrink-0 text-accent">{repoPath ? 'Alterar' : 'Selecionar'}</span></button>
+                <button id="repoPath" type="button" onClick={() => setPickingDirectory('repository')} className="field flex items-center gap-3 px-3 text-left" aria-describedby="path-help" aria-haspopup="dialog"><FolderGit2 size={16} className="shrink-0 text-accent" /><span className="min-w-0 flex-1 break-all">{repoPath || 'Selecione a pasta do repositório'}</span><span className="shrink-0 text-accent">{repoPath ? 'Alterar' : 'Selecionar'}</span></button>
                 <p id="path-help" className="mt-2.5 flex items-center gap-1.5 text-[11px] text-muted"><Check size={12} />{storageError ? 'Armazenamento indisponível; o caminho vale para esta página.' : 'Caminho salvo automaticamente neste navegador.'}</p>
-                <p className="mt-2 text-[11px] leading-5 text-muted">Parecer e registro da sessão salvos em <span className="font-mono">.code-reviews/</span> dentro da pasta selecionada.</p>
+              </div>
+              <div>
+                <label htmlFor="report-directory" className="mb-2.5 block text-xs font-medium text-secondary">
+                  Salvar code review em
+                </label>
+                <button
+                  id="report-directory"
+                  type="button"
+                  onClick={() => setPickingDirectory('report')}
+                  className="field flex items-center gap-3 px-3 text-left"
+                  aria-describedby="report-directory-help"
+                  aria-haspopup="dialog"
+                >
+                  <Folder size={16} className="shrink-0 text-accent" />
+                  <span className="min-w-0 flex-1 break-all">{reportDirectory || defaultReportDirectory || 'Pasta padrão do aplicativo'}</span>
+                  <span className="shrink-0 text-accent">Alterar</span>
+                </button>
+                <p id="report-directory-help" className="mt-2 text-[11px] leading-5 text-muted">Escolha uma pasta fora do repositório e do Development Factory.</p>
               </div>
               {error && <p role="alert" className="text-xs text-danger">{error}</p>}
               <button ref={submitRef} type="submit" className="flex w-full items-center justify-center gap-3 rounded-lg bg-accent py-3.5 text-sm font-semibold text-on-accent transition hover:bg-accent-hover active:scale-[0.99]">Iniciar code review <ArrowRight size={17} /></button>
@@ -179,7 +242,7 @@ export default function App() {
       {configuringFactoryTask && (
         <FactoryTaskModal
           repoPath={repoPath}
-          onPickDirectory={() => setPickingDirectory(true)}
+          onPickDirectory={() => setPickingDirectory('repository')}
           onClose={() => setConfiguringFactoryTask(false)}
           onStart={factoryRequest => {
             setConfiguringFactoryTask(false);
@@ -210,7 +273,14 @@ export default function App() {
           onClose={() => setViewingMarkdownPath(null)}
         />
       )}
-      {pickingDirectory && <DirectoryPicker initialPath={repoPath} onClose={() => setPickingDirectory(false)} onSelect={path => { setRepoPath(path); setError(''); setPickingDirectory(false); }} />}
+      {pickingDirectory && (
+        <DirectoryPicker
+          initialPath={pickingDirectory === 'report' ? reportDirectory : repoPath}
+          purpose={pickingDirectory}
+          onClose={() => setPickingDirectory(null)}
+          onSelect={selectDirectory}
+        />
+      )}
       {viewingHistory && <HistoryModal initialPath={repoPath} onClose={() => setViewingHistory(false)} />}
       {viewingSeverityMatrix && (
         <SeverityMatrixModal onClose={() => setViewingSeverityMatrix(false)} />

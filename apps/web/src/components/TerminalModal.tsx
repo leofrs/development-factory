@@ -375,7 +375,7 @@ export function TerminalModal({
     : history?.state === 'saved'
       ? 'Parecer salvo'
       : history?.state === 'incomplete'
-        ? 'Review incompleto'
+        ? 'Parecer incompleto'
         : 'Parecer em elaboração';
 
   return <dialog ref={dialogRef} onCancel={event => event.preventDefault()} aria-labelledby="terminal-title" className="terminal-dialog h-[88dvh] max-h-[100dvh] w-[calc(100%-1rem)] max-w-6xl overflow-hidden rounded-xl border border-line-strong bg-terminal p-0 text-primary shadow-2xl sm:w-[calc(100%-3rem)]">
@@ -396,7 +396,9 @@ export function TerminalModal({
       {history && <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line bg-surface px-5 py-2 text-[11px] leading-5 text-muted" role="status">
         <div className="min-w-0 flex-1">
           <p className="break-all"><span className={history.state === 'saved' ? 'text-accent' : ''}>{savedLabel}:</span> <span className="font-mono">{history.reportPath}</span></p>
-          <p className="break-all">Registro automático da sessão: <span className="font-mono">{history.sessionPath}</span></p>
+          {history.sessionPath && (
+            <p className="break-all">Registro automático da sessão: <span className="font-mono">{history.sessionPath}</span></p>
+          )}
         </div>
         {history.state === 'saved' && onViewMarkdown && (
           <button type="button" className="modal-button border-accent/40 text-accent hover:bg-selected" onClick={() => onViewMarkdown(history.reportPath)}>

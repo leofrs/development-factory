@@ -13,9 +13,11 @@ import {
   type ReviewRequest,
   type ServerMessage,
 } from '@development-factory/shared';
-import { createFactoryHistory, createReviewHistory } from './history.js';
+import { resolveReviewReportDirectory } from './artifacts.js';
+import { createFactoryHistory } from './history.js';
 import { buildCodeReviewPrompt } from './prompts/code-review.js';
 import { buildFactoryPlanPrompt } from './prompts/factory-plan.js';
+import { createReviewReportDraft } from './review-report.js';
 import { ReviewServiceError, type ReviewService } from './review-service.js';
 import {
   DEFAULT_SESSION_BUFFER_MAX_BYTES,
@@ -33,6 +35,7 @@ const APP_EVENT_NAME = 'app_event';
 export type SessionManagerErrorCode =
   | 'SESSION_NOT_FOUND'
   | 'INVALID_REPO_PATH'
+  | 'INVALID_REPORT_DIRECTORY'
   | 'MAX_SESSIONS_REACHED'
   | 'SESSION_NOT_RUNNING'
   | 'SESSION_CREATION_FAILED';
@@ -229,6 +232,14 @@ export class SessionManager {
     validateRepoPath(input.repoPath);
     this.#assertCapacity();
 
+    let reportDirectory: string;
+    try {
+      reportDirectory = resolveReviewReportDirectory(input.repoPath, input.reportDirectory);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Pasta inválida em “Salvar code review em”.';
+      throw new SessionManagerError('INVALID_REPORT_DIRECTORY', message, 400);
+    }
+
     const created = await this.#reviewService.createReview({
       target: {
         type: input.targetType,
@@ -241,32 +252,45 @@ export class SessionManager {
     try {
       preparedArtifacts = await this.#reviewService.prepareExecutionArtifacts(created.review.id, {
         executionId: created.execution.id,
-        includeStructuredResult: false,
+        reportDirectory,
       });
     } catch (error) {
       const message =
         error instanceof ReviewServiceError
           ? error.message
-          : 'Não foi possível preparar os arquivos do review.';
+          : 'Não foi possível preparar a pasta indicada em “Salvar code review em”.';
       throw new SessionManagerError('SESSION_CREATION_FAILED', message, 500);
     }
 
     const reportArtifact = preparedArtifacts.artifacts.find(item => item.kind === 'report');
-    const sessionArtifact = preparedArtifacts.artifacts.find(item => item.kind === 'session_log');
-    if (!reportArtifact || !sessionArtifact) {
+    if (!reportArtifact) {
       throw new SessionManagerError(
         'SESSION_CREATION_FAILED',
-        'Os artefatos obrigatórios do review não foram preparados.',
+        'Não foi possível preparar a pasta indicada em “Salvar code review em”.',
         500,
       );
+    }
+
+    let draft: ReturnType<typeof createReviewReportDraft>;
+    try {
+      draft = createReviewReportDraft(input.repoPath, reportArtifact.path);
+    } catch {
+      const message = 'Não foi possível preparar o arquivo temporário do parecer.';
+      await this.#failReviewStart(
+        created.review.id,
+        created.execution.id,
+        reportArtifact.id,
+        'REPORT_DRAFT_FAILED',
+        message,
+      );
+      throw new SessionManagerError('SESSION_CREATION_FAILED', message, 500);
     }
 
     const activeReviewSession: ActiveReviewSession = {
       reviewId: created.review.id,
       executionId: created.execution.id,
       reportArtifactId: reportArtifact.id,
-      sessionArtifactId: sessionArtifact.id,
-      reportSaved: false,
+      draft,
     };
 
     const session: ManagedSession = {
@@ -277,7 +301,7 @@ export class SessionManager {
       status: 'running',
       historyState: 'pending',
       reportPath: reportArtifact.path,
-      sessionPath: sessionArtifact.path,
+      sessionPath: null,
       ptyProcess: undefined,
       subscriptions: [],
       history: undefined,
@@ -297,58 +321,11 @@ export class SessionManager {
       finalized: false,
     };
 
-    const reviewHistory = createReviewHistory(
-      input,
-      state => {
-        session.historyState = state;
-        if (state === 'saved') {
-          activeReviewSession.reportSaved = true;
-          this.#enqueue(runtime, async () => {
-            await this.#reviewService.updateArtifactStatus(
-              activeReviewSession.reviewId,
-              activeReviewSession.reportArtifactId,
-              'ready',
-              null,
-              'review.report_file_saved',
-            );
-          });
-          this.#emitEvent({
-            type: 'session.history_saved',
-            session: toBackgroundSessionSummary(session),
-          });
-        } else {
-          this.#emitEvent({
-            type: 'session.updated',
-            session: toBackgroundSessionSummary(session),
-          });
-        }
-        broadcast(session, {
-          type: 'history',
-          reportPath: reportArtifact.path,
-          sessionPath: sessionArtifact.path,
-          state,
-        });
-      },
-      message => {
-        broadcast(session, { type: 'error', message });
-      },
-      {
-        reviewId: created.review.id,
-        executionId: created.execution.id,
-        prepared: {
-          reportPath: reportArtifact.path,
-          sessionPath: sessionArtifact.path,
-          startedAt: created.execution.createdAt,
-        },
-      },
-    );
-    session.history = reviewHistory;
-
     let child: pty.IPty;
     try {
       child = pty.spawn(
         'claude',
-        [buildCodeReviewPrompt(input.targetType, input.identifier, reportArtifact.path)],
+        [buildCodeReviewPrompt(input.targetType, input.identifier, draft.path)],
         {
           name: 'xterm-256color',
           cols: input.cols,
@@ -359,36 +336,13 @@ export class SessionManager {
       );
     } catch (error) {
       const detail = error instanceof Error ? error.message : 'Falha desconhecida';
-      session.history = undefined;
-      reviewHistory.finish(`falha ao iniciar processo PTY: ${detail}`);
-
-      const spawnError = buildReviewError(
-        'PTY_SPAWN_FAILED',
-        `Não foi possível iniciar o processo Claude: ${detail}`,
-        true,
-      );
-      await this.#reviewService.updateArtifactStatus(
-        activeReviewSession.reviewId,
-        activeReviewSession.sessionArtifactId,
-        'ready',
-        null,
-        'review.session_log_saved',
-      );
-      await this.#reviewService.updateArtifactStatus(
-        activeReviewSession.reviewId,
-        activeReviewSession.reportArtifactId,
-        'incomplete',
-        spawnError,
-      );
-      await this.#reviewService.finishExecution(
+      draft.dispose();
+      await this.#failReviewStart(
         activeReviewSession.reviewId,
         activeReviewSession.executionId,
-        {
-          process: { status: 'failed', error: spawnError },
-          targetState: 'failed',
-          reason: `Falha ao iniciar o processo PTY: ${detail}`,
-          error: spawnError,
-        },
+        activeReviewSession.reportArtifactId,
+        'PTY_SPAWN_FAILED',
+        `Não foi possível iniciar o processo Claude: ${detail}`,
       );
       throw new SessionManagerError(
         'SESSION_CREATION_FAILED',
@@ -404,7 +358,6 @@ export class SessionManager {
           return;
         }
         session.buffer.append(data);
-        session.history?.record(data);
         broadcast(session, { type: 'output', data });
       }),
       child.onExit(({ exitCode, signal }) => {
@@ -413,7 +366,21 @@ export class SessionManager {
     ];
 
     this.#runtimes.set(session.sessionId, runtime);
-    await this.#reviewService.startExecution(created.review.id, created.execution.id, child.pid);
+    try {
+      await this.#reviewService.startExecution(created.review.id, created.execution.id, child.pid);
+    } catch (error) {
+      await this.stopSession(session.sessionId, 'falha ao registrar o início da sessão');
+      throw error;
+    }
+
+    if (!runtime.finalized) {
+      draft.watch(() => {
+        if (!runtime.finalized && session.historyState === 'pending') {
+          this.#enqueue(runtime, () => this.#refreshReviewReport(session, activeReviewSession));
+        }
+      });
+      this.#enqueue(runtime, () => this.#refreshReviewReport(session, activeReviewSession));
+    }
 
     this.#emitEvent({
       type: 'session.started',
@@ -421,6 +388,76 @@ export class SessionManager {
     });
 
     return session;
+  }
+
+  async #failReviewStart(
+    reviewId: string,
+    executionId: string,
+    artifactId: string,
+    code: string,
+    message: string,
+  ): Promise<void> {
+    const error = buildReviewError(code, message, true);
+    await this.#reviewService.updateArtifactStatus(reviewId, artifactId, 'failed', error);
+    await this.#reviewService.finishExecution(reviewId, executionId, {
+      process: { status: 'failed', error },
+      targetState: 'failed',
+      reason: message,
+      error,
+    });
+  }
+
+  #setReviewReportState(session: ManagedSession, state: 'saved' | 'incomplete'): void {
+    session.historyState = state;
+    this.#emitEvent({
+      type: state === 'saved' ? 'session.history_saved' : 'session.updated',
+      session: toBackgroundSessionSummary(session),
+    });
+    if (session.reportPath) {
+      broadcast(session, { type: 'history', reportPath: session.reportPath, state });
+    }
+  }
+
+  async #refreshReviewReport(session: ManagedSession, review: ActiveReviewSession): Promise<void> {
+    if (session.historyState === 'saved' || !await review.draft.publish()) {
+      return;
+    }
+
+    await this.#reviewService.updateArtifactStatus(
+      review.reviewId,
+      review.reportArtifactId,
+      'ready',
+      null,
+      'review.report_file_saved',
+    );
+    this.#setReviewReportState(session, 'saved');
+  }
+
+  async #finishReviewReport(
+    session: ManagedSession,
+    review: ActiveReviewSession,
+    missingReport: ReviewError,
+  ): Promise<void> {
+    let reportError = missingReport;
+    try {
+      await this.#refreshReviewReport(session, review);
+    } catch {
+      const message = 'Não foi possível gravar o parecer na pasta indicada em “Salvar code review em”.';
+      reportError = buildReviewError('REPORT_SAVE_FAILED', message, true);
+      broadcast(session, { type: 'error', message });
+    } finally {
+      review.draft.dispose();
+    }
+
+    if (session.historyState !== 'saved') {
+      this.#setReviewReportState(session, 'incomplete');
+      await this.#reviewService.updateArtifactStatus(
+        review.reviewId,
+        review.reportArtifactId,
+        reportError === missingReport ? 'incomplete' : 'failed',
+        reportError,
+      );
+    }
   }
 
   async startFactorySession(input: StartFactorySessionInput): Promise<ManagedSession> {
@@ -606,25 +643,11 @@ export class SessionManager {
             );
 
       try {
-        await this.#reviewService.updateArtifactStatus(
-          activeReview.reviewId,
-          activeReview.sessionArtifactId,
-          'ready',
-          null,
-          'review.session_log_saved',
+        await this.#finishReviewReport(
+          session,
+          activeReview,
+          buildReviewError('REPORT_NOT_SAVED', 'O parecer final não foi entregue antes do encerramento.', true),
         );
-        if (!activeReview.reportSaved) {
-          await this.#reviewService.updateArtifactStatus(
-            activeReview.reviewId,
-            activeReview.reportArtifactId,
-            'incomplete',
-            buildReviewError(
-              'REPORT_NOT_SAVED',
-              'O parecer final não foi salvo antes do encerramento do processo.',
-              true,
-            ),
-          );
-        }
         const finished = await this.#reviewService.finishExecution(
           activeReview.reviewId,
           activeReview.executionId,
@@ -662,7 +685,7 @@ export class SessionManager {
       replay: session.buffer.replay(),
     });
 
-    if (session.reportPath && session.sessionPath) {
+    if (session.reportPath) {
       sendToSocket(ws, {
         type: 'history',
         reportPath: session.reportPath,
@@ -772,41 +795,27 @@ export class SessionManager {
     const activeReview = session.activeReviewSession;
     if (activeReview) {
       this.#enqueue(runtime, async () => {
-        try {
-          await this.#reviewService.updateArtifactStatus(
-            activeReview.reviewId,
-            activeReview.sessionArtifactId,
-            'ready',
-            null,
-            'review.session_log_saved',
-          );
-          if (!activeReview.reportSaved) {
-            await this.#reviewService.updateArtifactStatus(
-              activeReview.reviewId,
-              activeReview.reportArtifactId,
-              'incomplete',
-              buildReviewError('REVIEW_INTERRUPTED', reason, true),
-            );
-          }
-          const finished = await this.#reviewService.finishExecution(
-            activeReview.reviewId,
-            activeReview.executionId,
-            {
-              process: { status: 'exited', exitCode: null, signal: 'SIGTERM' },
-              targetState: 'cancelled',
-              reason,
-              eventType: 'review.session_interrupted',
-            },
-          );
-          broadcast(session, {
-            type: 'review',
-            reviewId: finished.review.id,
-            executionId: finished.execution.id,
-            state: finished.review.state,
-          });
-        } catch {
-          // O repositório pode já estar encerrado durante o shutdown do servidor.
-        }
+        await this.#finishReviewReport(
+          session,
+          activeReview,
+          buildReviewError('REVIEW_INTERRUPTED', reason, true),
+        );
+        const finished = await this.#reviewService.finishExecution(
+          activeReview.reviewId,
+          activeReview.executionId,
+          {
+            process: { status: 'exited', exitCode: null, signal: 'SIGTERM' },
+            targetState: 'cancelled',
+            reason,
+            eventType: 'review.session_interrupted',
+          },
+        );
+        broadcast(session, {
+          type: 'review',
+          reviewId: finished.review.id,
+          executionId: finished.execution.id,
+          state: finished.review.state,
+        });
       });
     }
 

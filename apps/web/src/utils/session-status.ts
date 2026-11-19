@@ -56,7 +56,7 @@ export function getSessionStatusPresentation(
 
     if (session.historyState === 'incomplete') {
       return {
-        label: isFactory ? 'Plano incompleto' : 'Review incompleto',
+        label: isFactory ? 'Plano incompleto' : 'Parecer incompleto',
         dotClass: 'bg-warning',
         textClass: 'text-warning',
       };
@@ -78,7 +78,7 @@ export function getSessionStatusPresentation(
   }
 
   return {
-    label: isFactory ? 'Plano incompleto' : 'Review incompleto',
+    label: isFactory ? 'Plano incompleto' : 'Parecer incompleto',
     dotClass: 'bg-warning',
     textClass: 'text-warning',
   };

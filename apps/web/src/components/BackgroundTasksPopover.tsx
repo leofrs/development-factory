@@ -126,7 +126,7 @@ export function BackgroundTasksPopover({
               const isFactory = session.mode === 'factory';
               const isStopping = stoppingIds.has(session.sessionId);
               const isActive = activeSessionId === session.sessionId;
-              const reportPath = session.reportPath;
+              const reportPath = session.mode === 'factory' || session.historyState === 'saved' ? session.reportPath : null;
 
               return (
                 <li

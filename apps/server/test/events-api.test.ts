@@ -151,6 +151,7 @@ test('GET /api/events valida origem, envia heartbeat inicial e transmite AppEven
     targetType: 'pr',
     identifier: '502',
     repoPath: repoDir,
+    reportDirectory: rootDir,
     cols: 80,
     rows: 24,
   });

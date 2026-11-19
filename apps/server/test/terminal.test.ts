@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { existsSync, readFileSync } from 'node:fs';
-import { copyFile, chmod, mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { copyFile, chmod, mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { test } from 'node:test';
 import { WebSocket } from 'ws';
-import { ClientMessageSchema, DirectoryListingSchema, ReviewDetailsSchema, ServerMessageSchema, type ClientMessage, type ServerMessage } from '@development-factory/shared';
+import { ClientMessageSchema, DirectoryListingSchema, ReviewDetailsSchema, SavedReviewReportsSchema, ServerMessageSchema, type ClientMessage, type ServerMessage } from '@development-factory/shared';
 import { createReviewServer } from '../src/server.js';
 
 async function until<T>(probe: () => T | undefined, label: string): Promise<T> {
@@ -27,7 +27,7 @@ test('HTTP, origem, protocolo e ciclo completo com WebSocket e PTY reais', { tim
   const sockets: WebSocket[] = [];
   context.after(async () => {
     sockets.forEach(socket => socket.terminate());
-    shutdown();
+    await shutdown();
     process.env.PATH = previousPath;
     await rm(directory, { recursive: true, force: true });
   });
@@ -42,7 +42,10 @@ test('HTTP, origem, protocolo e ciclo completo com WebSocket e PTY reais', { tim
   const wsUrl = `ws://127.0.0.1:${address.port}/ws/terminal`;
   assert.deepEqual(await (await fetch(`${httpUrl}/health`)).json(), { ok: true });
   assert.equal((await fetch(`${httpUrl}/missing`)).status, 404);
-  await mkdir(join(directory, 'projeto com espaços'));
+  const repoPath = join(directory, 'projeto com espaços');
+  const reportDirectory = join(directory, 'pareceres com espaços');
+  await mkdir(repoPath);
+  await mkdir(reportDirectory);
   const directoryUrl = `${httpUrl}/api/directories?${new URLSearchParams({ path: directory })}`;
   assert.equal((await fetch(directoryUrl)).status, 403);
   assert.equal((await fetch(directoryUrl, { headers: { Origin: 'https://untrusted.example' } })).status, 403);
@@ -53,7 +56,7 @@ test('HTTP, origem, protocolo e ciclo completo com WebSocket e PTY reais', { tim
   assert(listing.directories.some(entry => entry.path === join(directory, 'projeto com espaços')));
   assert(!listing.directories.some(entry => entry.name === 'claude'));
   assert.equal((await fetch(`${httpUrl}/api/directories?path=relative`, { headers: { Origin: 'http://127.0.0.1:5173' } })).status, 400);
-  for (const route of ['/api/history', '/api/history/file']) {
+  for (const route of ['/api/history', '/api/history/file', '/api/history/reports', '/api/review-destination']) {
     assert.equal((await fetch(`${httpUrl}${route}`)).status, 403);
     assert.equal((await fetch(`${httpUrl}${route}`, { headers: { Origin: 'https://untrusted.example' } })).status, 403);
   }
@@ -96,7 +99,11 @@ test('HTTP, origem, protocolo e ciclo completo com WebSocket e PTY reais', { tim
   assert.equal(ClientMessageSchema.safeParse({ type: 'start_review', targetType: 'pr', identifier: '0', repoPath: directory, cols: 80, rows: 24 }).success, false);
   send({ type: 'start_review', targetType: 'pr', identifier: '42', repoPath: join(directory, 'missing'), cols: 80, rows: 24 });
   await take('error');
-  const start = { type: 'start_review', targetType: 'branch', identifier: 'feat/test;$(touch SHOULD_NOT_EXIST)', repoPath: directory, cols: 80, rows: 24 } as const;
+  const start = { type: 'start_review', targetType: 'branch', identifier: 'feat/test;$(touch SHOULD_NOT_EXIST)', repoPath, reportDirectory, cols: 80, rows: 24 } as const;
+  send({ ...start, reportDirectory: repoPath });
+  const invalidDestination = await take('error');
+  assert(invalidDestination.type === 'error');
+  assert.match(invalidDestination.message, /fora do repositório/);
   send(start);
   const initialStatus = await take('status');
   assert(initialStatus.type === 'status');
@@ -106,11 +113,12 @@ test('HTTP, origem, protocolo e ciclo completo com WebSocket e PTY reais', { tim
   const initialHistory = await take('history');
   assert(initialHistory.type === 'history');
   assert.equal(initialHistory.state, 'pending');
-  assert(initialHistory.reportPath.startsWith(join(directory, '.code-reviews')));
-  assert(existsSync(initialHistory.reportPath));
+  assert.equal(dirname(initialHistory.reportPath), reportDirectory);
+  assert.equal(existsSync(initialHistory.reportPath), false);
+  assert.equal(initialHistory.sessionPath, null);
   const ready = await until(() => output.match(/READY:([^\r\n]+)/)?.[1], 'PTY pronto');
   const info = JSON.parse(ready) as { pid: number; cwd: string; args: string[]; term: string; color: string; tty: boolean };
-  assert.equal(info.cwd, directory);
+  assert.equal(info.cwd, repoPath);
   assert.equal(info.tty, true);
   assert.equal(info.term, 'xterm-256color');
   assert.equal(info.color, 'truecolor');
@@ -119,7 +127,8 @@ test('HTTP, origem, protocolo e ciclo completo com WebSocket e PTY reais', { tim
   assert(info.args[0]?.includes('# FORMATO OBRIGATÓRIO DO OUTPUT'));
   assert(info.args[0]?.includes('Requisitos no Jira (MCP)'));
   assert(info.args[0]?.includes('Máximo de 555 caracteres'));
-  assert(info.args[0]?.includes(initialHistory.reportPath));
+  assert(info.args[0]?.includes('development-factory-review-'));
+  assert.equal(info.args[0]?.includes(initialHistory.reportPath), false);
   assert.equal(existsSync(join(directory, 'SHOULD_NOT_EXIST')), false);
   send({ type: 'input', data: 'olá PTY' });
   await until(() => output.includes('INPUT:olá PTY') ? true : undefined, 'entrada interativa');
@@ -142,8 +151,7 @@ test('HTTP, origem, protocolo e ciclo completo com WebSocket e PTY reais', { tim
   );
   assert(secondStatus.type === 'status' && secondStatus.state === 'running');
   await until(() => output.includes('READY:') ? true : undefined, 'PTY reiniciado');
-  assert.match(readFileSync(initialHistory.reportPath, 'utf8'), /Code review incompleto/);
-  assert.match(readFileSync(initialHistory.sessionPath, 'utf8'), /INPUT:olá PTY/);
+  assert.equal(existsSync(initialHistory.reportPath), false);
   const secondHistory = await until(() => messages.find(message => message.type === 'history' && message.state === 'pending' && message.reportPath !== initialHistory.reportPath), 'novo histórico');
   assert(secondHistory.type === 'history');
   assert.notEqual(secondHistory.reportPath, initialHistory.reportPath);
@@ -166,10 +174,16 @@ test('HTTP, origem, protocolo e ciclo completo com WebSocket e PTY reais', { tim
   assert.equal(exitStatus.state, 'exited');
   assert.equal(exitStatus.exitCode, 7);
   assert.equal(readFileSync(secondHistory.reportPath, 'utf8'), '# Parecer final\n\nAPROVADO\n');
-  assert.match(readFileSync(secondHistory.sessionPath, 'utf8'), /código 7/);
-  const historyResponse = await fetch(`${httpUrl}/api/history?${new URLSearchParams({ path: directory, preferReviews: '1' })}`, { headers: { Origin: 'http://localhost:5173' } });
+  assert.deepEqual(await readdir(reportDirectory), [basename(secondHistory.reportPath)]);
+  assert.equal(existsSync(join(repoPath, '.code-reviews')), false);
+  const headers = { Origin: 'http://localhost:5173' };
+  const historyResponse = await fetch(`${httpUrl}/api/history/reports`, { headers });
   assert.equal(historyResponse.status, 200);
-  const fileResponse = await fetch(`${httpUrl}/api/history/file?${new URLSearchParams({ path: join(directory, '.code-reviews'), name: secondHistory.reportPath.split('/').at(-1)! })}`, { headers: { Origin: 'http://localhost:5173' } });
+  const saved = SavedReviewReportsSchema.parse(await historyResponse.json());
+  assert.deepEqual(saved.map(report => report.path), [secondHistory.reportPath]);
+  const fileResponse = await fetch(`${httpUrl}/api/history/file?${new URLSearchParams({
+    path: reportDirectory, name: basename(secondHistory.reportPath),
+  })}`, { headers });
   assert.equal(fileResponse.status, 200);
   assert.equal((await fileResponse.json() as { content: string }).content, '# Parecer final\n\nAPROVADO\n');
 
@@ -186,17 +200,37 @@ test('HTTP, origem, protocolo e ciclo completo com WebSocket e PTY reais', { tim
   process.kill(next.pid, 0);
   await shutdown();
   await until(() => { try { process.kill(next.pid, 0); return undefined; } catch { return true; } }, 'PTY encerrado no shutdown');
-  assert.match(readFileSync(finalHistory.reportPath, 'utf8'), /Code review incompleto/);
+  assert.equal(existsSync(finalHistory.reportPath), false);
+
+  const restarted = createReviewServer({ dbPath: join(directory, 'reviews.db') });
+  context.after(restarted.shutdown);
+  restarted.server.listen(0, '127.0.0.1');
+  await once(restarted.server, 'listening');
+  const restartedAddress = restarted.server.address();
+  assert(restartedAddress && typeof restartedAddress !== 'string');
+  const restartedUrl = `http://127.0.0.1:${restartedAddress.port}`;
+  const afterRestart = await fetch(`${restartedUrl}/api/history/reports`, { headers });
+  assert.deepEqual(SavedReviewReportsSchema.parse(await afterRestart.json()), saved);
+  await rm(secondHistory.reportPath);
+  const unavailable = await fetch(`${restartedUrl}/api/history/file?${new URLSearchParams({
+    path: reportDirectory, name: basename(secondHistory.reportPath),
+  })}`, { headers });
+  assert.equal(unavailable.ok, false);
+  await restarted.shutdown();
 });
 
 test('executor PTY integra com ReviewService: ID persistente, artefatos, saída 0 sem conclusão automática e interrupção', { timeout: 30000 }, async context => {
   const directory = await mkdtemp(join(tmpdir(), 'review-pty-domain-'));
+  const reportDirectory = join(directory, 'pareceres');
+  const repoPath = join(directory, 'repo');
+  await mkdir(reportDirectory);
+  await mkdir(repoPath);
   const previousPath = process.env.PATH;
   const { server, shutdown } = createReviewServer({ dbPath: join(directory, 'reviews.db') });
   const sockets: WebSocket[] = [];
   context.after(async () => {
     sockets.forEach(socket => socket.terminate());
-    shutdown();
+    await shutdown();
     process.env.PATH = previousPath;
     await rm(directory, { recursive: true, force: true });
   });
@@ -239,7 +273,7 @@ test('executor PTY integra com ReviewService: ID persistente, artefatos, saída 
   }, label);
 
   // 1. Início com ID persistente, artefatos vinculados, SAVE sem concluir e saída 0 -> incomplete.
-  send({ type: 'start_review', targetType: 'pr', identifier: '88', repoPath: directory, cols: 80, rows: 24 });
+  send({ type: 'start_review', targetType: 'pr', identifier: '88', repoPath, reportDirectory, cols: 80, rows: 24 });
   const analyzingMsg = await takeWhere(
     message => message.type === 'review' && message.state === 'analyzing',
     'review analyzing',
@@ -255,9 +289,8 @@ test('executor PTY integra com ReviewService: ID persistente, artefatos, saída 
   assert.equal(activeDetails.review.state, 'analyzing');
   assert.equal(activeDetails.executions[0]?.id, firstExecutionId);
   assert.deepEqual(activeDetails.executions[0]?.process, { status: 'running', pid: info.pid });
-  assert.equal(activeDetails.artifacts.length, 2);
+  assert.equal(activeDetails.artifacts.length, 1);
   assert(activeDetails.artifacts.some(item => item.kind === 'report' && item.status === 'pending'));
-  assert(activeDetails.artifacts.some(item => item.kind === 'session_log' && item.status === 'pending'));
 
   // Salvar o arquivo de parecer atualiza o artefato para ready, mas NÃO conclui o review.
   send({ type: 'input', data: 'SAVE' });
@@ -283,12 +316,12 @@ test('executor PTY integra com ReviewService: ID persistente, artefatos, saída 
   assert.equal(finishedDetails.review.state, 'incomplete');
   assert.equal(finishedDetails.review.error?.code, 'RESULT_NOT_VALIDATED');
   assert.deepEqual(finishedDetails.executions[0]?.process, { status: 'exited', exitCode: 0, signal: null });
-  assert.equal(finishedDetails.artifacts.find(item => item.kind === 'session_log')?.status, 'ready');
+  assert.equal(finishedDetails.artifacts.length, 1);
   assert.equal(finishedDetails.artifacts.find(item => item.kind === 'report')?.status, 'ready');
 
   // 2. Fechar o WebSocket mantém o PTY vivo; reconectar com attach_session restaura replay e stop_session cancela.
   output = '';
-  send({ type: 'start_review', targetType: 'branch', identifier: 'feat/interrupted', repoPath: directory, cols: 80, rows: 24 });
+  send({ type: 'start_review', targetType: 'branch', identifier: 'feat/interrupted', repoPath, reportDirectory, cols: 80, rows: 24 });
   const secondAttached = await takeWhere(
     message => message.type === 'session_attached' && message.session.reviewId !== firstReviewId,
     'segundo session_attached',
@@ -362,7 +395,7 @@ test('executor PTY integra com ReviewService: ID persistente, artefatos, saída 
   }
   assert.equal(interruptedDetails.review.state, 'cancelled');
   assert.equal(interruptedDetails.executions[0]?.process.status, 'exited');
-  assert.equal(interruptedDetails.artifacts.find(item => item.kind === 'session_log')?.status, 'ready');
+  assert.equal(interruptedDetails.artifacts.length, 1);
   const interruptedReport = interruptedDetails.artifacts.find(item => item.kind === 'report');
   assert.equal(interruptedReport?.status, 'incomplete');
   assert.equal(interruptedReport?.error?.code, 'REVIEW_INTERRUPTED');

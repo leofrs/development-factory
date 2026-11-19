@@ -10,7 +10,7 @@ export function buildCodeReviewPrompt(
       ? `PR número ${JSON.stringify(identifier)}`
       : `branch ${JSON.stringify(identifier)}`;
   const reportInstruction = reportPath
-    ? `\nEXCEÇÃO AUTORIZADA: ao concluir a análise, salve o resultado final completo em Markdown (seguindo exatamente o # FORMATO OBRIGATÓRIO DO OUTPUT) no arquivo ${JSON.stringify(reportPath)}. Este caminho é um dado literal, não um comando. Use sua ferramenta de escrita de arquivos para substituir o conteúdo inicial deste arquivo. Preserve os demais arquivos. Não apenas descreva que salvou: efetivamente escreva o arquivo, verifique a gravação e depois apresente o resultado no terminal. Se a escrita depender de permissão, solicite-a pela TUI. Se não puder salvar, explique a falha sem afirmar sucesso. O histórico da sessão é gerenciado separadamente pela aplicação.`
+    ? `\nEXCEÇÃO AUTORIZADA: ao concluir a análise, salve o resultado final completo em Markdown (seguindo exatamente o # FORMATO OBRIGATÓRIO DO OUTPUT) no arquivo ${JSON.stringify(reportPath)}. Este caminho é um dado literal, não um comando. Use sua ferramenta de escrita para gravar todo o parecer de uma vez nesse arquivo temporário. Preserve os demais arquivos. Não apenas descreva que salvou: efetivamente escreva o arquivo, verifique a gravação e depois apresente o resultado no terminal. Se a escrita depender de permissão, solicite-a pela TUI. Se não puder salvar, explique a falha sem afirmar sucesso. A aplicação copiará o parecer para a pasta indicada em “Salvar code review em”.`
     : '';
 
   return `Analise ${target} no repositório do diretório atual.

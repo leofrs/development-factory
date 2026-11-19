@@ -71,7 +71,7 @@ function buildNotification(
   kind: 'history_saved' | 'finished',
 ): AppNotification {
   const id = `${session.sessionId}:${kind}`;
-  const reportPath = session.reportPath ?? null;
+  const reportPath = session.mode === 'factory' || session.historyState === 'saved' ? session.reportPath ?? null : null;
 
   if (kind === 'history_saved') {
     const message = session.mode === 'factory' ? 'Plano salvo' : 'Parecer salvo';
@@ -132,7 +132,7 @@ function buildNotification(
       status: session.status,
       historyState: session.historyState,
       reportPath,
-      message: session.mode === 'factory' ? 'Plano incompleto' : 'Review incompleto',
+      message: session.mode === 'factory' ? 'Plano incompleto' : 'Parecer incompleto',
       severity: 'warning',
       createdAt: session.finishedAt ?? new Date().toISOString(),
     };

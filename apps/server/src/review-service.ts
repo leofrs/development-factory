@@ -30,11 +30,7 @@ import {
   type ReviewListResponse,
   type ReviewProcess,
 } from '@development-factory/shared';
-import {
-  ArtifactPreparationError,
-  defaultReviewArtifactFileWriter,
-  type ReviewArtifactFileWriter,
-} from './artifacts.js';
+import { ReviewDestinationError, resolveReviewReportDirectory, reviewReportPath } from './artifacts.js';
 import {
   ReviewStorageError,
   type SaveTransitionOptions,
@@ -46,7 +42,6 @@ const ReviewIdSchema = z.string().uuid('Identificador de review inválido.');
 export interface ReviewServiceOptions {
   readonly now?: () => string;
   readonly generateId?: () => string;
-  readonly artifactWriter?: ReviewArtifactFileWriter;
 }
 
 export interface CreateReviewCommandOptions {
@@ -124,7 +119,6 @@ function mapUnexpectedError(error: unknown): ReviewServiceError {
 export class ReviewService {
   private readonly now: () => string;
   private readonly generateId: () => string;
-  private readonly artifactWriter: ReviewArtifactFileWriter;
 
   constructor(
     private readonly repository: SqliteReviewRepository,
@@ -132,7 +126,6 @@ export class ReviewService {
   ) {
     this.now = options.now ?? (() => new Date().toISOString());
     this.generateId = options.generateId ?? randomUUID;
-    this.artifactWriter = options.artifactWriter ?? defaultReviewArtifactFileWriter;
   }
 
   async createReview(
@@ -523,86 +516,39 @@ export class ReviewService {
     const createdAt = this.now();
 
     try {
-      const targets = this.artifactWriter.prepareExecutionFiles(review, execution, {
-        includeStructuredResult: parsedInput.data.includeStructuredResult,
-        createdAt,
-      });
+      const directory = resolveReviewReportDirectory(review.target.repoPath, parsedInput.data.reportDirectory);
+      const path = reviewReportPath(directory, review, execution);
+      const artifact = await this.repository.withWriteLock(() => {
+        const prepared = this.repository.listArtifactsByReviewId(review.id, execution.id)
+          .find(item => item.kind === 'report' && item.path === path);
+        if (prepared) {
+          return prepared;
+        }
 
-      const artifacts = await this.repository.withWriteLock(() => {
-        const items: ReviewArtifact[] = targets.map(target => ReviewArtifactSchema.parse({
+        return this.repository.saveArtifact(ReviewArtifactSchema.parse({
           contractVersion: REVIEW_CONTRACT_VERSION,
           id: this.generateId(),
           reviewId: review.id,
           executionId: execution.id,
-          kind: target.kind,
-          format: target.format,
-          path: target.path,
-          version: this.repository.getNextArtifactVersion(review.id, execution.id, target.kind),
+          kind: 'report',
+          format: 'markdown',
+          path,
+          version: this.repository.getNextArtifactVersion(review.id, execution.id, 'report'),
           status: 'pending',
           createdAt,
           updatedAt: createdAt,
           error: null,
-        }));
-
-        return this.repository.saveArtifacts(items, {
+        }), {
           type: 'review_artifacts_prepared',
           occurredAt: createdAt,
         });
       });
 
-      return {
-        contractVersion: REVIEW_CONTRACT_VERSION,
-        artifacts,
-      };
+      return { contractVersion: REVIEW_CONTRACT_VERSION, artifacts: [artifact] };
     } catch (error) {
-      if (error instanceof ArtifactPreparationError) {
-        const failedAt = this.now();
-        const reviewError = ReviewErrorSchema.parse({
-          contractVersion: REVIEW_CONTRACT_VERSION,
-          code: 'ARTIFACT_CREATION_FAILED',
-          message: error.message,
-          occurredAt: failedAt,
-          retryable: false,
-        });
-
-        const failedArtifacts: ReviewArtifact[] = error.targets.map(target => {
-          const wasCreated = error.createdKinds.has(target.kind);
-          return ReviewArtifactSchema.parse({
-            contractVersion: REVIEW_CONTRACT_VERSION,
-            id: this.generateId(),
-            reviewId: review.id,
-            executionId: execution.id,
-            kind: target.kind,
-            format: target.format,
-            path: target.path,
-            version: this.repository.getNextArtifactVersion(review.id, execution.id, target.kind),
-            status: wasCreated ? 'incomplete' : 'failed',
-            createdAt,
-            updatedAt: failedAt,
-            error: reviewError,
-          });
-        });
-
-        await this.repository.withWriteLock(() =>
-          this.repository.saveArtifactsAndFailReview(
-            review.id,
-            execution.id,
-            failedArtifacts,
-            reviewError,
-            failedAt,
-            error.message,
-          ),
-        );
-
-        throw new ReviewServiceError(
-          'REVIEW_ARTIFACT_FAILED',
-          error.message,
-          500,
-          undefined,
-          { cause: error },
-        );
+      if (error instanceof ReviewDestinationError) {
+        throw new ReviewServiceError('REVIEW_ARTIFACT_FAILED', error.message, 400, undefined, { cause: error });
       }
-
       throw mapUnexpectedError(error);
     }
   }

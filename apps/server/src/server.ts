@@ -4,9 +4,11 @@ import {
   AppEventSchema,
   BackgroundSessionSummarySchema,
   REVIEW_CONTRACT_VERSION,
+  ReviewDestinationSchema,
   type AppEvent,
   type ReviewApiErrorResponse,
 } from '@development-factory/shared';
+import { defaultReviewReportDirectory } from './artifacts.js';
 import { handleTerminalConnection } from './ws/terminal-handler.js';
 import { listDirectories } from './directories.js';
 import { listHistory, readHistoryFile } from './history-reader.js';
@@ -375,12 +377,23 @@ export function createReviewServer(options?: ReviewRepositoryOptions) {
       return;
     }
 
-    if (req.method === 'GET' && ['/api/directories', '/api/history', '/api/history/file'].includes(url.pathname)) {
+    if (req.method === 'GET' && [
+      '/api/directories', '/api/history', '/api/history/file', '/api/history/reports', '/api/review-destination',
+    ].includes(url.pathname)) {
       if (!applyCorsHeaders(req, res)) {
         res.writeHead(403).end(JSON.stringify({ error: 'Origem não permitida.' }));
         return;
       }
       try {
+        if (url.pathname === '/api/history/reports') {
+          res.writeHead(200).end(JSON.stringify(reviewRepository.listSavedReports()));
+          return;
+        }
+        if (url.pathname === '/api/review-destination') {
+          const destination = ReviewDestinationSchema.parse({ path: defaultReviewReportDirectory() });
+          res.writeHead(200).end(JSON.stringify(destination));
+          return;
+        }
         const path = url.searchParams.get('path') ?? undefined;
         const result = url.pathname === '/api/history/file'
           ? await readHistoryFile(path ?? '', url.searchParams.get('name') ?? '')

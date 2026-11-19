@@ -89,6 +89,7 @@ test('SessionManager executa sessões review e factory simultaneamente sem inter
       targetType: 'pr',
       identifier: '142',
       repoPath: env.repoA,
+      reportDirectory: env.rootDir,
       cols: 80,
       rows: 24,
     });
@@ -205,6 +206,7 @@ test('stopSession encerra PTY, finaliza histórico e transiciona ReviewService p
       targetType: 'branch',
       identifier: 'feat/background',
       repoPath: env.repoA,
+      reportDirectory: env.rootDir,
       cols: 80,
       rows: 24,
     });
@@ -242,6 +244,7 @@ test('respeita limite de sessões concorrentes e limpa sessões finalizadas por 
       targetType: 'pr',
       identifier: '55',
       repoPath: env.repoA,
+      reportDirectory: env.rootDir,
       cols: 80,
       rows: 24,
     });
@@ -261,12 +264,12 @@ test('respeita limite de sessões concorrentes e limpa sessões finalizadas por 
 
     await waitFor(() => first.buffer.replay().includes('READY:'));
     manager.writeInput(first.sessionId, 'EXIT0');
-    await waitFor(() => first.status === 'exited');
+    await waitFor(() => first.historyState === 'incomplete');
 
     // Antes do TTL, a sessão finalizada permanece listável em memória.
     assert.equal(manager.listSessions().length, 1);
 
-    // Após o TTL, é removida da memória sem apagar SQLite nem arquivos .code-reviews/.
+    // Após o TTL, é removida da memória preservando os dados no SQLite.
     currentNow += 6_000;
     assert.equal(manager.cleanupExpiredSessions(), 1);
     assert.equal(manager.listSessions().length, 0);
@@ -275,7 +278,8 @@ test('respeita limite de sessões concorrentes e limpa sessões finalizadas por 
     assert.ok(reviewId);
     const persisted = await env.reviewService.getReview(reviewId);
     assert.ok(persisted);
-    assert.ok(first.sessionPath && existsSync(first.sessionPath));
+    assert.equal(first.sessionPath, null);
+    assert.ok(first.reportPath && !existsSync(first.reportPath));
   } finally {
     await manager.shutdownAll();
     env.repository.close();
@@ -284,7 +288,7 @@ test('respeita limite de sessões concorrentes e limpa sessões finalizadas por 
   }
 });
 
-test('sessão review sem nenhum cliente WebSocket conectado atualiza SQLite, .code-reviews e emite history_saved e finished', async () => {
+test('sessão review sem nenhum cliente WebSocket conectado salva apenas o parecer e emite history_saved e finished', async () => {
   const env = setupTestEnvironment();
   const events: AppEvent[] = [];
   const manager = new SessionManager(env.reviewService);
@@ -295,6 +299,7 @@ test('sessão review sem nenhum cliente WebSocket conectado atualiza SQLite, .co
       targetType: 'pr',
       identifier: '777',
       repoPath: env.repoA,
+      reportDirectory: env.rootDir,
       cols: 80,
       rows: 24,
     });
@@ -329,10 +334,11 @@ test('sessão review sem nenhum cliente WebSocket conectado atualiza SQLite, .co
     assert.ok(details);
     assert.equal(details.review.state, 'incomplete');
     assert.deepEqual(details.executions[0]?.process, { status: 'exited', exitCode: 0, signal: null });
-    assert.equal(details.artifacts.find(a => a.kind === 'session_log')?.status, 'ready');
+    assert.equal(details.artifacts.length, 1);
     assert.equal(details.artifacts.find(a => a.kind === 'report')?.status, 'ready');
     assert.ok(details.events.some(e => e.type === 'review.report_file_saved'));
-    assert.ok(session.sessionPath && existsSync(session.sessionPath));
+    assert.equal(session.sessionPath, null);
+    assert.equal(existsSync(join(env.repoA, '.code-reviews')), false);
   } finally {
     unsubscribe();
     await manager.shutdownAll();

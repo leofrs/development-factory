@@ -6,7 +6,8 @@ import type {
   BackgroundSessionStatus,
   BackgroundSessionSummary,
 } from '@development-factory/shared';
-import type { createReviewHistory } from './history.js';
+import type { createFactoryHistory } from './history.js';
+import type { createReviewReportDraft } from './review-report.js';
 
 export const DEFAULT_SESSION_BUFFER_MAX_BYTES = 256 * 1024;
 
@@ -132,14 +133,13 @@ export class SessionOutputBuffer {
   }
 }
 
-export type SessionHistoryHandle = ReturnType<typeof createReviewHistory>;
+export type SessionHistoryHandle = ReturnType<typeof createFactoryHistory>;
 
 export interface ActiveReviewSession {
   readonly reviewId: string;
   readonly executionId: string;
   readonly reportArtifactId: string;
-  readonly sessionArtifactId: string;
-  reportSaved: boolean;
+  readonly draft: ReturnType<typeof createReviewReportDraft>;
 }
 
 export interface ManagedSession {

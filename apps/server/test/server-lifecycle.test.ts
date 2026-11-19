@@ -40,6 +40,7 @@ test('createReviewServer expõe sessionManager e shutdown encerra PTYs ativos an
       targetType: 'pr',
       identifier: '300',
       repoPath: repoDir,
+      reportDirectory: rootDir,
       cols: 80,
       rows: 24,
     });
