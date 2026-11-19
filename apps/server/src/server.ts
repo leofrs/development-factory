@@ -249,7 +249,7 @@ export function createReviewServer(options?: ReviewRepositoryOptions) {
     wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req));
   });
   wss.on('connection', ws => {
-    sessions.set(ws, handleTerminalConnection(ws, reviewService));
+    sessions.set(ws, handleTerminalConnection(ws, sessionManager));
     ws.once('close', () => sessions.delete(ws));
   });
   let shutdownPromise: Promise<void> | undefined;

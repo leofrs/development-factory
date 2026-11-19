@@ -98,7 +98,11 @@ test('HTTP, origem, protocolo e ciclo completo com WebSocket e PTY reais', { tim
   await take('error');
   const start = { type: 'start_review', targetType: 'branch', identifier: 'feat/test;$(touch SHOULD_NOT_EXIST)', repoPath: directory, cols: 80, rows: 24 } as const;
   send(start);
-  assert.deepEqual(await take('status'), { type: 'status', state: 'running' });
+  const initialStatus = await take('status');
+  assert(initialStatus.type === 'status');
+  assert.equal(initialStatus.state, 'running');
+  assert.equal(typeof initialStatus.sessionId, 'string');
+  const firstSessionId = initialStatus.sessionId;
   const initialHistory = await take('history');
   assert(initialHistory.type === 'history');
   assert.equal(initialHistory.state, 'pending');
@@ -123,9 +127,20 @@ test('HTTP, origem, protocolo e ciclo completo com WebSocket e PTY reais', { tim
   await until(() => output.includes('SIZE:100x35') ? true : undefined, 'resize');
 
   output = '';
-  send(start);
-  await take('status');
+  assert(firstSessionId);
+  send({ type: 'stop_session', sessionId: firstSessionId });
   await until(() => { try { process.kill(info.pid, 0); return undefined; } catch { return true; } }, 'PTY anterior encerrado');
+  send(start);
+  const secondStatus = await until(
+    () => {
+      const index = messages.findIndex(
+        message => message.type === 'status' && message.state === 'running' && message.sessionId !== firstSessionId,
+      );
+      return index >= 0 ? messages.splice(index, 1)[0] : undefined;
+    },
+    'segundo status running',
+  );
+  assert(secondStatus.type === 'status' && secondStatus.state === 'running');
   await until(() => output.includes('READY:') ? true : undefined, 'PTY reiniciado');
   assert.match(readFileSync(initialHistory.reportPath, 'utf8'), /Code review incompleto/);
   assert.match(readFileSync(initialHistory.sessionPath, 'utf8'), /INPUT:olá PTY/);
@@ -135,7 +150,21 @@ test('HTTP, origem, protocolo e ciclo completo com WebSocket e PTY reais', { tim
   send({ type: 'input', data: 'SAVE' });
   await until(() => messages.find(message => message.type === 'history' && message.state === 'saved' && message.reportPath === secondHistory.reportPath), 'parecer salvo');
   send({ type: 'input', data: 'EXIT' });
-  assert.deepEqual(await take('status'), { type: 'status', state: 'exited', exitCode: 7 });
+  const exitStatus = await until(
+    () => {
+      const index = messages.findIndex(
+        message =>
+          message.type === 'status' &&
+          message.state === 'exited' &&
+          message.sessionId === secondStatus.sessionId,
+      );
+      return index >= 0 ? messages.splice(index, 1)[0] : undefined;
+    },
+    'status exited da segunda sessão',
+  );
+  assert(exitStatus.type === 'status');
+  assert.equal(exitStatus.state, 'exited');
+  assert.equal(exitStatus.exitCode, 7);
   assert.equal(readFileSync(secondHistory.reportPath, 'utf8'), '# Parecer final\n\nAPROVADO\n');
   assert.match(readFileSync(secondHistory.sessionPath, 'utf8'), /código 7/);
   const historyResponse = await fetch(`${httpUrl}/api/history?${new URLSearchParams({ path: directory, preferReviews: '1' })}`, { headers: { Origin: 'http://localhost:5173' } });
@@ -152,9 +181,12 @@ test('HTTP, origem, protocolo e ciclo completo com WebSocket e PTY reais', { tim
   assert(finalHistory.type === 'history');
   socket.close();
   await once(socket, 'close');
-  await until(() => { try { process.kill(next.pid, 0); return undefined; } catch { return true; } }, 'PTY encerrado na desconexão');
+  await delay(100);
+  // Fechar o WebSocket não encerra o PTY; o shutdown do servidor é que o encerra de forma limpa.
+  process.kill(next.pid, 0);
+  await shutdown();
+  await until(() => { try { process.kill(next.pid, 0); return undefined; } catch { return true; } }, 'PTY encerrado no shutdown');
   assert.match(readFileSync(finalHistory.reportPath, 'utf8'), /Code review incompleto/);
-  assert.match(readFileSync(finalHistory.sessionPath, 'utf8'), /conexão fechada/);
 });
 
 test('executor PTY integra com ReviewService: ID persistente, artefatos, saída 0 sem conclusão automática e interrupção', { timeout: 30000 }, async context => {
@@ -254,9 +286,15 @@ test('executor PTY integra com ReviewService: ID persistente, artefatos, saída 
   assert.equal(finishedDetails.artifacts.find(item => item.kind === 'session_log')?.status, 'ready');
   assert.equal(finishedDetails.artifacts.find(item => item.kind === 'report')?.status, 'ready');
 
-  // 2. Nova sessão interrompida ao fechar o WebSocket -> cancelled + report incomplete.
+  // 2. Fechar o WebSocket mantém o PTY vivo; reconectar com attach_session restaura replay e stop_session cancela.
   output = '';
   send({ type: 'start_review', targetType: 'branch', identifier: 'feat/interrupted', repoPath: directory, cols: 80, rows: 24 });
+  const secondAttached = await takeWhere(
+    message => message.type === 'session_attached' && message.session.reviewId !== firstReviewId,
+    'segundo session_attached',
+  );
+  assert(secondAttached.type === 'session_attached');
+  const secondSessionId = secondAttached.session.sessionId;
   const secondAnalyzing = await takeWhere(
     message => message.type === 'review' && message.reviewId !== firstReviewId && message.state === 'analyzing',
     'segundo review analyzing',
@@ -268,6 +306,44 @@ test('executor PTY integra com ReviewService: ID persistente, artefatos, saída 
 
   socket.close();
   await once(socket, 'close');
+  await delay(100);
+
+  // Processo PTY continua vivo e review permanece em análise após fechar o WebSocket.
+  process.kill(secondInfo.pid, 0);
+  const stillRunningDetails = await fetchReview(secondReviewId);
+  assert.equal(stillRunningDetails.review.state, 'analyzing');
+
+  const reconnectSocket = new WebSocket(wsUrl, { origin: 'http://localhost:5173' });
+  sockets.push(reconnectSocket);
+  const reconnectMessages: ServerMessage[] = [];
+  let reconnectOutput = '';
+  reconnectSocket.on('message', raw => {
+    const message = ServerMessageSchema.parse(JSON.parse(raw.toString()));
+    reconnectMessages.push(message);
+    if (message.type === 'output') {
+      reconnectOutput += message.data;
+    }
+  });
+  await once(reconnectSocket, 'open');
+
+  const sendReconnect = (message: ClientMessage) => reconnectSocket.send(JSON.stringify(message));
+  const takeReconnectWhere = (predicate: (message: ServerMessage) => boolean, label: string) => until(() => {
+    const index = reconnectMessages.findIndex(predicate);
+    return index >= 0 ? reconnectMessages.splice(index, 1)[0] : undefined;
+  }, label);
+
+  sendReconnect({ type: 'attach_session', sessionId: secondSessionId, cols: 80, rows: 24 });
+  const reattached = await takeReconnectWhere(
+    message => message.type === 'session_attached' && message.session.sessionId === secondSessionId,
+    'reconexão attach_session',
+  );
+  assert(reattached.type === 'session_attached');
+  assert(reattached.replay.includes('READY:'));
+
+  sendReconnect({ type: 'input', data: 'REATTACHED' });
+  await until(() => (reconnectOutput.includes('INPUT:REATTACHED') ? true : undefined), 'saída em tempo real após attach');
+
+  sendReconnect({ type: 'stop_session', sessionId: secondSessionId });
   await until(() => {
     try {
       process.kill(secondInfo.pid, 0);
@@ -275,9 +351,9 @@ test('executor PTY integra com ReviewService: ID persistente, artefatos, saída 
     } catch {
       return true;
     }
-  }, 'segundo PTY encerrado');
+  }, 'segundo PTY encerrado por stop_session');
 
-  // Aguarda a persistência da interrupção após o fechamento do socket.
+  // Aguarda a persistência da interrupção após stop_session.
   let interruptedDetails = await fetchReview(secondReviewId);
   const deadline = Date.now() + 3000;
   while (interruptedDetails.review.state !== 'cancelled' && Date.now() < deadline) {
