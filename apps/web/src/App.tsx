@@ -34,10 +34,13 @@ export default function App() {
   });
   const {
     sessions,
+    sessionsById,
     activeTerminalSession,
     startReview,
     startFactory,
     minimizeTerminal,
+    bindActiveSessionId,
+    stopSession,
   } = useBackgroundOperations();
   const [configuringFactoryTask, setConfiguringFactoryTask] = useState(false);
   const [savedPlanPath, setSavedPlanPath] = useState<string | null>(null);
@@ -159,10 +162,17 @@ export default function App() {
           }}
         />
       )}
-      {activeTerminalSession && 'request' in activeTerminalSession && (
+      {activeTerminalSession && (
         <TerminalModal
           session={activeTerminalSession}
-          onClose={closeModal}
+          sessionSummary={
+            activeTerminalSession.sessionId
+              ? sessionsById.get(activeTerminalSession.sessionId)
+              : undefined
+          }
+          onMinimize={closeModal}
+          onStopSession={stopSession}
+          onBindSessionId={bindActiveSessionId}
           theme={theme}
           onToggleTheme={toggleTheme}
           onSavedReport={activeTerminalSession.mode === 'factory' ? handleSavedReport : undefined}
