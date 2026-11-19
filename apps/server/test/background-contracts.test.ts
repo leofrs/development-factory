@@ -6,6 +6,8 @@ import {
   BackgroundSessionModeSchema,
   BackgroundSessionStatusSchema,
   BackgroundSessionSummarySchema,
+  ClientMessageSchema,
+  ServerMessageSchema,
   type AppEvent,
   type BackgroundSessionSummary,
 } from '@development-factory/shared';
@@ -124,6 +126,76 @@ test('AppEventSchema valida todos os eventos de sessão e rejeita payloads invá
       type: 'session.finished',
       session: { ...summary, status: 'invalid' },
     }).success,
+    false,
+  );
+});
+
+test('ClientMessageSchema aceita attach_session e stop_session respeitando limites de UUID, cols e rows', () => {
+  const attach = ClientMessageSchema.parse({
+    type: 'attach_session',
+    sessionId,
+    cols: 120,
+    rows: 40,
+  });
+  assert.equal(attach.type, 'attach_session');
+
+  const stop = ClientMessageSchema.parse({
+    type: 'stop_session',
+    sessionId,
+  });
+  assert.equal(stop.type, 'stop_session');
+
+  assert.equal(
+    ClientMessageSchema.safeParse({ type: 'attach_session', sessionId: 'invalid', cols: 80, rows: 24 }).success,
+    false,
+  );
+  assert.equal(
+    ClientMessageSchema.safeParse({ type: 'attach_session', sessionId, cols: 1, rows: 24 }).success,
+    false,
+  );
+  assert.equal(
+    ClientMessageSchema.safeParse({ type: 'attach_session', sessionId, cols: 80, rows: 301 }).success,
+    false,
+  );
+  assert.equal(
+    ClientMessageSchema.safeParse({ type: 'stop_session', sessionId: 'invalid' }).success,
+    false,
+  );
+  assert.equal(
+    ClientMessageSchema.safeParse({ type: 'stop_session', sessionId, extra: true }).success,
+    false,
+  );
+});
+
+test('ServerMessageSchema aceita status com sessionId opcional e session_attached mantendo compatibilidade', () => {
+  const summary = createValidSummary();
+
+  const statusWithoutSession = ServerMessageSchema.parse({ type: 'status', state: 'running' });
+  assert.equal(statusWithoutSession.type, 'status');
+
+  const statusWithSession = ServerMessageSchema.parse({
+    type: 'status',
+    sessionId,
+    state: 'exited',
+    exitCode: 0,
+  });
+  assert.equal(statusWithSession.type, 'status');
+  assert.equal(statusWithSession.sessionId, sessionId);
+
+  const attached = ServerMessageSchema.parse({
+    type: 'session_attached',
+    session: summary,
+    replay: 'linha 1\r\nlinha 2\r\n',
+  });
+  assert.equal(attached.type, 'session_attached');
+  assert.equal(attached.session.sessionId, sessionId);
+
+  assert.equal(
+    ServerMessageSchema.safeParse({ type: 'status', sessionId: 'invalid', state: 'running' }).success,
+    false,
+  );
+  assert.equal(
+    ServerMessageSchema.safeParse({ type: 'session_attached', session: summary, replay: '', extra: 1 }).success,
     false,
   );
 });

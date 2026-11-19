@@ -141,8 +141,8 @@ export function TerminalModal({
           if (message.state === 'saved') {
             onSavedReport?.(message.reportPath);
           }
-        } else if (message.type === 'review') {
-          // Evento de ciclo de vida do review persistente (mantido para compatibilidade durante a transição).
+        } else if (message.type === 'review' || message.type === 'session_attached') {
+          // Eventos de ciclo de vida do review/sessão (mantidos para compatibilidade durante a transição).
         } else {
           setError(message.message);
           if (!started) setStatus('exited');

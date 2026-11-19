@@ -475,8 +475,10 @@ export function handleTerminalConnection(ws: WebSocket, reviewService: ReviewSer
         send({ type: 'error', message: 'Nenhuma sessão PTY ativa. Abra uma nova sessão.' });
       } else if (msg.type === 'input') {
         ptyProcess.write(msg.data);
-      } else {
+      } else if (msg.type === 'resize') {
         ptyProcess.resize(msg.cols, msg.rows);
+      } else {
+        send({ type: 'error', message: 'Operação de sessão ainda não suportada pelo servidor.' });
       }
     });
   });
