@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { ArrowRight, Check, ChevronRight, FolderGit2, GitBranch, GitPullRequest, Layers3, LockKeyhole, ScanLine, Terminal } from 'lucide-react';
 import { ClientMessageSchema, type TargetType } from '@development-factory/shared';
-import { TerminalModal, type TerminalSession } from './components/TerminalModal';
+import { TerminalModal } from './components/TerminalModal';
 import { readSavedTheme, themeStorageKey } from './theme';
 import { DirectoryPicker } from './components/DirectoryPicker';
 import { HistoryModal } from './components/HistoryModal';
@@ -9,6 +9,7 @@ import { FloatingDock, type AppView } from './components/FloatingDock';
 import { FactoryPage } from './components/FactoryPage';
 import { FactoryTaskModal } from './components/FactoryTaskModal';
 import { MarkdownViewerModal } from './components/MarkdownViewerModal';
+import { useBackgroundOperations } from './hooks/useBackgroundOperations';
 
 const storageKey = 'development-factory.repoPath';
 const steps = [
@@ -31,7 +32,13 @@ export default function App() {
   const [repoPath, setRepoPath] = useState(() => {
     try { return localStorage.getItem(storageKey) ?? localStorage.getItem('make-and-review.repoPath') ?? ''; } catch { return ''; }
   });
-  const [session, setSession] = useState<TerminalSession | null>(null);
+  const {
+    sessions,
+    activeTerminalSession,
+    startReview,
+    startFactory,
+    minimizeTerminal,
+  } = useBackgroundOperations();
   const [configuringFactoryTask, setConfiguringFactoryTask] = useState(false);
   const [savedPlanPath, setSavedPlanPath] = useState<string | null>(null);
   const [viewingMarkdownPath, setViewingMarkdownPath] = useState<string | null>(null);
@@ -44,10 +51,20 @@ export default function App() {
     try { localStorage.setItem(storageKey, repoPath); setStorageError(false); }
     catch { setStorageError(true); }
   }, [repoPath]);
-  const closeModal = useCallback(() => { setSession(null); submitRef.current?.focus(); }, []);
+  const closeModal = useCallback(() => {
+    minimizeTerminal();
+    submitRef.current?.focus();
+  }, [minimizeTerminal]);
   const handleSavedReport = useCallback((reportPath: string) => {
     setSavedPlanPath(reportPath);
   }, []);
+  const latestFactoryPlanPath = useMemo(() => {
+    const savedFactorySession = sessions.find(
+      (item) => item.mode === 'factory' && item.historyState === 'saved' && Boolean(item.reportPath),
+    );
+    return savedFactorySession?.reportPath ?? null;
+  }, [sessions]);
+  const effectiveSavedPlanPath = latestFactoryPlanPath ?? savedPlanPath;
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -56,9 +73,10 @@ export default function App() {
     if (!parsed.success) { setError(parsed.error.issues[0]?.message ?? 'Verifique os campos.'); return; }
     if (parsed.data.type !== 'start_review') return;
     setError('');
-    setSession({
-      mode: 'review',
-      request: { targetType: parsed.data.targetType, identifier: parsed.data.identifier, repoPath: parsed.data.repoPath },
+    startReview({
+      targetType: parsed.data.targetType,
+      identifier: parsed.data.identifier,
+      repoPath: parsed.data.repoPath,
     });
   }
 
@@ -67,7 +85,7 @@ export default function App() {
       {view === 'factory' ? (
         <FactoryPage
           repoPath={repoPath}
-          savedPlanPath={savedPlanPath}
+          savedPlanPath={effectiveSavedPlanPath}
           onPickDirectory={() => setPickingDirectory(true)}
           onOpenInitialNode={() => setConfiguringFactoryTask(true)}
           onViewPlan={path => setViewingMarkdownPath(path)}
@@ -137,17 +155,17 @@ export default function App() {
           onClose={() => setConfiguringFactoryTask(false)}
           onStart={factoryRequest => {
             setConfiguringFactoryTask(false);
-            setSession({ mode: 'factory', request: factoryRequest });
+            startFactory(factoryRequest);
           }}
         />
       )}
-      {session && (
+      {activeTerminalSession && 'request' in activeTerminalSession && (
         <TerminalModal
-          session={session}
+          session={activeTerminalSession}
           onClose={closeModal}
           theme={theme}
           onToggleTheme={toggleTheme}
-          onSavedReport={session.mode === 'factory' ? handleSavedReport : undefined}
+          onSavedReport={activeTerminalSession.mode === 'factory' ? handleSavedReport : undefined}
           onViewMarkdown={path => setViewingMarkdownPath(path)}
         />
       )}
