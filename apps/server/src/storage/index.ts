@@ -16,3 +16,13 @@ export {
   type ReviewRepositoryOptions,
   type SaveTransitionOptions,
 } from './sqlite-review-repository.js';
+export {
+  SqliteFactoryFlowRepository,
+  type CreateFactoryFlowIdempotentlyResult,
+  type CreateFactoryFlowResult,
+  type FactoryFlowRepositoryOptions,
+  type ListFactoryFlowsFilter,
+  type SaveFactoryArtifactOptions,
+  type SaveFactoryFlowTransitionOptions,
+  type UpdateFactoryStageInput,
+} from './sqlite-factory-flow-repository.js';

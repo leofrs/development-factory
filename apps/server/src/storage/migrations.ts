@@ -109,6 +109,81 @@ export const REVIEW_MIGRATIONS: readonly Migration[] = [
       `);
     },
   },
+  {
+    version: 4,
+    name: 'add_factory_flows',
+    up(db) {
+      db.exec(`
+        CREATE TABLE factory_flows (
+          id TEXT PRIMARY KEY,
+          contract_version INTEGER NOT NULL,
+          title TEXT NOT NULL,
+          input_type TEXT NOT NULL,
+          target_value TEXT NOT NULL,
+          repo_path TEXT NOT NULL,
+          state TEXT NOT NULL,
+          current_stage TEXT NOT NULL,
+          current_session_id TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          finished_at TEXT,
+          transitions_json TEXT NOT NULL,
+          error_json TEXT
+        ) STRICT;
+
+        CREATE INDEX idx_factory_flows_state_updated ON factory_flows (state, updated_at DESC);
+        CREATE INDEX idx_factory_flows_repo_path ON factory_flows (repo_path, created_at DESC);
+        CREATE INDEX idx_factory_flows_updated ON factory_flows (updated_at DESC);
+
+        CREATE TABLE factory_flow_stages (
+          id TEXT PRIMARY KEY,
+          flow_id TEXT NOT NULL REFERENCES factory_flows(id) ON DELETE RESTRICT,
+          contract_version INTEGER NOT NULL,
+          name TEXT NOT NULL,
+          state TEXT NOT NULL,
+          session_id TEXT,
+          report_path TEXT,
+          session_path TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          started_at TEXT,
+          finished_at TEXT,
+          error_json TEXT,
+          UNIQUE (flow_id, name)
+        ) STRICT;
+
+        CREATE INDEX idx_factory_flow_stages_flow_id ON factory_flow_stages (flow_id);
+        CREATE INDEX idx_factory_flow_stages_session_id ON factory_flow_stages (session_id);
+
+        CREATE TABLE factory_flow_artifacts (
+          id TEXT PRIMARY KEY,
+          flow_id TEXT NOT NULL REFERENCES factory_flows(id) ON DELETE RESTRICT,
+          contract_version INTEGER NOT NULL,
+          stage TEXT NOT NULL,
+          session_id TEXT,
+          kind TEXT NOT NULL,
+          format TEXT NOT NULL,
+          path TEXT NOT NULL,
+          status TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          error_json TEXT
+        ) STRICT;
+
+        CREATE INDEX idx_factory_flow_artifacts_flow_stage ON factory_flow_artifacts (flow_id, stage, created_at DESC);
+        CREATE INDEX idx_factory_flow_artifacts_path ON factory_flow_artifacts (path);
+
+        CREATE TABLE factory_flow_idempotency_keys (
+          idempotency_key TEXT PRIMARY KEY,
+          flow_id TEXT NOT NULL REFERENCES factory_flows(id) ON DELETE RESTRICT,
+          request_fingerprint TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        ) STRICT;
+
+        CREATE UNIQUE INDEX idx_factory_flow_idempotency_flow_id ON factory_flow_idempotency_keys (flow_id);
+      `);
+    },
+  },
 ];
 
 function validateMigrations(migrations: readonly Migration[]): void {
