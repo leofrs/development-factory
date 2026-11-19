@@ -1,20 +1,29 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import { ArrowRight, FolderGit2, Hash, Link2, LockKeyhole, Type, X } from 'lucide-react';
 import {
-  ClientMessageSchema,
-  type FactoryInputType,
-  type FactoryRequest,
+  ArrowRight,
+  FolderGit2,
+  Hash,
+  Link2,
+  Loader2,
+  LockKeyhole,
+  Type,
+  X,
+} from 'lucide-react';
+import {
+  FactoryTaskInputSchema,
+  type FactoryFlowInputType,
+  type FactoryTaskInput,
 } from '@development-factory/shared';
 
 interface FactoryTaskModalProps {
   repoPath: string;
   onPickDirectory: () => void;
   onClose: () => void;
-  onStart: (request: FactoryRequest) => void;
+  onCreateFlow: (input: FactoryTaskInput) => Promise<void>;
 }
 
 const inputOptions: ReadonlyArray<{
-  type: FactoryInputType;
+  type: FactoryFlowInputType;
   label: string;
   fieldLabel: string;
   placeholder: string;
@@ -47,12 +56,13 @@ export function FactoryTaskModal({
   repoPath,
   onPickDirectory,
   onClose,
-  onStart,
+  onCreateFlow,
 }: FactoryTaskModalProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
-  const [inputType, setInputType] = useState<FactoryInputType>('jira_key');
+  const [inputType, setInputType] = useState<FactoryFlowInputType>('jira_key');
   const [value, setValue] = useState('');
   const [error, setError] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -68,33 +78,38 @@ export function FactoryTaskModal({
   const currentOption = inputOptions.find(option => option.type === inputType) ?? inputOptions[0]!;
   const CurrentIcon = currentOption.icon;
 
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (isSubmitting) {
+      return;
+    }
     if (!repoPath) {
       setError('Selecione a pasta do repositório no WSL.');
       return;
     }
-    const parsed = ClientMessageSchema.safeParse({
-      type: 'start_factory',
+
+    const parsed = FactoryTaskInputSchema.safeParse({
       inputType,
       value,
       repoPath,
-      cols: 80,
-      rows: 24,
     });
     if (!parsed.success) {
       setError(parsed.error.issues[0]?.message ?? 'Verifique os campos informados.');
       return;
     }
-    if (parsed.data.type !== 'start_factory') {
-      return;
-    }
+
     setError('');
-    onStart({
-      inputType: parsed.data.inputType,
-      value: parsed.data.value,
-      repoPath: parsed.data.repoPath,
-    });
+    setIsSubmitting(true);
+    try {
+      await onCreateFlow(parsed.data);
+    } catch (submitError) {
+      setError(
+        submitError instanceof Error
+          ? submitError.message
+          : 'Não foi possível iniciar o fluxo da Factory.',
+      );
+      setIsSubmitting(false);
+    }
   }
 
   return (
@@ -102,7 +117,9 @@ export function FactoryTaskModal({
       ref={dialogRef}
       onCancel={event => {
         event.preventDefault();
-        onClose();
+        if (!isSubmitting) {
+          onClose();
+        }
       }}
       aria-labelledby="factory-task-title"
       className="terminal-dialog m-auto w-[calc(100%-1rem)] max-w-xl overflow-hidden rounded-2xl border border-line-strong bg-surface p-0 text-primary shadow-2xl sm:w-full"
@@ -113,13 +130,14 @@ export function FactoryTaskModal({
             01 / Triagem &amp; Contexto
           </span>
           <h2 id="factory-task-title" className="mt-1 text-base font-semibold">
-            Iniciar planejamento da tarefa
+            Iniciar novo fluxo da Factory
           </h2>
         </div>
         <button
           type="button"
           className="modal-button"
           onClick={onClose}
+          disabled={isSubmitting}
           aria-label="Fechar modal"
         >
           <X size={14} />
@@ -127,8 +145,13 @@ export function FactoryTaskModal({
         </button>
       </div>
 
-      <form onSubmit={handleSubmit} className="space-y-5 p-6">
-        <fieldset>
+      <form
+        onSubmit={event => {
+          void handleSubmit(event);
+        }}
+        className="space-y-5 p-6"
+      >
+        <fieldset disabled={isSubmitting}>
           <legend className="mb-2.5 text-xs font-medium text-secondary">
             Como você quer identificar a tarefa?
           </legend>
@@ -176,6 +199,7 @@ export function FactoryTaskModal({
               onChange={event => setValue(event.target.value)}
               placeholder={currentOption.placeholder}
               required
+              disabled={isSubmitting}
               maxLength={1000}
               autoComplete="off"
               spellCheck={inputType === 'title'}
@@ -191,6 +215,7 @@ export function FactoryTaskModal({
             id="factory-repo-path"
             type="button"
             onClick={onPickDirectory}
+            disabled={isSubmitting}
             className="field flex items-center gap-3 px-3 text-left"
             aria-haspopup="dialog"
           >
@@ -210,15 +235,27 @@ export function FactoryTaskModal({
 
         <button
           type="submit"
-          className="flex w-full items-center justify-center gap-3 rounded-lg bg-accent py-3.5 text-sm font-semibold text-on-accent transition hover:bg-accent-hover active:scale-[0.99]"
+          disabled={isSubmitting}
+          aria-busy={isSubmitting}
+          className="flex w-full items-center justify-center gap-3 rounded-lg bg-accent py-3.5 text-sm font-semibold text-on-accent transition hover:bg-accent-hover active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-60"
         >
-          Executar agente no Claude Code
-          <ArrowRight size={17} />
+          {isSubmitting ? (
+            <>
+              <Loader2 size={17} className="animate-spin" />
+              Iniciando fluxo em segundo plano...
+            </>
+          ) : (
+            <>
+              Iniciar fluxo em segundo plano
+              <ArrowRight size={17} />
+            </>
+          )}
         </button>
 
         <p className="flex items-center justify-center gap-2 text-center text-[11px] text-muted">
           <LockKeyhole size={12} />
-          Gera o plano estruturado em Markdown dentro de <span className="font-mono">.code-reviews/</span>.
+          Executa em segundo plano sem bloquear outros fluxos e salva o plano em{' '}
+          <span className="font-mono">.code-reviews/</span>.
         </p>
       </form>
     </dialog>

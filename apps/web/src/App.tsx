@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
 import { ArrowRight, Check, ChevronRight, Folder, FolderGit2, GitBranch, GitPullRequest, Layers3, LockKeyhole, ScanLine, Terminal } from 'lucide-react';
 import { ClientMessageSchema, ReviewDestinationSchema } from '@development-factory/shared';
 import type { TargetType } from '@development-factory/shared';
@@ -55,18 +55,21 @@ export default function App() {
     loadingFactoryFlows,
     factoryFlowsError,
     startReview,
-    startFactory,
+    createFlow,
+    advanceFlowStage,
+    rerunFlowStage,
     cancelFlow,
     openTerminal,
     openFlowTerminal,
     minimizeTerminal,
     bindActiveSessionId,
     stopSession,
+    refreshFactoryFlows,
     dismissNotification,
     clearAllNotifications,
   } = useBackgroundOperations();
   const [configuringFactoryTask, setConfiguringFactoryTask] = useState(false);
-  const [savedPlanPath, setSavedPlanPath] = useState<string | null>(null);
+  const [selectedFlowId, setSelectedFlowId] = useState<string | null>(null);
   const [viewingMarkdownPath, setViewingMarkdownPath] = useState<string | null>(null);
   const [pickingDirectory, setPickingDirectory] = useState<'repository' | 'report' | null>(null);
   const [viewingHistory, setViewingHistory] = useState(false);
@@ -114,16 +117,6 @@ export default function App() {
     minimizeTerminal();
     submitRef.current?.focus();
   }, [minimizeTerminal]);
-  const handleSavedReport = useCallback((reportPath: string) => {
-    setSavedPlanPath(reportPath);
-  }, []);
-  const latestFactoryPlanPath = useMemo(() => {
-    const savedFactorySession = sessions.find(
-      (item) => item.mode === 'factory' && item.historyState === 'saved' && Boolean(item.reportPath),
-    );
-    return savedFactorySession?.reportPath ?? null;
-  }, [sessions]);
-  const effectiveSavedPlanPath = latestFactoryPlanPath ?? savedPlanPath;
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -148,10 +141,28 @@ export default function App() {
       {view === 'factory' ? (
         <FactoryPage
           repoPath={repoPath}
-          savedPlanPath={effectiveSavedPlanPath}
+          flows={factoryFlows}
+          sessions={sessions}
+          selectedFlowId={selectedFlowId}
+          loadingFlows={loadingFactoryFlows}
+          flowsError={factoryFlowsError}
+          onSelectFlow={setSelectedFlowId}
           onPickDirectory={() => setPickingDirectory('repository')}
-          onOpenInitialNode={() => setConfiguringFactoryTask(true)}
-          onViewPlan={path => setViewingMarkdownPath(path)}
+          onOpenNewFlow={() => setConfiguringFactoryTask(true)}
+          onOpenFlowTerminal={flowId => {
+            openFlowTerminal(flowId);
+          }}
+          onAdvanceFlowStage={async flowId => {
+            await advanceFlowStage(flowId, { startSession: true, cols: 120, rows: 36 });
+          }}
+          onRerunFlowStage={async (flowId, stage) => {
+            await rerunFlowStage(flowId, { stage, cols: 120, rows: 36 });
+          }}
+          onCancelFlow={async flowId => {
+            await cancelFlow(flowId);
+          }}
+          onRefreshFlows={refreshFactoryFlows}
+          onViewMarkdown={path => setViewingMarkdownPath(path)}
         />
       ) : (
         <main className="mx-auto max-w-6xl px-6 pb-28 pt-12 sm:px-10 sm:pt-20">
@@ -255,9 +266,15 @@ export default function App() {
           repoPath={repoPath}
           onPickDirectory={() => setPickingDirectory('repository')}
           onClose={() => setConfiguringFactoryTask(false)}
-          onStart={factoryRequest => {
+          onCreateFlow={async task => {
+            const result = await createFlow({
+              task,
+              startSession: true,
+              cols: 120,
+              rows: 36,
+            });
+            setSelectedFlowId(result.flow.id);
             setConfiguringFactoryTask(false);
-            startFactory(factoryRequest);
           }}
         />
       )}
@@ -274,7 +291,6 @@ export default function App() {
           onBindSessionId={bindActiveSessionId}
           theme={theme}
           onToggleTheme={toggleTheme}
-          onSavedReport={activeTerminalSession.mode === 'factory' ? handleSavedReport : undefined}
           onViewMarkdown={path => setViewingMarkdownPath(path)}
         />
       )}

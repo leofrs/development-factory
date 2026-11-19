@@ -1,7 +1,11 @@
 import type {
   FactoryFlow,
+  FactoryFlowArtifactKind,
+  FactoryFlowArtifactStatus,
+  FactoryFlowInputType,
   FactoryFlowState,
   FactoryStageName,
+  FactoryStageState,
 } from '@development-factory/shared';
 import type { SessionStatusPresentation } from './session-status';
 
@@ -23,6 +27,22 @@ const STAGE_STEPS: Record<FactoryStageName, string> = {
   pr: '06',
 };
 
+const INPUT_TYPE_LABELS: Record<FactoryFlowInputType, string> = {
+  jira_url: 'URL JIRA',
+  jira_key: 'Chave JIRA',
+  title: 'Título',
+};
+
+const ARTIFACT_KIND_LABELS: Record<FactoryFlowArtifactKind, string> = {
+  plan: 'Plano técnico',
+  specification: 'Especificação',
+  patch: 'Patch',
+  test_report: 'Relatório de testes',
+  review_report: 'Code Review',
+  pr_summary: 'Resumo do PR',
+  session_log: 'Log da sessão',
+};
+
 /** Retorna o nome legível de uma etapa do ciclo da Factory. */
 export function getFactoryStageLabel(stage: FactoryStageName): string {
   return STAGE_LABELS[stage];
@@ -31,6 +51,16 @@ export function getFactoryStageLabel(stage: FactoryStageName): string {
 /** Retorna o número formatado da etapa (`01` a `06`). */
 export function getFactoryStageStep(stage: FactoryStageName): string {
   return STAGE_STEPS[stage];
+}
+
+/** Retorna o rótulo amigável do tipo de entrada da tarefa. */
+export function getFactoryInputTypeLabel(inputType: FactoryFlowInputType): string {
+  return INPUT_TYPE_LABELS[inputType];
+}
+
+/** Retorna o rótulo amigável do tipo de artefato gerado pelo fluxo. */
+export function getFactoryArtifactKindLabel(kind: FactoryFlowArtifactKind): string {
+  return ARTIFACT_KIND_LABELS[kind];
 }
 
 /** Indica se um fluxo da Factory está em execução ativa ou na fila. */
@@ -78,6 +108,82 @@ export function getFactoryFlowStatePresentation(
         label: 'Cancelado',
         dotClass: 'bg-warning',
         textClass: 'text-warning',
+      };
+  }
+}
+
+/** Resolve rótulo e classes visuais para o estado de uma etapa do fluxo. */
+export function getFactoryStageStatePresentation(
+  state: FactoryStageState,
+): SessionStatusPresentation {
+  switch (state) {
+    case 'pending':
+      return {
+        label: 'Pendente',
+        dotClass: 'bg-muted/60',
+        textClass: 'text-muted',
+      };
+    case 'running':
+      return {
+        label: 'Em execução',
+        dotClass: 'bg-accent animate-pulse',
+        textClass: 'text-accent',
+      };
+    case 'waiting_action':
+      return {
+        label: 'Aguardando ação',
+        dotClass: 'bg-warning',
+        textClass: 'text-warning',
+      };
+    case 'completed':
+      return {
+        label: 'Concluída',
+        dotClass: 'bg-accent',
+        textClass: 'text-accent',
+      };
+    case 'failed':
+      return {
+        label: 'Falhou',
+        dotClass: 'bg-danger',
+        textClass: 'text-danger',
+      };
+    case 'cancelled':
+      return {
+        label: 'Cancelada',
+        dotClass: 'bg-warning',
+        textClass: 'text-warning',
+      };
+  }
+}
+
+/** Resolve rótulo e classes visuais para o status de um artefato do fluxo. */
+export function getFactoryArtifactStatusPresentation(
+  status: FactoryFlowArtifactStatus,
+): SessionStatusPresentation {
+  switch (status) {
+    case 'pending':
+      return {
+        label: 'Pendente',
+        dotClass: 'bg-muted/60',
+        textClass: 'text-muted',
+      };
+    case 'ready':
+      return {
+        label: 'Pronto',
+        dotClass: 'bg-accent',
+        textClass: 'text-accent',
+      };
+    case 'incomplete':
+      return {
+        label: 'Incompleto',
+        dotClass: 'bg-warning',
+        textClass: 'text-warning',
+      };
+    case 'failed':
+      return {
+        label: 'Falhou',
+        dotClass: 'bg-danger',
+        textClass: 'text-danger',
       };
   }
 }
