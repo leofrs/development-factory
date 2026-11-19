@@ -100,7 +100,7 @@ test('BackgroundSessionSummarySchema rejeita campos extras e valores inválidos'
 
 test('AppEventSchema valida todos os eventos de sessão e rejeita payloads inválidos', () => {
   const summary = createValidSummary();
-  const eventTypes: AppEvent['type'][] = [
+  const eventTypes: Array<Extract<AppEvent, { session: BackgroundSessionSummary }>['type']> = [
     'session.started',
     'session.updated',
     'session.history_saved',
@@ -110,6 +110,7 @@ test('AppEventSchema valida todos os eventos de sessão e rejeita payloads invá
   for (const type of eventTypes) {
     const parsed = AppEventSchema.parse({ type, session: summary });
     assert.equal(parsed.type, type);
+    assert('session' in parsed);
     assert.equal(parsed.session.sessionId, sessionId);
   }
 
@@ -198,4 +199,13 @@ test('ServerMessageSchema aceita status com sessionId opcional e session_attache
     ServerMessageSchema.safeParse({ type: 'session_attached', session: summary, replay: '', extra: 1 }).success,
     false,
   );
+
+  const factoryFlowMsg = ServerMessageSchema.parse({
+    type: 'factory_flow',
+    flowId: sessionId,
+    stage: 'triage',
+    state: 'running',
+  });
+  assert.equal(factoryFlowMsg.type, 'factory_flow');
+  assert.equal(factoryFlowMsg.stage, 'triage');
 });

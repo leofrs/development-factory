@@ -472,7 +472,7 @@ export class FactoryFlowService {
 
         const targetStage = options.stage ?? flow.currentStage;
         if (flow.state === 'running' && targetStage === flow.currentStage) {
-          this.repository.updateFlowSession(flowId, parsedSessionId.data, at);
+          this.repository.updateFlowSession(flowId, parsedSessionId.data, flow.updatedAt);
           return;
         }
 

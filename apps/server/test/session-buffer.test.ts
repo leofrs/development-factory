@@ -104,6 +104,7 @@ test('toBackgroundSessionSummary gera resumo compatível com BackgroundSessionSu
         dispose() {},
       },
     },
+    activeFactorySession: undefined,
     subscribers: new Set(),
     buffer: new SessionOutputBuffer(),
     startedAt: '2026-11-19T12:00:00.000Z',

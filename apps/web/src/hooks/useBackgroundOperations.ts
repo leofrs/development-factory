@@ -230,6 +230,9 @@ export function useBackgroundOperations(): BackgroundOperationsState {
 
   const handleAppEvent = useCallback(
     (event: AppEvent) => {
+      if (!('session' in event)) {
+        return;
+      }
       const { session } = event;
       setSessionsMap((current) => {
         const next = new Map(current);

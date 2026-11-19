@@ -1,4 +1,9 @@
 import { z } from 'zod';
+import {
+  FactoryFlowSchema,
+  FactoryFlowStateSchema,
+  FactoryStageNameSchema,
+} from './factory.js';
 import { ReviewReportDirectoryPathSchema, ReviewStateSchema } from './review.js';
 
 export * from './review.js';
@@ -42,6 +47,8 @@ export const BackgroundSessionSummarySchema = z.strictObject({
   sessionPath: nonEmptyTextSchema.nullable().optional(),
   reviewId: uuidSchema.nullable().optional(),
   executionId: uuidSchema.nullable().optional(),
+  flowId: uuidSchema.nullable().optional(),
+  stage: FactoryStageNameSchema.nullable().optional(),
   startedAt: isoDatetimeSchema,
   finishedAt: isoDatetimeSchema.nullable(),
   exitCode: z.number().int().nullable().optional(),
@@ -66,6 +73,18 @@ export const AppEventSchema = z.discriminatedUnion('type', [
     type: z.literal('session.finished'),
     session: BackgroundSessionSummarySchema,
   }),
+  z.strictObject({
+    type: z.literal('factory_flow.created'),
+    flow: FactoryFlowSchema,
+  }),
+  z.strictObject({
+    type: z.literal('factory_flow.updated'),
+    flow: FactoryFlowSchema,
+  }),
+  z.strictObject({
+    type: z.literal('factory_flow.finished'),
+    flow: FactoryFlowSchema,
+  }),
 ]);
 export type AppEvent = z.infer<typeof AppEventSchema>;
 
@@ -84,6 +103,9 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     inputType: FactoryInputTypeSchema,
     value: z.string().trim().min(1, 'Informe os dados da tarefa').max(1000).refine(value => !/[\x00-\x1f\x7f]/.test(value), 'Entrada inválida'),
     repoPath: repoPathSchema,
+    flowId: uuidSchema.optional(),
+    stage: FactoryStageNameSchema.optional(),
+    title: nonEmptyTextSchema.max(200).optional(),
     cols: columns,
     rows,
   }).superRefine((val, ctx) => {
@@ -117,6 +139,7 @@ export const ServerMessageSchema = z.discriminatedUnion('type', [
     state: BackgroundSessionHistoryStateSchema,
   }),
   z.object({ type: z.literal('review'), reviewId: uuidSchema, executionId: uuidSchema, state: ReviewStateSchema }),
+  z.strictObject({ type: z.literal('factory_flow'), flowId: uuidSchema, stage: FactoryStageNameSchema, state: FactoryFlowStateSchema }),
   z.strictObject({ type: z.literal('session_attached'), session: BackgroundSessionSummarySchema, replay: z.string() }),
 ]);
 

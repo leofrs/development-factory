@@ -4,16 +4,23 @@ import { existsSync, statSync } from 'node:fs';
 import * as pty from 'node-pty';
 import { WebSocket } from 'ws';
 import {
+  FACTORY_FLOW_CONTRACT_VERSION,
   REVIEW_CONTRACT_VERSION,
+  getNextFactoryStage,
+  isFinalFactoryFlowState,
   type AppEvent,
   type BackgroundSessionSummary,
+  type FactoryFlowArtifactKind,
+  type FactoryFlowError,
   type FactoryRequest,
+  type FactoryStageName,
   type ReviewError,
   type ReviewProcess,
   type ReviewRequest,
   type ServerMessage,
 } from '@development-factory/shared';
 import { resolveReviewReportDirectory } from './artifacts.js';
+import { FactoryFlowServiceError, type FactoryFlowService } from './factory-flow-service.js';
 import { createFactoryHistory } from './history.js';
 import { buildCodeReviewPrompt } from './prompts/code-review.js';
 import { buildFactoryPlanPrompt } from './prompts/factory-plan.js';
@@ -23,6 +30,7 @@ import {
   DEFAULT_SESSION_BUFFER_MAX_BYTES,
   SessionOutputBuffer,
   toBackgroundSessionSummary,
+  type ActiveFactorySession,
   type ActiveReviewSession,
   type ManagedSession,
 } from './session-buffer.js';
@@ -53,6 +61,7 @@ export class SessionManagerError extends Error {
 }
 
 export interface SessionManagerOptions {
+  readonly factoryFlowService?: FactoryFlowService;
   readonly eventEmitter?: EventEmitter;
   readonly maxConcurrentSessions?: number;
   readonly completedSessionTtlMs?: number;
@@ -75,6 +84,7 @@ interface SessionRuntime {
   readonly session: ManagedSession;
   operationChain: Promise<void>;
   finalized: boolean;
+  factoryReportRegistered: boolean;
 }
 
 function buildReviewError(code: string, message: string, retryable: boolean): ReviewError {
@@ -86,6 +96,25 @@ function buildReviewError(code: string, message: string, retryable: boolean): Re
     retryable,
   };
 }
+
+function buildFactoryFlowError(code: string, message: string, retryable: boolean): FactoryFlowError {
+  return {
+    contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+    code,
+    message,
+    occurredAt: new Date().toISOString(),
+    retryable,
+  };
+}
+
+const STAGE_ARTIFACT_KIND: Readonly<Record<FactoryStageName, FactoryFlowArtifactKind>> = {
+  triage: 'specification',
+  planning: 'plan',
+  development: 'patch',
+  tests: 'test_report',
+  review: 'review_report',
+  pr: 'pr_summary',
+};
 
 function formatReviewTitle(request: ReviewRequest): string {
   return request.targetType === 'pr' ? `PR #${request.identifier}` : `Branch ${request.identifier}`;
@@ -136,6 +165,7 @@ function disposePtyProcess(session: ManagedSession, killProcess: boolean): void 
 
 export class SessionManager {
   readonly #reviewService: ReviewService;
+  readonly #factoryFlowService: FactoryFlowService | undefined;
   readonly #eventEmitter: EventEmitter;
   readonly #maxConcurrentSessions: number;
   readonly #completedSessionTtlMs: number;
@@ -166,6 +196,7 @@ export class SessionManager {
     }
 
     this.#reviewService = reviewService;
+    this.#factoryFlowService = options.factoryFlowService;
     this.#eventEmitter = options.eventEmitter ?? new EventEmitter();
     this.#maxConcurrentSessions = maxConcurrentSessions;
     this.#completedSessionTtlMs = completedSessionTtlMs;
@@ -185,8 +216,12 @@ export class SessionManager {
     };
   }
 
-  #emitEvent(event: AppEvent): void {
+  emitAppEvent(event: AppEvent): void {
     this.#eventEmitter.emit(APP_EVENT_NAME, event);
+  }
+
+  #emitEvent(event: AppEvent): void {
+    this.emitAppEvent(event);
   }
 
   #enqueue(runtime: SessionRuntime, task: () => Promise<void>): void {
@@ -306,6 +341,7 @@ export class SessionManager {
       subscriptions: [],
       history: undefined,
       activeReviewSession,
+      activeFactorySession: undefined,
       subscribers: new Set<WebSocket>(),
       buffer: new SessionOutputBuffer(this.#bufferMaxBytes),
       startedAt: new Date(this.#now()).toISOString(),
@@ -319,6 +355,7 @@ export class SessionManager {
       session,
       operationChain: Promise.resolve(),
       finalized: false,
+      factoryReportRegistered: false,
     };
 
     let child: pty.IPty;
@@ -464,10 +501,53 @@ export class SessionManager {
     validateRepoPath(input.repoPath);
     this.#assertCapacity();
 
+    let activeFactorySession: ActiveFactorySession | undefined;
+    if (this.#factoryFlowService) {
+      if (input.flowId) {
+        let details;
+        try {
+          details = this.#factoryFlowService.getFlow(input.flowId);
+        } catch (error) {
+          if (error instanceof FactoryFlowServiceError) {
+            throw new SessionManagerError('SESSION_CREATION_FAILED', error.message, error.statusCode);
+          }
+          throw error;
+        }
+        if (isFinalFactoryFlowState(details.flow.state)) {
+          throw new SessionManagerError(
+            'SESSION_CREATION_FAILED',
+            `Não é possível iniciar sessão em um fluxo no estado final ${details.flow.state}.`,
+            409,
+          );
+        }
+        activeFactorySession = {
+          flowId: details.flow.id,
+          stage: input.stage ?? details.flow.currentStage,
+        };
+      } else {
+        const created = await this.#factoryFlowService.createFlow({
+          task: {
+            inputType: input.inputType,
+            value: input.value,
+            repoPath: input.repoPath,
+          },
+          ...(input.title ? { title: input.title } : {}),
+        });
+        this.#emitEvent({
+          type: 'factory_flow.created',
+          flow: created.flow,
+        });
+        activeFactorySession = {
+          flowId: created.flow.id,
+          stage: input.stage ?? created.flow.currentStage,
+        };
+      }
+    }
+
     const session: ManagedSession = {
       sessionId: randomUUID(),
       mode: 'factory',
-      title: formatFactoryTitle(input),
+      title: input.title?.trim() || formatFactoryTitle(input),
       repoPath: input.repoPath,
       status: 'running',
       historyState: 'pending',
@@ -477,6 +557,7 @@ export class SessionManager {
       subscriptions: [],
       history: undefined,
       activeReviewSession: undefined,
+      activeFactorySession,
       subscribers: new Set<WebSocket>(),
       buffer: new SessionOutputBuffer(this.#bufferMaxBytes),
       startedAt: new Date(this.#now()).toISOString(),
@@ -490,6 +571,7 @@ export class SessionManager {
       session,
       operationChain: Promise.resolve(),
       finalized: false,
+      factoryReportRegistered: false,
     };
 
     let factoryHistory: ReturnType<typeof createFactoryHistory>;
@@ -503,6 +585,11 @@ export class SessionManager {
               type: 'session.history_saved',
               session: toBackgroundSessionSummary(session),
             });
+            if (this.#factoryFlowService && activeFactorySession && !runtime.finalized) {
+              this.#enqueue(runtime, () =>
+                this.#syncFactoryReportSaved(runtime, activeFactorySession, factoryHistory),
+              );
+            }
           } else {
             this.#emitEvent({
               type: 'session.updated',
@@ -522,6 +609,14 @@ export class SessionManager {
       );
     } catch (error) {
       const detail = error instanceof Error ? error.message : 'Falha desconhecida';
+      if (this.#factoryFlowService && activeFactorySession) {
+        await this.#failFactoryStart(
+          activeFactorySession.flowId,
+          activeFactorySession.stage,
+          'FACTORY_HISTORY_INIT_FAILED',
+          `Não foi possível preparar os arquivos do planejamento: ${detail}`,
+        );
+      }
       throw new SessionManagerError(
         'SESSION_CREATION_FAILED',
         `Não foi possível preparar os arquivos do planejamento: ${detail}`,
@@ -550,6 +645,14 @@ export class SessionManager {
       const detail = error instanceof Error ? error.message : 'Falha desconhecida';
       session.history = undefined;
       factoryHistory.finish(`falha ao iniciar processo PTY: ${detail}`);
+      if (this.#factoryFlowService && activeFactorySession) {
+        await this.#failFactoryStart(
+          activeFactorySession.flowId,
+          activeFactorySession.stage,
+          'FACTORY_PTY_SPAWN_FAILED',
+          `Não foi possível iniciar o processo Claude: ${detail}`,
+        );
+      }
       throw new SessionManagerError(
         'SESSION_CREATION_FAILED',
         `Não foi possível operar o terminal: ${detail}. Verifique o caminho e se claude está no PATH do servidor.`,
@@ -573,12 +676,104 @@ export class SessionManager {
     ];
 
     this.#runtimes.set(session.sessionId, runtime);
+    if (this.#factoryFlowService && activeFactorySession) {
+      try {
+        const attached = await this.#factoryFlowService.attachSession(
+          activeFactorySession.flowId,
+          session.sessionId,
+          {
+            stage: activeFactorySession.stage,
+            reason: `Sessão ${session.sessionId} iniciada na etapa ${activeFactorySession.stage}`,
+          },
+        );
+        await this.#factoryFlowService.updateStagePaths(
+          activeFactorySession.flowId,
+          activeFactorySession.stage,
+          {
+            reportPath: factoryHistory.reportPath,
+            sessionPath: factoryHistory.sessionPath,
+          },
+        );
+        this.#emitEvent({
+          type: 'factory_flow.updated',
+          flow: attached.flow,
+        });
+      } catch (error) {
+        await this.stopSession(session.sessionId, 'falha ao vincular sessão ao fluxo da Factory');
+        throw error;
+      }
+    }
+
     this.#emitEvent({
       type: 'session.started',
       session: toBackgroundSessionSummary(session),
     });
 
     return session;
+  }
+
+  async #failFactoryStart(
+    flowId: string,
+    stage: FactoryStageName,
+    code: string,
+    message: string,
+  ): Promise<void> {
+    if (!this.#factoryFlowService) {
+      return;
+    }
+    try {
+      const current = this.#factoryFlowService.getFlow(flowId).flow;
+      if (isFinalFactoryFlowState(current.state)) {
+        return;
+      }
+      const failed = await this.#factoryFlowService.transitionFlow(flowId, {
+        to: 'failed',
+        stage,
+        reason: message,
+        currentSessionId: null,
+        error: buildFactoryFlowError(code, message, true),
+      });
+      this.#emitEvent({
+        type: 'factory_flow.finished',
+        flow: failed.flow,
+      });
+    } catch {
+      // Preserva o erro original de criação da sessão.
+    }
+  }
+
+  async #syncFactoryReportSaved(
+    runtime: SessionRuntime,
+    activeFactory: ActiveFactorySession,
+    factoryHistory: { reportPath: string; sessionPath: string },
+  ): Promise<void> {
+    if (!this.#factoryFlowService) {
+      return;
+    }
+    const { session } = runtime;
+    if (!runtime.factoryReportRegistered) {
+      runtime.factoryReportRegistered = true;
+      await this.#factoryFlowService.registerArtifact(
+        activeFactory.flowId,
+        {
+          stage: activeFactory.stage,
+          sessionId: session.sessionId,
+          kind: STAGE_ARTIFACT_KIND[activeFactory.stage],
+          format: 'markdown',
+          path: factoryHistory.reportPath,
+          status: 'ready',
+        },
+        {
+          reportPath: factoryHistory.reportPath,
+          sessionPath: factoryHistory.sessionPath,
+        },
+      );
+    }
+    const details = this.#factoryFlowService.getFlow(activeFactory.flowId);
+    this.#emitEvent({
+      type: 'factory_flow.updated',
+      flow: details.flow,
+    });
   }
 
   #handlePtyExit(
@@ -614,11 +809,30 @@ export class SessionManager {
     });
 
     const activeReview = session.activeReviewSession;
-    if (!activeReview) {
+    const activeFactory = session.activeFactorySession;
+    if (!activeReview && (!activeFactory || !this.#factoryFlowService)) {
       this.#emitEvent({
         type: 'session.finished',
         session: toBackgroundSessionSummary(session),
       });
+      return;
+    }
+
+    if (activeFactory && this.#factoryFlowService) {
+      this.#enqueue(runtime, async () => {
+        try {
+          await this.#finishFactorySession(runtime, activeFactory, exitCode);
+        } finally {
+          this.#emitEvent({
+            type: 'session.finished',
+            session: toBackgroundSessionSummary(session),
+          });
+        }
+      });
+      return;
+    }
+
+    if (!activeReview) {
       return;
     }
 
@@ -673,6 +887,150 @@ export class SessionManager {
     });
   }
 
+  async #finishFactorySession(
+    runtime: SessionRuntime,
+    activeFactory: ActiveFactorySession,
+    exitCode: number,
+  ): Promise<void> {
+    if (!this.#factoryFlowService) {
+      return;
+    }
+
+    const { session } = runtime;
+    const { flowId, stage } = activeFactory;
+
+    if (session.sessionPath) {
+      await this.#factoryFlowService.registerArtifact(
+        flowId,
+        {
+          stage,
+          sessionId: session.sessionId,
+          kind: 'session_log',
+          format: 'markdown',
+          path: session.sessionPath,
+          status: 'ready',
+        },
+        { sessionPath: session.sessionPath },
+      );
+    }
+
+    if (exitCode === 0) {
+      if (session.reportPath && !runtime.factoryReportRegistered) {
+        runtime.factoryReportRegistered = true;
+        if (session.historyState === 'saved') {
+          await this.#factoryFlowService.registerArtifact(
+            flowId,
+            {
+              stage,
+              sessionId: session.sessionId,
+              kind: STAGE_ARTIFACT_KIND[stage],
+              format: 'markdown',
+              path: session.reportPath,
+              status: 'ready',
+            },
+            { reportPath: session.reportPath },
+          );
+        } else {
+          await this.#factoryFlowService.registerArtifact(
+            flowId,
+            {
+              stage,
+              sessionId: session.sessionId,
+              kind: STAGE_ARTIFACT_KIND[stage],
+              format: 'markdown',
+              path: session.reportPath,
+              status: 'incomplete',
+              error: buildFactoryFlowError(
+                'FACTORY_ARTIFACT_INCOMPLETE',
+                'O processo PTY encerrou sem salvar o artefato final da etapa.',
+                true,
+              ),
+            },
+            { reportPath: session.reportPath },
+          );
+        }
+      }
+
+      const currentFlow = this.#factoryFlowService.getFlow(flowId).flow;
+      if (isFinalFactoryFlowState(currentFlow.state)) {
+        return;
+      }
+
+      const nextState =
+        session.historyState === 'saved' && getNextFactoryStage(stage) === null
+          ? 'completed'
+          : 'waiting_action';
+      const transitioned = await this.#factoryFlowService.transitionFlow(flowId, {
+        to: nextState,
+        stage,
+        reason:
+          nextState === 'completed'
+            ? `Etapa final ${stage} concluída com artefato salvo`
+            : `Sessão da etapa ${stage} finalizada com código 0`,
+        currentSessionId: null,
+      });
+
+      this.#emitEvent({
+        type: isFinalFactoryFlowState(transitioned.flow.state)
+          ? 'factory_flow.finished'
+          : 'factory_flow.updated',
+        flow: transitioned.flow,
+      });
+      broadcast(session, {
+        type: 'factory_flow',
+        flowId,
+        stage,
+        state: transitioned.flow.state,
+      });
+      return;
+    }
+
+    const failureError = buildFactoryFlowError(
+      'FACTORY_PTY_FAILED',
+      `Processo PTY encerrado com código ${exitCode}.`,
+      true,
+    );
+    if (session.reportPath && session.historyState !== 'saved' && !runtime.factoryReportRegistered) {
+      runtime.factoryReportRegistered = true;
+      await this.#factoryFlowService.registerArtifact(
+        flowId,
+        {
+          stage,
+          sessionId: session.sessionId,
+          kind: STAGE_ARTIFACT_KIND[stage],
+          format: 'markdown',
+          path: session.reportPath,
+          status: 'failed',
+          error: failureError,
+        },
+        { reportPath: session.reportPath },
+      );
+    }
+
+    const currentFlow = this.#factoryFlowService.getFlow(flowId).flow;
+    if (isFinalFactoryFlowState(currentFlow.state)) {
+      return;
+    }
+
+    const failed = await this.#factoryFlowService.transitionFlow(flowId, {
+      to: 'failed',
+      stage,
+      reason: `Sessão da etapa ${stage} encerrada com código ${exitCode}`,
+      currentSessionId: null,
+      error: failureError,
+    });
+    this.#emitEvent({
+      type: 'factory_flow.finished',
+      flow: failed.flow,
+    });
+    broadcast(session, {
+      type: 'factory_flow',
+      flowId,
+      stage,
+      state: failed.flow.state,
+    });
+  }
+
   attachClient(sessionId: string, ws: WebSocket): BackgroundSessionSummary {
     const runtime = this.#getRuntimeOrThrow(sessionId);
     const { session } = runtime;
@@ -707,6 +1065,24 @@ export class SessionManager {
               : session.status === 'failed'
                 ? 'failed'
                 : 'incomplete',
+      });
+    }
+
+    if (session.activeFactorySession) {
+      const flowState =
+        this.#factoryFlowService?.getFlow(session.activeFactorySession.flowId).flow.state ??
+        (session.status === 'running'
+          ? 'running'
+          : session.status === 'cancelled'
+            ? 'cancelled'
+            : session.status === 'failed'
+              ? 'failed'
+              : 'waiting_action');
+      sendToSocket(ws, {
+        type: 'factory_flow',
+        flowId: session.activeFactorySession.flowId,
+        stage: session.activeFactorySession.stage,
+        state: flowState,
       });
     }
 
@@ -793,6 +1169,7 @@ export class SessionManager {
     });
 
     const activeReview = session.activeReviewSession;
+    const activeFactory = session.activeFactorySession;
     if (activeReview) {
       this.#enqueue(runtime, async () => {
         await this.#finishReviewReport(
@@ -816,6 +1193,38 @@ export class SessionManager {
           executionId: finished.execution.id,
           state: finished.review.state,
         });
+      });
+    } else if (activeFactory && this.#factoryFlowService) {
+      const flowService = this.#factoryFlowService;
+      this.#enqueue(runtime, async () => {
+        if (session.sessionPath) {
+          await flowService.registerArtifact(
+            activeFactory.flowId,
+            {
+              stage: activeFactory.stage,
+              sessionId: session.sessionId,
+              kind: 'session_log',
+              format: 'markdown',
+              path: session.sessionPath,
+              status: 'ready',
+            },
+            { sessionPath: session.sessionPath },
+          );
+        }
+        const currentFlow = flowService.getFlow(activeFactory.flowId).flow;
+        if (!isFinalFactoryFlowState(currentFlow.state)) {
+          const cancelled = await flowService.cancelFlow(activeFactory.flowId, { reason });
+          this.#emitEvent({
+            type: 'factory_flow.finished',
+            flow: cancelled.flow,
+          });
+          broadcast(session, {
+            type: 'factory_flow',
+            flowId: activeFactory.flowId,
+            stage: activeFactory.stage,
+            state: cancelled.flow.state,
+          });
+        }
       });
     }
 

@@ -3,18 +3,29 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import {
   AppEventSchema,
   BackgroundSessionSummarySchema,
+  CancelFactoryFlowRequestSchema,
+  FACTORY_FLOW_CONTRACT_VERSION,
   REVIEW_CONTRACT_VERSION,
+  RerunFactoryStageRequestSchema,
   ReviewDestinationSchema,
+  isFinalFactoryFlowState,
   type AppEvent,
+  type FactoryFlowApiErrorCode,
+  type FactoryFlowApiErrorResponse,
   type ReviewApiErrorResponse,
 } from '@development-factory/shared';
 import { defaultReviewReportDirectory } from './artifacts.js';
 import { handleTerminalConnection } from './ws/terminal-handler.js';
 import { listDirectories } from './directories.js';
+import { FactoryFlowService, FactoryFlowServiceError } from './factory-flow-service.js';
 import { listHistory, readHistoryFile } from './history-reader.js';
 import { ReviewService, ReviewServiceError } from './review-service.js';
 import { SessionManager, SessionManagerError } from './session-manager.js';
-import { SqliteReviewRepository, type ReviewRepositoryOptions } from './storage/index.js';
+import {
+  SqliteFactoryFlowRepository,
+  SqliteReviewRepository,
+  type ReviewRepositoryOptions,
+} from './storage/index.js';
 
 const allowedOrigins = new Set(['http://localhost:5173', 'http://127.0.0.1:5173']);
 const MAX_JSON_BODY_BYTES = 64 * 1024;
@@ -27,6 +38,18 @@ function sendApiError(
 ): void {
   const payload: ReviewApiErrorResponse = {
     contractVersion: REVIEW_CONTRACT_VERSION,
+    error,
+  };
+  res.writeHead(statusCode).end(JSON.stringify(payload));
+}
+
+function sendFactoryFlowApiError(
+  res: ServerResponse,
+  statusCode: number,
+  error: FactoryFlowApiErrorResponse['error'],
+): void {
+  const payload: FactoryFlowApiErrorResponse = {
+    contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
     error,
   };
   res.writeHead(statusCode).end(JSON.stringify(payload));
@@ -261,10 +284,405 @@ function handleEventsStreamRequest(
   res.once('error', cleanup);
 }
 
+async function readOptionalJsonBody(req: IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+
+  for await (const chunk of req) {
+    const buffer = typeof chunk === 'string' ? Buffer.from(chunk) : (chunk as Buffer);
+    totalBytes += buffer.length;
+    if (totalBytes > MAX_JSON_BODY_BYTES) {
+      throw new ReviewServiceError(
+        'REVIEW_INVALID_INPUT',
+        'O corpo da requisição excede o limite máximo permitido.',
+        413,
+      );
+    }
+    chunks.push(buffer);
+  }
+
+  const raw = Buffer.concat(chunks).toString('utf8').trim();
+  if (raw.length === 0) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    throw new ReviewServiceError(
+      'REVIEW_INVALID_INPUT',
+      'O corpo da requisição não contém JSON válido.',
+      400,
+    );
+  }
+}
+
+function parseListFactoryFlowsQuery(searchParams: URLSearchParams): Record<string, unknown> {
+  const filter: Record<string, unknown> = {};
+  const state = searchParams.get('state');
+  const stage = searchParams.get('stage');
+  const repoPath = searchParams.get('repoPath');
+  const limitRaw = searchParams.get('limit');
+
+  if (state !== null) {
+    filter.state = state;
+  }
+  if (stage !== null) {
+    filter.stage = stage;
+  }
+  if (repoPath !== null) {
+    filter.repoPath = repoPath;
+  }
+  if (limitRaw !== null) {
+    const parsedLimit = Number(limitRaw);
+    filter.limit = limitRaw.trim() !== '' && Number.isFinite(parsedLimit) ? parsedLimit : NaN;
+  }
+  return filter;
+}
+
+function mapSessionErrorToFactoryCode(code: SessionManagerError['code']): FactoryFlowApiErrorCode {
+  switch (code) {
+    case 'INVALID_REPO_PATH':
+    case 'INVALID_REPORT_DIRECTORY':
+      return 'FACTORY_FLOW_INVALID_INPUT';
+    case 'MAX_SESSIONS_REACHED':
+    case 'SESSION_NOT_RUNNING':
+      return 'FACTORY_FLOW_CONFLICT';
+    case 'SESSION_NOT_FOUND':
+      return 'FACTORY_FLOW_NOT_FOUND';
+    default:
+      return 'FACTORY_FLOW_INTERNAL_ERROR';
+  }
+}
+
+async function handleFactoryFlowApiRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+  factoryFlowService: FactoryFlowService,
+  sessionManager: SessionManager,
+): Promise<void> {
+  if (!applyCorsHeaders(req, res)) {
+    sendFactoryFlowApiError(res, 403, { code: 'ORIGIN_FORBIDDEN', message: 'Origem não permitida.' });
+    return;
+  }
+
+  try {
+    if (req.method === 'GET' && url.pathname === '/api/factory/flows') {
+      const result = factoryFlowService.listFlows(parseListFactoryFlowsQuery(url.searchParams));
+      res.writeHead(200).end(JSON.stringify(result));
+      return;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/factory/flows') {
+      const body = await readJsonBody(req);
+      const idempotencyKey = getIdempotencyHeader(req);
+      const created = await factoryFlowService.createFlow(body, { idempotencyKey });
+
+      if (!created.replayed) {
+        sessionManager.emitAppEvent({
+          type: 'factory_flow.created',
+          flow: created.flow,
+        });
+      }
+
+      const startRequested =
+        typeof body === 'object' &&
+        body !== null &&
+        'startSession' in body &&
+        (body as { startSession?: unknown }).startSession === true;
+
+      if (startRequested && !created.replayed) {
+        const rawBody = body as { cols?: number; rows?: number };
+        const session = await sessionManager.startFactorySession({
+          inputType: created.flow.target.inputType,
+          value: created.flow.target.value,
+          repoPath: created.flow.target.repoPath,
+          flowId: created.flow.id,
+          stage: created.flow.currentStage,
+          title: created.flow.title,
+          cols: rawBody.cols ?? 120,
+          rows: rawBody.rows ?? 36,
+        });
+        const details = factoryFlowService.getFlow(created.flow.id);
+        res.writeHead(201).end(
+          JSON.stringify({
+            contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+            flow: details.flow,
+            stages: details.stages,
+            replayed: false,
+            session: sessionManager.getSessionSummary(session.sessionId),
+          }),
+        );
+        return;
+      }
+
+      res.writeHead(created.replayed ? 200 : 201).end(JSON.stringify(created));
+      return;
+    }
+
+    const flowIdMatch = /^\/api\/factory\/flows\/([^/]+)$/.exec(url.pathname);
+    if (req.method === 'GET' && flowIdMatch?.[1] !== undefined) {
+      const flowId = decodeRouteParam(flowIdMatch[1]);
+      if (flowId === null) {
+        sendFactoryFlowApiError(res, 400, {
+          code: 'FACTORY_FLOW_INVALID_INPUT',
+          message: 'Identificador de fluxo inválido.',
+        });
+        return;
+      }
+      const details = factoryFlowService.getFlow(flowId);
+      res.writeHead(200).end(JSON.stringify(details));
+      return;
+    }
+
+    const advanceMatch = /^\/api\/factory\/flows\/([^/]+)\/advance$/.exec(url.pathname);
+    if (req.method === 'POST' && advanceMatch?.[1] !== undefined) {
+      const flowId = decodeRouteParam(advanceMatch[1]);
+      if (flowId === null) {
+        sendFactoryFlowApiError(res, 400, {
+          code: 'FACTORY_FLOW_INVALID_INPUT',
+          message: 'Identificador de fluxo inválido.',
+        });
+        return;
+      }
+      const body = await readOptionalJsonBody(req);
+      const currentDetails = factoryFlowService.getFlow(flowId);
+      if (
+        currentDetails.flow.currentSessionId &&
+        sessionManager.getSession(currentDetails.flow.currentSessionId)?.status === 'running'
+      ) {
+        sendFactoryFlowApiError(res, 409, {
+          code: 'FACTORY_FLOW_CONFLICT',
+          message: 'Encerre a sessão em execução antes de avançar para a próxima etapa.',
+        });
+        return;
+      }
+
+      const advanced = await factoryFlowService.advanceStage(flowId, body);
+      sessionManager.emitAppEvent({
+        type: 'factory_flow.updated',
+        flow: advanced.flow,
+      });
+
+      const startRequested =
+        typeof body === 'object' &&
+        body !== null &&
+        'startSession' in body &&
+        (body as { startSession?: unknown }).startSession === true;
+
+      if (startRequested) {
+        const rawBody = body as { cols?: number; rows?: number };
+        const session = await sessionManager.startFactorySession({
+          inputType: advanced.flow.target.inputType,
+          value: advanced.flow.target.value,
+          repoPath: advanced.flow.target.repoPath,
+          flowId: advanced.flow.id,
+          stage: advanced.flow.currentStage,
+          title: advanced.flow.title,
+          cols: rawBody.cols ?? 120,
+          rows: rawBody.rows ?? 36,
+        });
+        const updatedDetails = factoryFlowService.getFlow(flowId);
+        res.writeHead(200).end(
+          JSON.stringify({
+            contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+            flow: updatedDetails.flow,
+            session: sessionManager.getSessionSummary(session.sessionId),
+          }),
+        );
+        return;
+      }
+
+      res.writeHead(200).end(JSON.stringify(advanced));
+      return;
+    }
+
+    const rerunMatch = /^\/api\/factory\/flows\/([^/]+)\/(?:rerun|start)$/.exec(url.pathname);
+    if (req.method === 'POST' && rerunMatch?.[1] !== undefined) {
+      const flowId = decodeRouteParam(rerunMatch[1]);
+      if (flowId === null) {
+        sendFactoryFlowApiError(res, 400, {
+          code: 'FACTORY_FLOW_INVALID_INPUT',
+          message: 'Identificador de fluxo inválido.',
+        });
+        return;
+      }
+      const rawBody = await readOptionalJsonBody(req);
+      const parsedBody = RerunFactoryStageRequestSchema.safeParse(rawBody);
+      if (!parsedBody.success) {
+        sendFactoryFlowApiError(res, 400, {
+          code: 'FACTORY_FLOW_INVALID_INPUT',
+          message: 'Os dados para executar a etapa do fluxo são inválidos.',
+          details: parsedBody.error.issues.map(issue => issue.message),
+        });
+        return;
+      }
+
+      const details = factoryFlowService.getFlow(flowId);
+      if (isFinalFactoryFlowState(details.flow.state)) {
+        sendFactoryFlowApiError(res, 409, {
+          code: 'FACTORY_FLOW_INVALID_TRANSITION',
+          message: `Não é possível executar etapa em um fluxo no estado final ${details.flow.state}.`,
+        });
+        return;
+      }
+      if (
+        details.flow.currentSessionId &&
+        sessionManager.getSession(details.flow.currentSessionId)?.status === 'running'
+      ) {
+        sendFactoryFlowApiError(res, 409, {
+          code: 'FACTORY_FLOW_CONFLICT',
+          message: 'Já existe uma sessão em execução para este fluxo.',
+        });
+        return;
+      }
+
+      const targetStage = parsedBody.data.stage ?? details.flow.currentStage;
+      const session = await sessionManager.startFactorySession({
+        inputType: details.flow.target.inputType,
+        value: details.flow.target.value,
+        repoPath: details.flow.target.repoPath,
+        flowId: details.flow.id,
+        stage: targetStage,
+        title: details.flow.title,
+        cols: parsedBody.data.cols ?? 120,
+        rows: parsedBody.data.rows ?? 36,
+      });
+      const updated = factoryFlowService.getFlow(flowId);
+      res.writeHead(200).end(
+        JSON.stringify({
+          contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+          flow: updated.flow,
+          stages: updated.stages,
+          session: sessionManager.getSessionSummary(session.sessionId),
+        }),
+      );
+      return;
+    }
+
+    const cancelMatch = /^\/api\/factory\/flows\/([^/]+)\/(?:cancel|stop)$/.exec(url.pathname);
+    if (req.method === 'POST' && cancelMatch?.[1] !== undefined) {
+      const flowId = decodeRouteParam(cancelMatch[1]);
+      if (flowId === null) {
+        sendFactoryFlowApiError(res, 400, {
+          code: 'FACTORY_FLOW_INVALID_INPUT',
+          message: 'Identificador de fluxo inválido.',
+        });
+        return;
+      }
+      const rawBody = await readOptionalJsonBody(req);
+      const parsedCancel = CancelFactoryFlowRequestSchema.safeParse(rawBody);
+      if (!parsedCancel.success) {
+        sendFactoryFlowApiError(res, 400, {
+          code: 'FACTORY_FLOW_INVALID_INPUT',
+          message: 'Os dados para cancelar o fluxo são inválidos.',
+          details: parsedCancel.error.issues.map(issue => issue.message),
+        });
+        return;
+      }
+
+      const details = factoryFlowService.getFlow(flowId);
+      if (isFinalFactoryFlowState(details.flow.state)) {
+        sendFactoryFlowApiError(res, 409, {
+          code: 'FACTORY_FLOW_INVALID_TRANSITION',
+          message: `Não é possível cancelar um fluxo no estado final ${details.flow.state}.`,
+        });
+        return;
+      }
+
+      const runningSession =
+        details.flow.currentSessionId
+          ? sessionManager.getSession(details.flow.currentSessionId)
+          : undefined;
+
+      if (runningSession?.status === 'running') {
+        await sessionManager.stopSession(
+          runningSession.sessionId,
+          parsedCancel.data.reason ?? 'Fluxo cancelado pelo usuário',
+        );
+        const updated = factoryFlowService.getFlow(flowId);
+        res.writeHead(200).end(
+          JSON.stringify({
+            contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+            flow: updated.flow,
+          }),
+        );
+        return;
+      }
+
+      const cancelled = await factoryFlowService.cancelFlow(flowId, parsedCancel.data);
+      sessionManager.emitAppEvent({
+        type: 'factory_flow.finished',
+        flow: cancelled.flow,
+      });
+      res.writeHead(200).end(JSON.stringify(cancelled));
+      return;
+    }
+
+    const transitionsMatch = /^\/api\/factory\/flows\/([^/]+)\/transitions$/.exec(url.pathname);
+    if (req.method === 'POST' && transitionsMatch?.[1] !== undefined) {
+      const flowId = decodeRouteParam(transitionsMatch[1]);
+      if (flowId === null) {
+        sendFactoryFlowApiError(res, 400, {
+          code: 'FACTORY_FLOW_INVALID_INPUT',
+          message: 'Identificador de fluxo inválido.',
+        });
+        return;
+      }
+      const body = await readJsonBody(req);
+      const transitioned = await factoryFlowService.transitionFlow(flowId, body);
+      sessionManager.emitAppEvent({
+        type: isFinalFactoryFlowState(transitioned.flow.state)
+          ? 'factory_flow.finished'
+          : 'factory_flow.updated',
+        flow: transitioned.flow,
+      });
+      res.writeHead(200).end(JSON.stringify(transitioned));
+      return;
+    }
+
+    sendFactoryFlowApiError(res, 404, {
+      code: 'FACTORY_FLOW_NOT_FOUND',
+      message: 'Rota de fluxo da Factory não encontrada.',
+    });
+  } catch (error) {
+    if (error instanceof FactoryFlowServiceError) {
+      sendFactoryFlowApiError(res, error.statusCode, {
+        code: error.code,
+        message: error.message,
+        ...(error.details && error.details.length > 0 ? { details: [...error.details] } : {}),
+      });
+      return;
+    }
+    if (error instanceof SessionManagerError) {
+      sendFactoryFlowApiError(res, error.statusCode, {
+        code: mapSessionErrorToFactoryCode(error.code),
+        message: error.message,
+      });
+      return;
+    }
+    if (error instanceof ReviewServiceError) {
+      sendFactoryFlowApiError(res, error.statusCode, {
+        code: 'FACTORY_FLOW_INVALID_INPUT',
+        message: error.message,
+        ...(error.details && error.details.length > 0 ? { details: [...error.details] } : {}),
+      });
+      return;
+    }
+    sendFactoryFlowApiError(res, 500, {
+      code: 'FACTORY_FLOW_INTERNAL_ERROR',
+      message: 'Erro interno inesperado ao processar o fluxo da Factory.',
+    });
+  }
+}
+
 export function createReviewServer(options?: ReviewRepositoryOptions) {
   const reviewRepository = SqliteReviewRepository.open(options);
+  const factoryFlowRepository = SqliteFactoryFlowRepository.open(options);
   const reviewService = new ReviewService(reviewRepository);
-  const sessionManager = new SessionManager(reviewService);
+  const factoryFlowService = new FactoryFlowService(factoryFlowRepository);
+  const sessionManager = new SessionManager(reviewService, { factoryFlowService });
   const sseClients = new Set<() => void>();
   const server = createServer(async (req, res) => {
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -367,6 +785,11 @@ export function createReviewServer(options?: ReviewRepositoryOptions) {
       return;
     }
 
+    if (url.pathname === '/api/factory/flows' || url.pathname.startsWith('/api/factory/flows/')) {
+      await handleFactoryFlowApiRequest(req, res, url, factoryFlowService, sessionManager);
+      return;
+    }
+
     if (url.pathname === '/api/events') {
       handleEventsStreamRequest(req, res, sessionManager, sseClients);
       return;
@@ -448,8 +871,17 @@ export function createReviewServer(options?: ReviewRepositoryOptions) {
       wss.close();
       server.close();
       reviewRepository.close();
+      factoryFlowRepository.close();
     })();
     return shutdownPromise;
   };
-  return { server, shutdown, reviewRepository, reviewService, sessionManager };
+  return {
+    server,
+    shutdown,
+    reviewRepository,
+    reviewService,
+    factoryFlowRepository,
+    factoryFlowService,
+    sessionManager,
+  };
 }

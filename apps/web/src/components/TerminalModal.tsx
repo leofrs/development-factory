@@ -231,9 +231,9 @@ export function TerminalModal({
           if (message.state === 'saved') {
             onSavedReportRef.current?.(message.reportPath);
           }
-        } else if (message.type === 'review') {
-          // Eventos de ciclo de vida do review (mantidos para compatibilidade).
-        } else {
+        } else if (message.type === 'review' || message.type === 'factory_flow') {
+          // Eventos de ciclo de vida do review/fluxo (mantidos para compatibilidade).
+        } else if (message.type === 'error') {
           setError(message.message);
           setStopping(false);
           if (!started) {

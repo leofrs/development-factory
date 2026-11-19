@@ -5,6 +5,7 @@ import type {
   BackgroundSessionMode,
   BackgroundSessionStatus,
   BackgroundSessionSummary,
+  FactoryStageName,
 } from '@development-factory/shared';
 import type { createFactoryHistory } from './history.js';
 import type { createReviewReportDraft } from './review-report.js';
@@ -142,6 +143,11 @@ export interface ActiveReviewSession {
   readonly draft: ReturnType<typeof createReviewReportDraft>;
 }
 
+export interface ActiveFactorySession {
+  readonly flowId: string;
+  readonly stage: FactoryStageName;
+}
+
 export interface ManagedSession {
   readonly sessionId: string;
   readonly mode: BackgroundSessionMode;
@@ -155,6 +161,7 @@ export interface ManagedSession {
   subscriptions: pty.IDisposable[];
   history: SessionHistoryHandle | undefined;
   activeReviewSession: ActiveReviewSession | undefined;
+  activeFactorySession: ActiveFactorySession | undefined;
   readonly subscribers: Set<WebSocket>;
   readonly buffer: SessionOutputBuffer;
   readonly startedAt: string;
@@ -176,6 +183,8 @@ export function toBackgroundSessionSummary(session: ManagedSession): BackgroundS
     sessionPath: session.history?.sessionPath ?? session.sessionPath,
     reviewId: session.activeReviewSession?.reviewId ?? null,
     executionId: session.activeReviewSession?.executionId ?? null,
+    flowId: session.activeFactorySession?.flowId ?? null,
+    stage: session.activeFactorySession?.stage ?? null,
     startedAt: session.startedAt,
     finishedAt: session.finishedAt,
     exitCode: session.exitCode,

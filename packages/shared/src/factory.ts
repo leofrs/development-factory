@@ -442,6 +442,9 @@ export const CreateFactoryFlowRequestSchema = z.strictObject({
   task: FactoryTaskInputSchema,
   title: text.max(200).optional(),
   idempotencyKey: FactoryIdempotencyKeySchema.optional(),
+  startSession: z.boolean().optional(),
+  cols: z.number().int().min(2).max(500).optional(),
+  rows: z.number().int().min(1).max(300).optional(),
 });
 export type CreateFactoryFlowRequest = z.infer<typeof CreateFactoryFlowRequestSchema>;
 
@@ -496,8 +499,24 @@ export const AdvanceFactoryStageRequestSchema = z.strictObject({
   at: timestamp.optional(),
   reason: text.optional(),
   expectedUpdatedAt: timestamp.optional(),
+  startSession: z.boolean().optional(),
+  cols: z.number().int().min(2).max(500).optional(),
+  rows: z.number().int().min(1).max(300).optional(),
 });
 export type AdvanceFactoryStageRequest = z.infer<typeof AdvanceFactoryStageRequestSchema>;
+
+export const RerunFactoryStageRequestSchema = z.strictObject({
+  stage: FactoryStageNameSchema.optional(),
+  cols: z.number().int().min(2).max(500).optional(),
+  rows: z.number().int().min(1).max(300).optional(),
+});
+export type RerunFactoryStageRequest = z.infer<typeof RerunFactoryStageRequestSchema>;
+
+export const CancelFactoryFlowRequestSchema = z.strictObject({
+  reason: text.optional(),
+  expectedUpdatedAt: timestamp.optional(),
+});
+export type CancelFactoryFlowRequest = z.infer<typeof CancelFactoryFlowRequestSchema>;
 
 export const RegisterFactoryFlowArtifactRequestSchema = z.strictObject({
   stage: FactoryStageNameSchema,
