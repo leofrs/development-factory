@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -277,6 +277,102 @@ test('respeita limite de sessões concorrentes e limpa sessões finalizadas por 
     assert.ok(persisted);
     assert.ok(first.sessionPath && existsSync(first.sessionPath));
   } finally {
+    await manager.shutdownAll();
+    env.repository.close();
+    env.restorePath();
+    rmSync(env.rootDir, { recursive: true, force: true });
+  }
+});
+
+test('sessão review sem nenhum cliente WebSocket conectado atualiza SQLite, .code-reviews e emite history_saved e finished', async () => {
+  const env = setupTestEnvironment();
+  const events: AppEvent[] = [];
+  const manager = new SessionManager(env.reviewService);
+  const unsubscribe = manager.onEvent(event => events.push(event));
+
+  try {
+    const session = await manager.startReviewSession({
+      targetType: 'pr',
+      identifier: '777',
+      repoPath: env.repoA,
+      cols: 80,
+      rows: 24,
+    });
+
+    assert.equal(session.subscribers.size, 0);
+    await waitFor(() => session.buffer.replay().includes('READY:'));
+
+    manager.writeInput(session.sessionId, 'SAVE');
+    await waitFor(() => events.some(e => e.type === 'session.history_saved'));
+
+    const savedEvent = events.find(e => e.type === 'session.history_saved');
+    assert.ok(savedEvent);
+    assert.equal(savedEvent.session.sessionId, session.sessionId);
+    assert.equal(savedEvent.session.historyState, 'saved');
+    assert.equal(savedEvent.session.reportPath, session.reportPath);
+    assert.ok(session.reportPath && existsSync(session.reportPath));
+    assert.equal(readFileSync(session.reportPath, 'utf8'), '# Parecer final\n\nAPROVADO\n');
+
+    manager.writeInput(session.sessionId, 'EXIT0');
+    await waitFor(() => events.some(e => e.type === 'session.finished'));
+
+    const finishedEvent = events.find(e => e.type === 'session.finished');
+    assert.ok(finishedEvent);
+    assert.equal(finishedEvent.session.status, 'exited');
+    assert.equal(finishedEvent.session.exitCode, 0);
+    assert.equal(finishedEvent.session.historyState, 'saved');
+    assert.equal(finishedEvent.session.reportPath, session.reportPath);
+
+    const reviewId = session.activeReviewSession?.reviewId;
+    assert.ok(reviewId);
+    const details = await env.reviewService.getReview(reviewId);
+    assert.ok(details);
+    assert.equal(details.review.state, 'incomplete');
+    assert.deepEqual(details.executions[0]?.process, { status: 'exited', exitCode: 0, signal: null });
+    assert.equal(details.artifacts.find(a => a.kind === 'session_log')?.status, 'ready');
+    assert.equal(details.artifacts.find(a => a.kind === 'report')?.status, 'ready');
+    assert.ok(details.events.some(e => e.type === 'review.report_file_saved'));
+    assert.ok(session.sessionPath && existsSync(session.sessionPath));
+  } finally {
+    unsubscribe();
+    await manager.shutdownAll();
+    env.repository.close();
+    env.restorePath();
+    rmSync(env.rootDir, { recursive: true, force: true });
+  }
+});
+
+test('sessão factory sem clientes conectados consolida falha e estado incomplete ao sair com código diferente de zero', async () => {
+  const env = setupTestEnvironment();
+  const events: AppEvent[] = [];
+  const manager = new SessionManager(env.reviewService);
+  const unsubscribe = manager.onEvent(event => events.push(event));
+
+  try {
+    const session = await manager.startFactorySession({
+      inputType: 'title',
+      value: 'Plano interrompido com erro',
+      repoPath: env.repoB,
+      cols: 80,
+      rows: 24,
+    });
+
+    assert.equal(session.subscribers.size, 0);
+    await waitFor(() => session.buffer.replay().includes('READY:'));
+
+    manager.writeInput(session.sessionId, 'EXIT');
+    await waitFor(() => events.some(e => e.type === 'session.finished'));
+
+    const finishedEvent = events.find(e => e.type === 'session.finished');
+    assert.ok(finishedEvent);
+    assert.equal(finishedEvent.session.status, 'failed');
+    assert.equal(finishedEvent.session.exitCode, 7);
+    assert.equal(finishedEvent.session.historyState, 'incomplete');
+    assert.equal(finishedEvent.session.reportPath, session.reportPath);
+    assert.ok(session.reportPath && existsSync(session.reportPath));
+    assert.match(readFileSync(session.reportPath, 'utf8'), /Plano da tarefa incompleto/);
+  } finally {
+    unsubscribe();
     await manager.shutdownAll();
     env.repository.close();
     env.restorePath();
