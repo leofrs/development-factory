@@ -9,7 +9,7 @@
     "dev": "concurrently --kill-others -n server,web -c cyan,magenta \"npm run dev -w @development-factory/server\" \"npm run dev -w @development-factory/web\"",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "build": "npm run typecheck && npm run build -w @development-factory/web",
-    "test": "npm run test -w @development-factory/server"
+    "test": "npm run test -w @development-factory/server && npm run test -w @development-factory/web"
   },
   "devDependencies": { "concurrently": "^9.2.1", "typescript": "^5.9.3", "@types/node": "^22.19.0" }
 }

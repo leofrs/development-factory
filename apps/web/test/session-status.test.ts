@@ -3,7 +3,7 @@ import test from 'node:test';
 import {
   getSessionStatusPresentation,
   isSessionActivelyRunning,
-} from '../src/utils/session-status.ts';
+} from '../src/utils/session-status';
 
 test('isSessionActivelyRunning retorna true apenas quando em execução sem artefato salvo', () => {
   assert.equal(isSessionActivelyRunning({ status: 'running', historyState: 'pending' }), true);

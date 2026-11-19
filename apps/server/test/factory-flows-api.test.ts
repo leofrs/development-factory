@@ -438,3 +438,144 @@ test('API REST /api/factory/flows valida origem, idempotência, filtros e ciclo 
   const invalidIdErr = FactoryFlowApiErrorResponseSchema.parse(await invalidIdRes.json());
   assert.equal(invalidIdErr.error.code, 'FACTORY_FLOW_INVALID_INPUT');
 });
+
+test(
+  'múltiplos fluxos via POST /api/factory/flows no mesmo repositório executam em paralelo com planos isolados e concluem até PR',
+  { timeout: 30000 },
+  async context => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'df-factory-parallel-same-repo-'));
+    const binDir = join(rootDir, 'bin');
+    const repoDir = join(rootDir, 'shared-repo');
+    const dbPath = join(rootDir, 'reviews.db');
+    mkdirSync(binDir);
+    mkdirSync(repoDir);
+
+    const claudeTarget = join(binDir, 'claude');
+    copyFileSync(new URL('./fixtures/claude.ts', import.meta.url), claudeTarget);
+    chmodSync(claudeTarget, 0o755);
+
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${binDir}:${previousPath ?? ''}`;
+
+    const { server, sessionManager, shutdown } = createReviewServer({ dbPath });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+
+    const address = server.address();
+    assert(address && typeof address !== 'string');
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+
+    context.after(async () => {
+      await shutdown();
+      process.env.PATH = previousPath;
+      rmSync(rootDir, { recursive: true, force: true });
+    });
+
+    const createFlow = async (value: string, title: string) => {
+      const response = await fetch(`${baseUrl}/api/factory/flows`, {
+        method: 'POST',
+        headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          task: { inputType: 'title', value, repoPath: repoDir },
+          title,
+          startSession: true,
+          cols: 100,
+          rows: 30,
+        }),
+      });
+      assert.equal(response.status, 201);
+      return (await response.json()) as {
+        flow: { id: string; state: string; currentStage: string; currentSessionId: string | null };
+        session: BackgroundSessionSummary;
+      };
+    };
+
+    const [createdOne, createdTwo] = await Promise.all([
+      createFlow('Implementar autenticação JWT', 'Fluxo 1 · JWT'),
+      createFlow('Corrigir paginação de auditoria', 'Fluxo 2 · Paginação'),
+    ]);
+
+    assert.notEqual(createdOne.flow.id, createdTwo.flow.id);
+    assert.notEqual(createdOne.session.sessionId, createdTwo.session.sessionId);
+    assert(createdOne.session.reportPath && createdTwo.session.reportPath);
+    assert.notEqual(createdOne.session.reportPath, createdTwo.session.reportPath);
+    assert(createdOne.session.sessionPath && createdTwo.session.sessionPath);
+    assert.notEqual(createdOne.session.sessionPath, createdTwo.session.sessionPath);
+
+    await waitFor(() => {
+      const s1 = sessionManager.getSession(createdOne.session.sessionId);
+      const s2 = sessionManager.getSession(createdTwo.session.sessionId);
+      return Boolean(s1?.buffer.replay().includes('READY:') && s2?.buffer.replay().includes('READY:'));
+    });
+
+    // Salva planos distintos para cada fluxo no mesmo repositório.
+    writeFileSync(createdOne.session.reportPath, '# Plano Fluxo 1\n\nJWT isolado.\n');
+    writeFileSync(createdTwo.session.reportPath, '# Plano Fluxo 2\n\nPaginação isolada.\n');
+
+    sessionManager.writeInput(createdOne.session.sessionId, 'EXIT0');
+    sessionManager.writeInput(createdTwo.session.sessionId, 'EXIT0');
+
+    await waitFor(() => {
+      const s1 = sessionManager.getSession(createdOne.session.sessionId);
+      const s2 = sessionManager.getSession(createdTwo.session.sessionId);
+      return s1?.status === 'exited' && s2?.status === 'exited';
+    });
+
+    const [detailsOneRes, detailsTwoRes] = await Promise.all([
+      fetch(`${baseUrl}/api/factory/flows/${createdOne.flow.id}`, {
+        headers: { Origin: ALLOWED_ORIGIN },
+      }),
+      fetch(`${baseUrl}/api/factory/flows/${createdTwo.flow.id}`, {
+        headers: { Origin: ALLOWED_ORIGIN },
+      }),
+    ]);
+    assert.equal(detailsOneRes.status, 200);
+    assert.equal(detailsTwoRes.status, 200);
+
+    const detailsOne = FactoryFlowDetailsSchema.parse(await detailsOneRes.json());
+    const detailsTwo = FactoryFlowDetailsSchema.parse(await detailsTwoRes.json());
+    assert.equal(detailsOne.flow.state, 'waiting_action');
+    assert.equal(detailsTwo.flow.state, 'waiting_action');
+
+    const specOne = detailsOne.artifacts.find(
+      artifact => artifact.stage === 'triage' && artifact.kind === 'specification',
+    );
+    const specTwo = detailsTwo.artifacts.find(
+      artifact => artifact.stage === 'triage' && artifact.kind === 'specification',
+    );
+    assert(specOne && specTwo);
+    assert.equal(specOne.path, createdOne.session.reportPath);
+    assert.equal(specTwo.path, createdTwo.session.reportPath);
+
+    // Avança o Fluxo 1 por todas as etapas até concluir o PR enquanto o Fluxo 2 permanece em triagem.
+    const nextStages = ['planning', 'development', 'tests', 'review', 'pr'] as const;
+    for (const expectedStage of nextStages) {
+      const advRes = await fetch(`${baseUrl}/api/factory/flows/${createdOne.flow.id}/advance`, {
+        method: 'POST',
+        headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ startSession: false }),
+      });
+      assert.equal(advRes.status, 200);
+      const advBody = TransitionFactoryFlowResponseSchema.parse(await advRes.json());
+      assert.equal(advBody.flow.currentStage, expectedStage);
+    }
+
+    const extraAdvanceRes = await fetch(`${baseUrl}/api/factory/flows/${createdOne.flow.id}/advance`, {
+      method: 'POST',
+      headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ startSession: false }),
+    });
+    assert.equal(extraAdvanceRes.status, 409);
+    const extraAdvanceErr = FactoryFlowApiErrorResponseSchema.parse(await extraAdvanceRes.json());
+    assert.equal(extraAdvanceErr.error.code, 'FACTORY_FLOW_INVALID_STAGE_ADVANCE');
+
+    // Confirma que o Fluxo 2 não foi afetado pelas transições do Fluxo 1.
+    const checkTwoRes = await fetch(`${baseUrl}/api/factory/flows/${createdTwo.flow.id}`, {
+      headers: { Origin: ALLOWED_ORIGIN },
+    });
+    assert.equal(checkTwoRes.status, 200);
+    const checkTwo = FactoryFlowDetailsSchema.parse(await checkTwoRes.json());
+    assert.equal(checkTwo.flow.currentStage, 'triage');
+    assert.equal(checkTwo.flow.state, 'waiting_action');
+  },
+);
