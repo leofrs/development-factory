@@ -8,6 +8,7 @@ import { DirectoryPicker } from './components/DirectoryPicker';
 import { HistoryModal } from './components/HistoryModal';
 import { FloatingDock, type AppView } from './components/FloatingDock';
 import { FactoryPage } from './components/FactoryPage';
+import { FactoryFlowRoadmapModal } from './components/FactoryFlowRoadmapModal';
 import { FactoryTaskModal } from './components/FactoryTaskModal';
 import { MarkdownViewerModal } from './components/MarkdownViewerModal';
 import { NotificationToastCenter } from './components/NotificationToastCenter';
@@ -58,18 +59,16 @@ export default function App() {
     createFlow,
     advanceFlowStage,
     rerunFlowStage,
-    cancelFlow,
+    returnFlowStage,
     openTerminal,
     openFlowTerminal,
     minimizeTerminal,
     bindActiveSessionId,
-    stopSession,
-    refreshFactoryFlows,
     dismissNotification,
     clearAllNotifications,
   } = useBackgroundOperations();
   const [configuringFactoryTask, setConfiguringFactoryTask] = useState(false);
-  const [selectedFlowId, setSelectedFlowId] = useState<string | null>(null);
+  const [roadmapFlowId, setRoadmapFlowId] = useState<string | null>(null);
   const [viewingMarkdownPath, setViewingMarkdownPath] = useState<string | null>(null);
   const [pickingDirectory, setPickingDirectory] = useState<'repository' | 'report' | null>(null);
   const [viewingHistory, setViewingHistory] = useState(false);
@@ -136,33 +135,17 @@ export default function App() {
     });
   }
 
+  const roadmapFlow = roadmapFlowId
+    ? (factoryFlows.find(item => item.id === roadmapFlowId) ?? null)
+    : null;
+
   return (
     <div className="min-h-screen bg-page text-primary">
       {view === 'factory' ? (
         <FactoryPage
           repoPath={repoPath}
-          flows={factoryFlows}
-          sessions={sessions}
-          selectedFlowId={selectedFlowId}
-          loadingFlows={loadingFactoryFlows}
-          flowsError={factoryFlowsError}
-          onSelectFlow={setSelectedFlowId}
           onPickDirectory={() => setPickingDirectory('repository')}
           onOpenNewFlow={() => setConfiguringFactoryTask(true)}
-          onOpenFlowTerminal={flowId => {
-            openFlowTerminal(flowId);
-          }}
-          onAdvanceFlowStage={async flowId => {
-            await advanceFlowStage(flowId, { startSession: true, cols: 120, rows: 36 });
-          }}
-          onRerunFlowStage={async (flowId, stage) => {
-            await rerunFlowStage(flowId, { stage, cols: 120, rows: 36 });
-          }}
-          onCancelFlow={async flowId => {
-            await cancelFlow(flowId);
-          }}
-          onRefreshFlows={refreshFactoryFlows}
-          onViewMarkdown={path => setViewingMarkdownPath(path)}
         />
       ) : (
         <main className="mx-auto max-w-6xl px-6 pb-28 pt-12 sm:px-10 sm:pt-20">
@@ -253,10 +236,8 @@ export default function App() {
         loadingFactoryFlows={loadingFactoryFlows}
         factoryFlowsError={factoryFlowsError}
         onOpenTerminal={openTerminal}
-        onOpenFlowTerminal={openFlowTerminal}
+        onOpenFlowRoadmap={flowId => setRoadmapFlowId(flowId)}
         onViewReport={path => setViewingMarkdownPath(path)}
-        onStopSession={stopSession}
-        onCancelFlow={cancelFlow}
         theme={theme}
         onToggleTheme={toggleTheme}
       />
@@ -267,13 +248,12 @@ export default function App() {
           onPickDirectory={() => setPickingDirectory('repository')}
           onClose={() => setConfiguringFactoryTask(false)}
           onCreateFlow={async task => {
-            const result = await createFlow({
+            await createFlow({
               task,
               startSession: true,
               cols: 120,
               rows: 36,
             });
-            setSelectedFlowId(result.flow.id);
             setConfiguringFactoryTask(false);
           }}
         />
@@ -287,7 +267,6 @@ export default function App() {
               : undefined
           }
           onMinimize={closeModal}
-          onStopSession={stopSession}
           onBindSessionId={bindActiveSessionId}
           theme={theme}
           onToggleTheme={toggleTheme}
@@ -308,7 +287,35 @@ export default function App() {
           onSelect={selectDirectory}
         />
       )}
-      {viewingHistory && <HistoryModal initialPath={repoPath} onClose={() => setViewingHistory(false)} />}
+      {roadmapFlow && (
+        <FactoryFlowRoadmapModal
+          flow={roadmapFlow}
+          onClose={() => setRoadmapFlowId(null)}
+          onAdvanceFlowStage={async (flowId, approvedNotes) => {
+            await advanceFlowStage(flowId, { startSession: true, cols: 120, rows: 36, approvedNotes });
+          }}
+          onRerunFlowStage={async (flowId, stage) => {
+            await rerunFlowStage(flowId, { stage, cols: 120, rows: 36 });
+          }}
+          onReturnFlowStage={async (flowId, targetStage, approvedNotes) => {
+            await returnFlowStage(flowId, {
+              targetStage,
+              startSession: true,
+              cols: 120,
+              rows: 36,
+              approvedNotes,
+            });
+          }}
+          onViewMarkdown={path => setViewingMarkdownPath(path)}
+        />
+      )}
+      {viewingHistory && (
+        <HistoryModal
+          initialPath={repoPath}
+          factoryFlows={factoryFlows}
+          onClose={() => setViewingHistory(false)}
+        />
+      )}
       {viewingSeverityMatrix && (
         <SeverityMatrixModal onClose={() => setViewingSeverityMatrix(false)} />
       )}

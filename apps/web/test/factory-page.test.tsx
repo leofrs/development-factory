@@ -8,9 +8,14 @@ import {
   type FactoryFlow,
 } from '@development-factory/shared';
 import { BackgroundTasksPopover } from '../src/components/BackgroundTasksPopover';
+import { FactoryFlowRoadmapModal } from '../src/components/FactoryFlowRoadmapModal';
 import { FactoryPage } from '../src/components/FactoryPage';
+import { HistoryModal } from '../src/components/HistoryModal';
 import { NotificationToastCenter } from '../src/components/NotificationToastCenter';
-import type { AppNotification } from '../src/hooks/useBackgroundOperations';
+import {
+  buildNotification,
+  type AppNotification,
+} from '../src/hooks/useBackgroundOperations';
 
 function createFlow(overrides: Partial<FactoryFlow> = {}): FactoryFlow {
   return {
@@ -57,50 +62,24 @@ function createSession(
 const noop = () => undefined;
 const noopAsync = async () => undefined;
 
-test('FactoryPage exibe estado vazio com botão Iniciar fluxo e roadmap de 6 etapas', () => {
+test('FactoryPage exibe apenas seleção de repositório e botão Iniciar fluxo', () => {
   const html = renderToStaticMarkup(
     createElement(FactoryPage, {
       repoPath: '/home/dev/repos/api-core',
-      flows: [],
-      sessions: [],
-      selectedFlowId: null,
-      loadingFlows: false,
-      flowsError: null,
-      onSelectFlow: noop,
       onPickDirectory: noop,
       onOpenNewFlow: noop,
-      onOpenFlowTerminal: noop,
-      onAdvanceFlowStage: noopAsync,
-      onRerunFlowStage: noopAsync,
-      onCancelFlow: noopAsync,
-      onRefreshFlows: noopAsync,
-      onViewMarkdown: noop,
     }),
   );
 
   assert.match(html, /Iniciar fluxo/);
-  assert.match(html, /Nenhum fluxo iniciado ainda/);
-  assert.match(html, /Triagem \/ Contexto/);
-  assert.match(html, /Planejamento/);
-  assert.match(html, /PR/);
   assert.match(html, /\/home\/dev\/repos\/api-core/);
+  assert.doesNotMatch(html, /Fluxos em andamento e concluídos/);
+  assert.doesNotMatch(html, /Artefatos do fluxo selecionado/);
+  assert.doesNotMatch(html, /Parar/);
 });
 
-test('FactoryPage lista múltiplos fluxos paralelos e alterna contexto e planos ao trocar selectedFlowId', () => {
-  const flowA = createFlow({
-    id: '11111111-1111-4111-8111-111111111111',
-    title: 'AUTH-101 · Login SSO',
-    target: {
-      contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
-      inputType: 'jira_key',
-      value: 'AUTH-101',
-      repoPath: '/home/dev/repos/auth-service',
-    },
-    currentStage: 'triage',
-    state: 'running',
-    currentSessionId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
-  });
-  const flowB = createFlow({
+test('FactoryFlowRoadmapModal exibe o roadmap completo do fluxo sem botão de terminal ou parar', () => {
+  const flow = createFlow({
     id: '22222222-2222-4222-8222-222222222222',
     title: 'PAY-202 · Webhook Pix',
     target: {
@@ -114,129 +93,29 @@ test('FactoryPage lista múltiplos fluxos paralelos e alterna contexto e planos 
     currentSessionId: null,
     updatedAt: '2026-11-19T12:10:00.000Z',
   });
-  const flowC = createFlow({
-    id: '33333333-3333-4333-8333-333333333333',
-    title: 'OBS-303 · Métricas',
-    target: {
-      contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
-      inputType: 'jira_key',
-      value: 'OBS-303',
-      repoPath: '/home/dev/repos/telemetry',
-    },
-    currentStage: 'pr',
-    state: 'completed',
-    currentSessionId: null,
-    finishedAt: '2026-11-19T12:15:00.000Z',
-  });
 
-  const sessionA = createSession({
-    sessionId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
-    flowId: flowA.id,
-    stage: 'triage',
-    status: 'running',
-    historyState: 'saved',
-    reportPath: '/tmp/plans/auth-101.md',
-  });
-  const sessionB = createSession({
-    sessionId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
-    flowId: flowB.id,
-    stage: 'planning',
-    status: 'exited',
-    finishedAt: '2026-11-19T12:10:00.000Z',
-    historyState: 'saved',
-    reportPath: '/tmp/plans/pay-202.md',
-  });
-
-  const htmlWithFlowA = renderToStaticMarkup(
-    createElement(FactoryPage, {
-      repoPath: '/home/dev/repos/auth-service',
-      flows: [flowA, flowB, flowC],
-      sessions: [sessionA, sessionB],
-      selectedFlowId: flowA.id,
-      loadingFlows: false,
-      flowsError: null,
-      onSelectFlow: noop,
-      onPickDirectory: noop,
-      onOpenNewFlow: noop,
-      onOpenFlowTerminal: noop,
+  const html = renderToStaticMarkup(
+    createElement(FactoryFlowRoadmapModal, {
+      flow,
+      onClose: noop,
       onAdvanceFlowStage: noopAsync,
       onRerunFlowStage: noopAsync,
-      onCancelFlow: noopAsync,
-      onRefreshFlows: noopAsync,
       onViewMarkdown: noop,
     }),
   );
 
-  // Todos os fluxos paralelos e concluídos aparecem na lista; triage e planning ocultam o botão de terminal.
-  assert.match(htmlWithFlowA, /AUTH-101 · Login SSO/);
-  assert.match(htmlWithFlowA, /PAY-202 · Webhook Pix/);
-  assert.match(htmlWithFlowA, /OBS-303 · Métricas/);
-  assert.match(htmlWithFlowA, /Ver plano/);
-  assert.doesNotMatch(htmlWithFlowA, /Abrir terminal/);
-  assert.match(htmlWithFlowA, /Parar/);
-
-  // Alternando para o Fluxo B, o contexto selecionado muda para Planejamento e ações de etapa.
-  const htmlWithFlowB = renderToStaticMarkup(
-    createElement(FactoryPage, {
-      repoPath: '/home/dev/repos/auth-service',
-      flows: [flowA, flowB, flowC],
-      sessions: [sessionA, sessionB],
-      selectedFlowId: flowB.id,
-      loadingFlows: false,
-      flowsError: null,
-      onSelectFlow: noop,
-      onPickDirectory: noop,
-      onOpenNewFlow: noop,
-      onOpenFlowTerminal: noop,
-      onAdvanceFlowStage: noopAsync,
-      onRerunFlowStage: noopAsync,
-      onCancelFlow: noopAsync,
-      onRefreshFlows: noopAsync,
-      onViewMarkdown: noop,
-    }),
-  );
-
-  assert.match(htmlWithFlowB, /Avançar etapa/);
-  assert.match(htmlWithFlowB, /Reexecutar/);
-  assert.match(htmlWithFlowB, /Ver plano/);
-  assert.doesNotMatch(htmlWithFlowB, /Abrir terminal/);
-  assert.match(htmlWithFlowB, /\/home\/dev\/repos\/payments-api/);
-
-  // A partir de development, o botão Abrir terminal volta a ser exibido.
-  const flowDev = createFlow({
-    id: '44444444-4444-4444-8444-444444444444',
-    title: 'DEV-404 · Implementação',
-    currentStage: 'development',
-    state: 'running',
-    currentSessionId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
-  });
-  const htmlWithFlowDev = renderToStaticMarkup(
-    createElement(FactoryPage, {
-      repoPath: '/home/dev/repos/auth-service',
-      flows: [flowDev],
-      sessions: [
-        createSession({
-          sessionId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
-          flowId: flowDev.id,
-          stage: 'development',
-          status: 'running',
-        }),
-      ],
-      selectedFlowId: flowDev.id,
-      loadingFlows: false,
-      flowsError: null,
-      onSelectFlow: noop,
-      onPickDirectory: noop,
-      onOpenNewFlow: noop,
-      onOpenFlowTerminal: noop,
-      onAdvanceFlowStage: noopAsync,
-      onRerunFlowStage: noopAsync,
-      onCancelFlow: noopAsync,
-      onRefreshFlows: noopAsync,
-      onViewMarkdown: noop,
-    }),
-  );
-  assert.match(htmlWithFlowDev, /Abrir terminal/);
+  assert.match(html, /PAY-202 · Webhook Pix/);
+  assert.match(html, /\/home\/dev\/repos\/payments-api/);
+  assert.match(html, /Triagem \/ Contexto/);
+  assert.match(html, /Planejamento/);
+  assert.match(html, /Desenvolvimento/);
+  assert.match(html, /Testes/);
+  assert.match(html, /Code Review/);
+  assert.match(html, /PR/);
+  assert.match(html, /Reexecutar/);
+  assert.doesNotMatch(html, /Abrir terminal/);
+  assert.doesNotMatch(html, />Terminal</);
+  assert.doesNotMatch(html, /Parar/);
 });
 
 test('BackgroundTasksPopover exibe múltiplos fluxos da Factory em paralelo com reviews ativos', () => {
@@ -283,10 +162,8 @@ test('BackgroundTasksPopover exibe múltiplos fluxos da Factory em paralelo com 
       sessions: [factorySessionA, factorySessionB, reviewSession],
       factoryFlows: [flowA, flowB],
       onOpenTerminal: noop,
-      onOpenFlowTerminal: noop,
+      onOpenFlowRoadmap: noop,
       onViewReport: noop,
-      onStopSession: async () => reviewSession,
-      onCancelFlow: async () => flowA,
       onClose: noop,
     }),
   );
@@ -296,8 +173,25 @@ test('BackgroundTasksPopover exibe múltiplos fluxos da Factory em paralelo com 
   assert.match(html, /Review #42 · Checkout/);
   assert.match(html, /01 · Triagem/);
   assert.match(html, /03 · Desenvolvimento/);
+  assert.match(html, /Abrir roadmap do fluxo AUTH-101 · Login SSO/);
   assert.match(html, /Ver plano/);
   assert.match(html, /Ver parecer/);
+  assert.doesNotMatch(html, /Cancelar/);
+  assert.doesNotMatch(html, /Encerrar/);
+});
+
+test('HistoryModal inclui a aba Artefatos de fluxos', () => {
+  const html = renderToStaticMarkup(
+    createElement(HistoryModal, {
+      initialPath: '/home/dev/repos/api-core',
+      factoryFlows: [createFlow()],
+      onClose: noop,
+    }),
+  );
+
+  assert.match(html, /Pareceres salvos/);
+  assert.match(html, /Artefatos de fluxos/);
+  assert.match(html, /Arquivos locais/);
 });
 
 test('NotificationToastCenter exibe notificações de fluxos da Factory com etapa e atalho de plano', () => {
@@ -333,4 +227,100 @@ test('NotificationToastCenter exibe notificações de fluxos da Factory com etap
   assert.match(html, /01 · Triagem/);
   assert.match(html, /Ver plano/);
   assert.doesNotMatch(html, /Abrir terminal/);
+});
+
+test('Etapa 03 (development) gera notificação de conclusão e oculta atalho de terminal', () => {
+  const sessionId = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+  const flowId = '22222222-2222-4222-8222-222222222222';
+  const devSession = createSession({
+    sessionId,
+    flowId,
+    stage: 'development',
+    status: 'exited',
+    historyState: 'saved',
+    reportPath: '/tmp/repo/.code-reviews/factory-development.md',
+  });
+
+  const notification = buildNotification(devSession, 'finished');
+  assert.equal(notification.message, 'Desenvolvimento concluído');
+
+  const html = renderToStaticMarkup(
+    createElement(NotificationToastCenter, {
+      notifications: [notification],
+      onOpenTerminal: noop,
+      onOpenFlowTerminal: noop,
+      onViewReport: noop,
+      onDismiss: noop,
+    }),
+  );
+
+  assert.match(html, /03 · Desenvolvimento/);
+  assert.match(html, /Desenvolvimento concluído/);
+  assert.match(html, /Ver artefato/);
+  assert.doesNotMatch(html, /Abrir terminal/);
+});
+
+test('Etapas 04 (tests) e 05 (review) geram notificações e botões de reexecução/handoff no roadmap', () => {
+  const testsSession = createSession({
+    sessionId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+    flowId: '33333333-3333-4333-8333-333333333333',
+    stage: 'tests',
+    status: 'exited',
+    historyState: 'saved',
+    reportPath: '/tmp/repo/.code-reviews/factory-tests.md',
+  });
+  const testsSavedNotification = buildNotification(testsSession, 'history_saved');
+  const testsFinishedNotification = buildNotification(testsSession, 'finished');
+  assert.equal(testsSavedNotification.message, 'Relatório de testes salvo');
+  assert.equal(testsFinishedNotification.message, 'Testes concluídos');
+
+  const reviewSession = createSession({
+    sessionId: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+    flowId: '33333333-3333-4333-8333-333333333333',
+    stage: 'review',
+    status: 'exited',
+    historyState: 'saved',
+    reportPath: '/tmp/repo/.code-reviews/factory-review.md',
+  });
+  const reviewSavedNotification = buildNotification(reviewSession, 'history_saved');
+  const reviewFinishedNotification = buildNotification(reviewSession, 'finished');
+  assert.equal(reviewSavedNotification.message, 'Relatório de code review salvo');
+  assert.equal(reviewFinishedNotification.message, 'Code review concluído');
+
+  const testsFlow = createFlow({
+    id: '33333333-3333-4333-8333-333333333333',
+    currentStage: 'tests',
+    state: 'waiting_action',
+    currentSessionId: null,
+  });
+  const testsRoadmapHtml = renderToStaticMarkup(
+    createElement(FactoryFlowRoadmapModal, {
+      flow: testsFlow,
+      onClose: noop,
+      onAdvanceFlowStage: noopAsync,
+      onRerunFlowStage: noopAsync,
+      onReturnFlowStage: noopAsync,
+      onViewMarkdown: noop,
+    }),
+  );
+  assert.match(testsRoadmapHtml, /Reexecutar/);
+  assert.doesNotMatch(testsRoadmapHtml, /A execução de testes será disponibilizada futuramente/);
+
+  const prFlow = createFlow({
+    id: '44444444-4444-4444-8444-444444444444',
+    currentStage: 'pr',
+    state: 'waiting_action',
+    currentSessionId: null,
+  });
+  const prRoadmapHtml = renderToStaticMarkup(
+    createElement(FactoryFlowRoadmapModal, {
+      flow: prFlow,
+      onClose: noop,
+      onAdvanceFlowStage: noopAsync,
+      onRerunFlowStage: noopAsync,
+      onReturnFlowStage: noopAsync,
+      onViewMarkdown: noop,
+    }),
+  );
+  assert.match(prRoadmapHtml, /A abertura de PR será disponibilizada futuramente/);
 });

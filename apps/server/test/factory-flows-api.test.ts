@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { WebSocket } from 'ws';
+import { z } from 'zod';
 import {
   AppEventSchema,
   BackgroundSessionSummarySchema,
@@ -360,7 +361,7 @@ test('API REST /api/factory/flows valida origem, idempotência, filtros e ciclo 
 
   const autoPlanningSessionId = detailsA.flow.currentSessionId;
   await waitFor(() =>
-    Boolean(sessionManager.getSession(autoPlanningSessionId)?.buffer.replay().includes('READY:')),
+    /READY:[^\n]*\n/.test(sessionManager.getSession(autoPlanningSessionId)?.buffer.replay() ?? ''),
   );
   const planningBuffer = sessionManager.getSession(autoPlanningSessionId)?.buffer.replay() ?? '';
   const readyLine = planningBuffer.split(/\r?\n/).find(line => line.includes('READY:'));
@@ -457,7 +458,7 @@ test('API REST /api/factory/flows valida origem, idempotência, filtros e ciclo 
 });
 
 test(
-  'múltiplos fluxos via POST /api/factory/flows no mesmo repositório executam em paralelo com planos isolados e concluem até PR',
+  'fluxos paralelos mantêm artefatos isolados e o Desenvolvimento entrega o fluxo à etapa de Testes',
   { timeout: 30000 },
   async context => {
     const rootDir = mkdtempSync(join(tmpdir(), 'df-factory-parallel-same-repo-'));
@@ -575,6 +576,9 @@ test(
       return Boolean(p1?.buffer.replay().includes('READY:') && p2?.buffer.replay().includes('READY:'));
     });
 
+    const planPath = sessionManager.getSession(planningSessionOne)?.reportPath;
+    assert.ok(planPath);
+    writeFileSync(planPath, '# Diagnóstico Técnico + Plano de Implementação\n\n1. Ajustar JWT.\n');
     sessionManager.writeInput(planningSessionOne, 'EXIT0');
     sessionManager.writeInput(planningSessionTwo, 'EXIT0');
     await waitFor(() => {
@@ -606,24 +610,280 @@ test(
     assert.equal(specOne.path, createdOne.session.reportPath);
     assert.equal(specTwo.path, createdTwo.session.reportPath);
 
-    // Avança o Fluxo 1 por todas as etapas restantes até concluir o PR enquanto o Fluxo 2 permanece em planning.
-    const nextStages = ['development', 'tests', 'review', 'pr'] as const;
-    for (const expectedStage of nextStages) {
-      const advRes = await fetch(`${baseUrl}/api/factory/flows/${createdOne.flow.id}/advance`, {
+    const postAction = (action: string, data: object, flowId = createdOne.flow.id) =>
+      fetch(`${baseUrl}/api/factory/flows/${flowId}/${action}`, {
         method: 'POST',
         headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ startSession: false }),
+        body: JSON.stringify(data),
       });
-      assert.equal(advRes.status, 200);
-      const advBody = TransitionFactoryFlowResponseSchema.parse(await advRes.json());
-      assert.equal(advBody.flow.currentStage, expectedStage);
-    }
+    const getDetails = async () => {
+      const response = await fetch(`${baseUrl}/api/factory/flows/${createdOne.flow.id}`, {
+        headers: { Origin: ALLOWED_ORIGIN },
+      });
+      assert.equal(response.status, 200);
+      return FactoryFlowDetailsSchema.parse(await response.json());
+    };
 
-    const extraAdvanceRes = await fetch(`${baseUrl}/api/factory/flows/${createdOne.flow.id}/advance`, {
-      method: 'POST',
-      headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ startSession: false }),
+    const noPlan = await postAction('advance', { startSession: true }, createdTwo.flow.id);
+    assert.equal(noPlan.status, 409);
+    const approvedNotes = 'Usar a opção 2 para renovação do JWT.';
+    const developmentResponse = await postAction('advance', { startSession: true, approvedNotes });
+    assert.equal(developmentResponse.status, 200);
+    const development = z.object({ session: BackgroundSessionSummarySchema }).parse(
+      await developmentResponse.json(),
+    ).session;
+    assert.equal(development.stage, 'development');
+    assert.ok(development.reportPath);
+    assert.equal((await postAction('advance', { startSession: true })).status, 409);
+
+    await waitFor(() => Boolean(sessionManager.getSession(development.sessionId)?.buffer.replay().includes('READY:')));
+    writeFileSync(development.reportPath, '# Relatório de Implementação\n\nIncompleto.\n');
+    sessionManager.writeInput(development.sessionId, 'EXIT0');
+    await waitFor(() => sessionManager.getSession(development.sessionId)?.status === 'exited');
+    const incompleteDetails = await getDetails();
+    assert.equal(incompleteDetails.flow.state, 'waiting_action');
+    assert.ok(incompleteDetails.artifacts.some(artifact =>
+      artifact.kind === 'implementation_report' && artifact.status === 'incomplete',
+    ));
+    assert.equal((await postAction('advance', { startSession: true })).status, 409);
+
+    const rerunResponse = await postAction('rerun', { stage: 'development' });
+    assert.equal(rerunResponse.status, 200);
+    const rerun = z.object({ session: BackgroundSessionSummarySchema }).parse(
+      await rerunResponse.json(),
+    ).session;
+    assert.ok(rerun.reportPath);
+    const running = sessionManager.getSession(rerun.sessionId);
+    assert.ok(running);
+    await waitFor(() => running.buffer.replay().includes('READY:'));
+    const readyLine = running.buffer.replay().split(/\r?\n/).find(line => line.startsWith('READY:'));
+    assert.ok(readyLine);
+    const { args, cwd } = z.object({ args: z.array(z.string()), cwd: z.string() }).parse(
+      JSON.parse(readyLine.slice('READY:'.length)) as unknown,
+    );
+    assert.equal(cwd, repoDir);
+    const prompt = args.at(-1);
+    assert.ok(prompt);
+    assert.ok(prompt.includes(specOne.path));
+    assert.ok(prompt.includes(planPath));
+    assert.ok(prompt.includes(approvedNotes));
+    assert.ok(prompt.includes(rerun.reportPath));
+    assert.doesNotMatch(prompt, /Paginação isolada/);
+    assert.ok(args.includes('--restricted'));
+    assert.equal(args[args.indexOf('--tools') + 1], 'Read,Glob,Grep,Edit,Write');
+    assert.match(args[args.indexOf('--allowedTools') + 1] ?? '', /Edit\(\*\*\/\*\.ts\)/);
+    assert.match(args[args.indexOf('--disallowedTools') + 1] ?? '', /\.test\.\*/);
+    assert.match(args[args.indexOf('--disallowedTools') + 1] ?? '', /\.spec\.\*/);
+
+    writeFileSync(rerun.reportPath, [
+      '# Relatório de Implementação',
+      '## Arquivos alterados',
+      '- src/jwt.ts',
+      '## Resumo das mudanças',
+      'Renovação do JWT atualizada.',
+      '## Status dos passos do plano',
+      '| Passo do Plano | Status | Observações |',
+      '| --- | --- | --- |',
+      '| Ajustar JWT | Concluído | Código de produção atualizado |',
+      '',
+    ].join('\n'));
+    sessionManager.writeInput(rerun.sessionId, 'EXIT0');
+    await waitFor(() => sessionManager.getSession(rerun.sessionId)?.status === 'exited');
+    const completedDevelopment = await getDetails();
+    assert.equal(completedDevelopment.flow.state, 'waiting_action');
+    assert.ok(completedDevelopment.artifacts.some(artifact =>
+      artifact.kind === 'implementation_report' && artifact.status === 'ready' &&
+      artifact.path === rerun.reportPath,
+    ));
+
+    const testsApprovedNotes = 'Cobrir refresh token expirado e erro 401.';
+    const testsResponse = await postAction('advance', {
+      startSession: true,
+      approvedNotes: testsApprovedNotes,
     });
+    assert.equal(testsResponse.status, 200);
+    const testsSession = z.object({ session: BackgroundSessionSummarySchema }).parse(
+      await testsResponse.json(),
+    ).session;
+    assert.equal(testsSession.stage, 'tests');
+    assert.ok(testsSession.reportPath);
+    assert.equal((await postAction('advance', { startSession: true })).status, 409);
+
+    const runningTests = sessionManager.getSession(testsSession.sessionId);
+    assert.ok(runningTests);
+    await waitFor(() => /READY:[^\n]*\n/.test(runningTests.buffer.replay()));
+    const testsReadyLine = runningTests.buffer.replay().split(/\r?\n/).find(line => line.startsWith('READY:'));
+    assert.ok(testsReadyLine);
+    const testsSpawn = z.object({ args: z.array(z.string()), cwd: z.string() }).parse(
+      JSON.parse(testsReadyLine.slice('READY:'.length)) as unknown,
+    );
+    assert.equal(testsSpawn.cwd, repoDir);
+    const testsPrompt = testsSpawn.args.at(-1) ?? '';
+    assert.ok(testsPrompt.includes(specOne.path));
+    assert.ok(testsPrompt.includes(planPath));
+    assert.ok(testsPrompt.includes(rerun.reportPath));
+    assert.ok(testsPrompt.includes(testsApprovedNotes));
+    assert.ok(testsSpawn.args.includes('--restricted'));
+    assert.equal(testsSpawn.args[testsSpawn.args.indexOf('--tools') + 1], 'Read,Glob,Grep,Edit,Write,Bash');
+    assert.match(testsSpawn.args[testsSpawn.args.indexOf('--allowedTools') + 1] ?? '', /Edit\(\*\*\/\*\.test\.\*\)/);
+    assert.match(testsSpawn.args[testsSpawn.args.indexOf('--allowedTools') + 1] ?? '', /Bash/);
+
+    writeFileSync(testsSession.reportPath, '# Relatório de Testes\n\nIncompleto.\n');
+    sessionManager.writeInput(testsSession.sessionId, 'EXIT0');
+    await waitFor(() => sessionManager.getSession(testsSession.sessionId)?.status === 'exited');
+    const incompleteTestsDetails = await getDetails();
+    assert.equal(incompleteTestsDetails.flow.state, 'waiting_action');
+    assert.ok(
+      incompleteTestsDetails.artifacts.some(
+        artifact => artifact.kind === 'test_report' && artifact.status === 'incomplete',
+      ),
+    );
+    assert.equal((await postAction('advance', { startSession: true })).status, 409);
+
+    const rerunTestsResponse = await postAction('rerun', { stage: 'tests' });
+    assert.equal(rerunTestsResponse.status, 200);
+    const rerunTests = z.object({ session: BackgroundSessionSummarySchema }).parse(
+      await rerunTestsResponse.json(),
+    ).session;
+    assert.ok(rerunTests.reportPath);
+    await waitFor(() => Boolean(sessionManager.getSession(rerunTests.sessionId)?.buffer.replay().includes('READY:')));
+    writeFileSync(
+      rerunTests.reportPath,
+      [
+        '# Relatório de Testes',
+        '## Arquivos de teste alterados',
+        '- test/jwt.test.ts',
+        '## Comandos executados',
+        '- npm test (exit 0)',
+        '## Resultados e cobertura',
+        'Todos os cenários do plano passaram.',
+        '',
+      ].join('\n'),
+    );
+    sessionManager.writeInput(rerunTests.sessionId, 'EXIT0');
+    await waitFor(() => sessionManager.getSession(rerunTests.sessionId)?.status === 'exited');
+    const completedTests = await getDetails();
+    assert.equal(completedTests.flow.state, 'waiting_action');
+    assert.ok(
+      completedTests.artifacts.some(
+        artifact =>
+          artifact.kind === 'test_report' &&
+          artifact.status === 'ready' &&
+          artifact.path === rerunTests.reportPath,
+      ),
+    );
+
+    const reviewApprovedNotes = 'Validar remoção de logs sensíveis no diff.';
+    const reviewResponse = await postAction('advance', {
+      startSession: true,
+      approvedNotes: reviewApprovedNotes,
+    });
+    assert.equal(reviewResponse.status, 200);
+    const reviewSession = z.object({ session: BackgroundSessionSummarySchema }).parse(
+      await reviewResponse.json(),
+    ).session;
+    assert.equal(reviewSession.stage, 'review');
+    assert.ok(reviewSession.reportPath);
+
+    const runningReview = sessionManager.getSession(reviewSession.sessionId);
+    assert.ok(runningReview);
+    await waitFor(() => /READY:[^\n]*\n/.test(runningReview.buffer.replay()));
+    const reviewReadyLine = runningReview.buffer.replay().split(/\r?\n/).find(line => line.startsWith('READY:'));
+    assert.ok(reviewReadyLine);
+    const reviewSpawn = z.object({ args: z.array(z.string()), cwd: z.string() }).parse(
+      JSON.parse(reviewReadyLine.slice('READY:'.length)) as unknown,
+    );
+    assert.equal(reviewSpawn.cwd, repoDir);
+    const reviewPrompt = reviewSpawn.args.at(-1) ?? '';
+    assert.ok(reviewPrompt.includes(specOne.path));
+    assert.ok(reviewPrompt.includes(planPath));
+    assert.ok(reviewPrompt.includes(rerun.reportPath));
+    assert.ok(reviewPrompt.includes(rerunTests.reportPath));
+    assert.ok(reviewPrompt.includes(reviewApprovedNotes));
+    assert.ok(reviewSpawn.args.includes('--restricted'));
+    const reviewAllowedTools = reviewSpawn.args[reviewSpawn.args.indexOf('--allowedTools') + 1] ?? '';
+    assert.ok(reviewAllowedTools.includes('Bash(git diff*)'));
+    assert.ok(reviewAllowedTools.includes('Bash(git status*)'));
+    assert.ok(reviewAllowedTools.includes('Bash(git log*)'));
+    assert.equal(reviewAllowedTools.includes('Edit(**/*.ts)'), false);
+
+    writeFileSync(reviewSession.reportPath, '# Relatório de Code Review\n\nIncompleto.\n');
+    sessionManager.writeInput(reviewSession.sessionId, 'EXIT0');
+    await waitFor(() => sessionManager.getSession(reviewSession.sessionId)?.status === 'exited');
+    assert.equal((await postAction('advance', { startSession: true })).status, 409);
+
+    const rerunReviewResponse = await postAction('rerun', { stage: 'review' });
+    assert.equal(rerunReviewResponse.status, 200);
+    const rerunReview = z.object({ session: BackgroundSessionSummarySchema }).parse(
+      await rerunReviewResponse.json(),
+    ).session;
+    assert.ok(rerunReview.reportPath);
+    await waitFor(() => Boolean(sessionManager.getSession(rerunReview.sessionId)?.buffer.replay().includes('READY:')));
+    const validReviewMarkdown = [
+      '# Relatório de Code Review',
+      '## Resumo Executivo',
+      'Solução aderente ao plano.',
+      '## Pontos Encontrados',
+      'Nenhum bloqueador crítico.',
+      '## Parecer Final',
+      'Aprovado para PR.',
+      '',
+    ].join('\n');
+    writeFileSync(rerunReview.reportPath, validReviewMarkdown);
+    sessionManager.writeInput(rerunReview.sessionId, 'EXIT0');
+    await waitFor(() => sessionManager.getSession(rerunReview.sessionId)?.status === 'exited');
+
+    // Testa retorno controlado de review -> tests e novo avanço até PR.
+    const returnRes = await postAction('return', {
+      targetStage: 'tests',
+      approvedNotes: 'Adicionar caso extra de token revogado',
+      startSession: true,
+    });
+    assert.equal(returnRes.status, 200);
+    const returnedTestsSession = z.object({ session: BackgroundSessionSummarySchema }).parse(
+      await returnRes.json(),
+    ).session;
+    assert.equal(returnedTestsSession.stage, 'tests');
+    assert.ok(returnedTestsSession.reportPath);
+    await waitFor(() => Boolean(sessionManager.getSession(returnedTestsSession.sessionId)?.buffer.replay().includes('READY:')));
+    writeFileSync(
+      returnedTestsSession.reportPath,
+      [
+        '# Relatório de Testes',
+        '## Arquivos de teste alterados',
+        '- test/jwt.test.ts',
+        '## Comandos executados',
+        '- npm test (exit 0)',
+        '## Resultados e cobertura',
+        'Caso extra de token revogado validado.',
+        '',
+      ].join('\n'),
+    );
+    sessionManager.writeInput(returnedTestsSession.sessionId, 'EXIT0');
+    await waitFor(() => sessionManager.getSession(returnedTestsSession.sessionId)?.status === 'exited');
+
+    const secondReviewRes = await postAction('advance', { startSession: true });
+    assert.equal(secondReviewRes.status, 200);
+    const secondReview = z.object({ session: BackgroundSessionSummarySchema }).parse(
+      await secondReviewRes.json(),
+    ).session;
+    assert.equal(secondReview.stage, 'review');
+    assert.ok(secondReview.reportPath);
+    await waitFor(() => Boolean(sessionManager.getSession(secondReview.sessionId)?.buffer.replay().includes('READY:')));
+    writeFileSync(secondReview.reportPath, validReviewMarkdown);
+    sessionManager.writeInput(secondReview.sessionId, 'EXIT0');
+    await waitFor(() => sessionManager.getSession(secondReview.sessionId)?.status === 'exited');
+
+    const prResponse = await postAction('advance', { startSession: true });
+    assert.equal(prResponse.status, 200);
+    const prFlow = TransitionFactoryFlowResponseSchema.parse(await prResponse.json()).flow;
+    assert.equal(prFlow.currentStage, 'pr');
+    assert.equal(prFlow.state, 'waiting_action');
+    assert.equal(prFlow.currentSessionId, null);
+    assert.equal((await postAction('start', { stage: 'pr' })).status, 409);
+    assert.ok(!sessionManager.listSessions().some(session => session.stage === 'pr'));
+
+    const extraAdvanceRes = await postAction('advance', { startSession: false });
     assert.equal(extraAdvanceRes.status, 409);
     const extraAdvanceErr = FactoryFlowApiErrorResponseSchema.parse(await extraAdvanceRes.json());
     assert.equal(extraAdvanceErr.error.code, 'FACTORY_FLOW_INVALID_STAGE_ADVANCE');

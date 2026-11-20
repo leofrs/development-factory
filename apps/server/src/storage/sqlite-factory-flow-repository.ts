@@ -4,6 +4,7 @@ import {
   FactoryFlowArtifactSchema,
   FactoryFlowSchema,
   FactoryFlowStageSchema,
+  returnFactoryFlowStage,
   transitionFactoryFlow,
   type FactoryFlow,
   type FactoryFlowArtifact,
@@ -42,6 +43,7 @@ export interface ListFactoryFlowsFilter {
 
 export interface SaveFactoryFlowTransitionOptions {
   readonly expectedUpdatedAt?: string;
+  readonly direction?: 'forward' | 'return';
 }
 
 export interface UpdateFactoryStageInput {
@@ -49,6 +51,7 @@ export interface UpdateFactoryStageInput {
   readonly sessionId?: string | null;
   readonly reportPath?: string | null;
   readonly sessionPath?: string | null;
+  readonly approvedNotes?: string;
   readonly startedAt?: string | null;
   readonly finishedAt?: string | null;
   readonly error?: FactoryFlowError | null;
@@ -86,6 +89,7 @@ interface FactoryStageRow {
   session_id: string | null;
   report_path: string | null;
   session_path: string | null;
+  approved_notes: string | null;
   created_at: string;
   updated_at: string;
   started_at: string | null;
@@ -164,6 +168,7 @@ function rowToStage(row: FactoryStageRow): FactoryFlowStage {
     sessionId: row.session_id,
     reportPath: row.report_path,
     sessionPath: row.session_path,
+    ...(row.approved_notes === null ? {} : { approvedNotes: row.approved_notes }),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     startedAt: row.started_at,
@@ -489,7 +494,10 @@ export class SqliteFactoryFlowRepository {
         );
       }
 
-      const updated = transitionFactoryFlow(current, command);
+      const updated =
+        options.direction === 'return'
+          ? returnFactoryFlowStage(current, command)
+          : transitionFactoryFlow(current, command);
 
       this.db
         .prepare(
@@ -575,6 +583,7 @@ export class SqliteFactoryFlowRepository {
         sessionId: patch.sessionId !== undefined ? patch.sessionId : existing.sessionId,
         reportPath: patch.reportPath !== undefined ? patch.reportPath : existing.reportPath,
         sessionPath: patch.sessionPath !== undefined ? patch.sessionPath : existing.sessionPath,
+        approvedNotes: patch.approvedNotes ?? existing.approvedNotes,
         startedAt: patch.startedAt !== undefined ? patch.startedAt : existing.startedAt,
         finishedAt: patch.finishedAt !== undefined ? patch.finishedAt : existing.finishedAt,
         error: patch.error !== undefined ? patch.error : existing.error,
@@ -596,6 +605,7 @@ export class SqliteFactoryFlowRepository {
                session_id = ?,
                report_path = ?,
                session_path = ?,
+               approved_notes = ?,
                updated_at = ?,
                started_at = ?,
                finished_at = ?,
@@ -607,6 +617,7 @@ export class SqliteFactoryFlowRepository {
           parsed.data.sessionId,
           parsed.data.reportPath,
           parsed.data.sessionPath,
+          parsed.data.approvedNotes ?? null,
           parsed.data.updatedAt,
           parsed.data.startedAt,
           parsed.data.finishedAt,
@@ -746,8 +757,9 @@ export class SqliteFactoryFlowRepository {
     updatedFlow: FactoryFlow,
     command: FactoryFlowTransitionCommand,
   ): void {
-    const advancedStage = previousFlow.currentStage !== updatedFlow.currentStage;
-    if (advancedStage) {
+    const prevIndex = STAGE_ORDER_INDEX.get(previousFlow.currentStage) ?? 0;
+    const nextIndex = STAGE_ORDER_INDEX.get(updatedFlow.currentStage) ?? 0;
+    if (nextIndex > prevIndex) {
       const prevStage = this.getStage(updatedFlow.id, previousFlow.currentStage);
       if (prevStage && !isFinalStageState(prevStage.state)) {
         this.updateStage(updatedFlow.id, previousFlow.currentStage, {
@@ -756,6 +768,22 @@ export class SqliteFactoryFlowRepository {
           finishedAt: command.at,
           updatedAt: command.at,
         });
+      }
+    } else if (nextIndex < prevIndex) {
+      for (const stageName of FACTORY_STAGE_ORDER.slice(nextIndex + 1, prevIndex + 1)) {
+        const stage = this.getStage(updatedFlow.id, stageName);
+        if (stage) {
+          this.updateStage(updatedFlow.id, stageName, {
+            state: 'pending',
+            sessionId: null,
+            reportPath: null,
+            sessionPath: null,
+            startedAt: null,
+            finishedAt: null,
+            error: null,
+            updatedAt: command.at,
+          });
+        }
       }
     }
 
@@ -773,7 +801,12 @@ export class SqliteFactoryFlowRepository {
         ? command.at
         : null);
     const nextFinishedAt = isFinalStageState(nextStageState) ? command.at : null;
-    const nextError = nextStageState === 'failed' ? (updatedFlow.error ?? currentStage.error) : currentStage.error;
+    const nextError =
+      nextStageState === 'failed'
+        ? (updatedFlow.error ?? currentStage.error)
+        : nextIndex < prevIndex
+          ? null
+          : currentStage.error;
 
     this.updateStage(updatedFlow.id, updatedFlow.currentStage, {
       state: nextStageState,

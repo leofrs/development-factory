@@ -1,11 +1,15 @@
 import { z } from 'zod';
 
 export const FACTORY_FLOW_CONTRACT_VERSION = 1 as const;
+export const FACTORY_APPROVED_NOTES_MAX_LENGTH = 4000;
 const version = z.literal(FACTORY_FLOW_CONTRACT_VERSION);
 const id = z.string().uuid();
 const timestamp = z.iso.datetime();
 const text = z.string().trim().min(1);
 const time = (value: string): number => Date.parse(value);
+const approvedNotesSchema = text
+  .max(FACTORY_APPROVED_NOTES_MAX_LENGTH)
+  .refine(value => !value.includes('\0'), 'Notas inválidas');
 
 const repoPathSchema = text
   .max(4096)
@@ -91,6 +95,13 @@ export function getNextFactoryStage(stage: FactoryStageName): FactoryStageName |
 
 export function canAdvanceFactoryStage(from: FactoryStageName, to: FactoryStageName): boolean {
   return getNextFactoryStage(from) === to;
+}
+
+export const ReturnFactoryTargetStageSchema = z.enum(['development', 'tests']);
+export type ReturnFactoryTargetStage = z.infer<typeof ReturnFactoryTargetStageSchema>;
+
+export function canReturnFactoryStage(from: FactoryStageName, to: FactoryStageName): boolean {
+  return from === 'review' && (to === 'development' || to === 'tests');
 }
 
 export const FactoryFlowErrorSchema = z.strictObject({
@@ -187,6 +198,7 @@ export const FactoryFlowStageSchema = z
     sessionId: id.nullable(),
     reportPath: artifactPathSchema.nullable(),
     sessionPath: artifactPathSchema.nullable(),
+    approvedNotes: approvedNotesSchema.optional(),
     createdAt: timestamp,
     updatedAt: timestamp,
     startedAt: timestamp.nullable(),
@@ -227,6 +239,7 @@ export const FactoryFlowArtifactKindSchema = z.enum([
   'plan',
   'specification',
   'patch',
+  'implementation_report',
   'test_report',
   'review_report',
   'pr_summary',
@@ -376,6 +389,24 @@ export function transitionFactoryFlow(
   flow: FactoryFlow,
   command: FactoryFlowTransitionCommand,
 ): FactoryFlow {
+  return applyFactoryFlowTransition(flow, command, 'forward');
+}
+
+/**
+ * Aplica uma transição de retorno controlada (ex.: `review` -> `development` ou `tests`).
+ */
+export function returnFactoryFlowStage(
+  flow: FactoryFlow,
+  command: FactoryFlowTransitionCommand,
+): FactoryFlow {
+  return applyFactoryFlowTransition(flow, command, 'return');
+}
+
+function applyFactoryFlowTransition(
+  flow: FactoryFlow,
+  command: FactoryFlowTransitionCommand,
+  direction: 'forward' | 'return',
+): FactoryFlow {
   const current = FactoryFlowSchema.safeParse(flow);
   const next = FactoryFlowTransitionCommandSchema.safeParse(command);
   if (!current.success || !next.success) {
@@ -392,14 +423,19 @@ export function transitionFactoryFlow(
   }
 
   const targetStage = next.data.stage ?? current.data.currentStage;
-  if (
-    targetStage !== current.data.currentStage &&
-    !canAdvanceFactoryStage(current.data.currentStage, targetStage)
-  ) {
-    throw new FactoryFlowDomainError(
-      'FACTORY_FLOW_INVALID_STAGE_ADVANCE',
-      `Não é possível avançar a etapa de ${current.data.currentStage} para ${targetStage}`,
-    );
+  if (targetStage !== current.data.currentStage) {
+    const validStageChange =
+      direction === 'return'
+        ? canReturnFactoryStage(current.data.currentStage, targetStage)
+        : canAdvanceFactoryStage(current.data.currentStage, targetStage);
+    if (!validStageChange) {
+      throw new FactoryFlowDomainError(
+        'FACTORY_FLOW_INVALID_STAGE_ADVANCE',
+        direction === 'return'
+          ? `Não é possível retornar a etapa de ${current.data.currentStage} para ${targetStage}`
+          : `Não é possível avançar a etapa de ${current.data.currentStage} para ${targetStage}`,
+      );
+    }
   }
 
   const updated = FactoryFlowSchema.safeParse({
@@ -478,6 +514,29 @@ export const FactoryFlowDetailsSchema = z.strictObject({
 });
 export type FactoryFlowDetails = z.infer<typeof FactoryFlowDetailsSchema>;
 
+const HANDOFF_ARTIFACT_KINDS = {
+  triage: 'specification',
+  planning: 'plan',
+  development: 'implementation_report',
+  tests: 'test_report',
+  review: 'review_report',
+} as const;
+
+export function getReadyFactoryStageArtifact(
+  details: Pick<FactoryFlowDetails, 'stages' | 'artifacts'>,
+  stage: keyof typeof HANDOFF_ARTIFACT_KINDS,
+): FactoryFlowArtifact | undefined {
+  const reportPath = details.stages.find(item => item.name === stage)?.reportPath;
+  return details.artifacts.find(
+    artifact =>
+      artifact.stage === stage &&
+      artifact.kind === HANDOFF_ARTIFACT_KINDS[stage] &&
+      artifact.format === 'markdown' &&
+      artifact.status === 'ready' &&
+      artifact.path === reportPath,
+  );
+}
+
 export const TransitionFactoryFlowRequestSchema = z.strictObject({
   to: FactoryFlowStateSchema,
   stage: FactoryStageNameSchema.optional(),
@@ -500,10 +559,23 @@ export const AdvanceFactoryStageRequestSchema = z.strictObject({
   reason: text.optional(),
   expectedUpdatedAt: timestamp.optional(),
   startSession: z.boolean().optional(),
+  approvedNotes: approvedNotesSchema.optional(),
   cols: z.number().int().min(2).max(500).optional(),
   rows: z.number().int().min(1).max(300).optional(),
 });
 export type AdvanceFactoryStageRequest = z.infer<typeof AdvanceFactoryStageRequestSchema>;
+
+export const ReturnFactoryStageRequestSchema = z.strictObject({
+  targetStage: ReturnFactoryTargetStageSchema,
+  at: timestamp.optional(),
+  reason: text.optional(),
+  expectedUpdatedAt: timestamp.optional(),
+  startSession: z.boolean().optional(),
+  approvedNotes: approvedNotesSchema.optional(),
+  cols: z.number().int().min(2).max(500).optional(),
+  rows: z.number().int().min(1).max(300).optional(),
+});
+export type ReturnFactoryStageRequest = z.infer<typeof ReturnFactoryStageRequestSchema>;
 
 export const RerunFactoryStageRequestSchema = z.strictObject({
   stage: FactoryStageNameSchema.optional(),

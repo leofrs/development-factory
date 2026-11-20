@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { lstatSync } from 'node:fs';
 import { z } from 'zod';
 import {
   AdvanceFactoryStageRequestSchema,
@@ -13,8 +14,11 @@ import {
   FactoryStageNameSchema,
   ListFactoryFlowsFilterSchema,
   RegisterFactoryFlowArtifactRequestSchema,
+  ReturnFactoryStageRequestSchema,
   TransitionFactoryFlowRequestSchema,
+  canReturnFactoryStage,
   getNextFactoryStage,
+  getReadyFactoryStageArtifact,
   isFinalFactoryFlowState,
   type CreateFactoryFlowResponse,
   type FactoryFlowApiErrorCode,
@@ -26,6 +30,7 @@ import {
   type FactoryTaskInput,
   type TransitionFactoryFlowResponse,
 } from '@development-factory/shared';
+import { maxHistoryBytes } from './history-reader.js';
 import {
   ReviewStorageError,
   type SaveFactoryArtifactOptions,
@@ -35,6 +40,53 @@ import {
 
 const FlowIdSchema = z.string().uuid('Identificador de fluxo inválido.');
 const SessionIdSchema = z.string().uuid('Identificador de sessão inválido.');
+
+type HandoffTargetStage = 'development' | 'tests' | 'review' | 'pr';
+type HandoffSourceStage = 'triage' | 'planning' | 'development' | 'tests' | 'review';
+
+const HANDOFF_CONFIG: Readonly<
+  Record<
+    HandoffTargetStage,
+    {
+      readonly requiredArtifacts: readonly HandoffSourceStage[];
+      readonly missingMessage: string;
+      readonly handoffReason: string;
+      readonly acceptsApprovedNotes: boolean;
+    }
+  >
+> = {
+  development: {
+    requiredArtifacts: ['triage', 'planning'],
+    missingMessage: 'Conclua a Triagem e o Planejamento com os artefatos salvos antes de avançar.',
+    handoffReason: 'Planejamento aprovado para execução do Desenvolvimento',
+    acceptsApprovedNotes: true,
+  },
+  tests: {
+    requiredArtifacts: ['triage', 'planning', 'development'],
+    missingMessage:
+      'Conclua a Triagem, o Planejamento e o Desenvolvimento com os artefatos salvos antes de avançar.',
+    handoffReason: 'Relatório de Implementação entregue à etapa de Testes',
+    acceptsApprovedNotes: true,
+  },
+  review: {
+    requiredArtifacts: ['triage', 'planning', 'development', 'tests'],
+    missingMessage:
+      'Conclua as etapas anteriores incluindo o Relatório de Testes salvo antes de avançar.',
+    handoffReason: 'Relatório de Testes entregue à etapa de Code Review',
+    acceptsApprovedNotes: true,
+  },
+  pr: {
+    requiredArtifacts: ['triage', 'planning', 'development', 'tests', 'review'],
+    missingMessage:
+      'Conclua as etapas anteriores incluindo o Relatório de Code Review salvo antes de avançar.',
+    handoffReason: 'Code Review aprovado e entregue à etapa de PR',
+    acceptsApprovedNotes: false,
+  },
+};
+
+function isHandoffTargetStage(stage: FactoryStageName): stage is HandoffTargetStage {
+  return Object.hasOwn(HANDOFF_CONFIG, stage);
+}
 
 export interface FactoryFlowServiceOptions {
   readonly now?: () => string;
@@ -100,6 +152,18 @@ function deriveFlowTitle(task: FactoryTaskInput, explicitTitle?: string): string
     return raw;
   }
   return raw.slice(0, 200).trim();
+}
+
+function isAvailableArtifact(artifact: FactoryFlowArtifact | undefined): boolean {
+  if (!artifact) {
+    return false;
+  }
+  try {
+    const info = lstatSync(artifact.path);
+    return info.isFile() && info.size > 0 && info.size <= maxHistoryBytes;
+  } catch {
+    return false;
+  }
 }
 
 function mapUnexpectedError(error: unknown, conflictCode: FactoryFlowApiErrorCode = 'FACTORY_FLOW_CONFLICT'): FactoryFlowServiceError {
@@ -341,9 +405,22 @@ export class FactoryFlowService {
     };
 
     try {
-      const result = await this.repository.withWriteLock(() =>
-        this.repository.saveFlowTransition(flowId, command, saveOptions),
-      );
+      const result = await this.repository.withWriteLock(() => {
+        const currentStage = this.repository.getFlowById(flowId)?.currentStage;
+        if (
+          currentStage &&
+          command.stage &&
+          command.stage !== currentStage &&
+          (isHandoffTargetStage(command.stage) || isHandoffTargetStage(currentStage))
+        ) {
+          throw new FactoryFlowServiceError(
+            'FACTORY_FLOW_INVALID_STAGE_ADVANCE',
+            'Use a ação de avanço da etapa para validar os artefatos do fluxo.',
+            409,
+          );
+        }
+        return this.repository.saveFlowTransition(flowId, command, saveOptions);
+      });
 
       return {
         contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
@@ -371,50 +448,196 @@ export class FactoryFlowService {
     }
 
     try {
-      const result = await this.repository.withWriteLock(() => {
-        const flow = this.repository.getFlowById(flowId);
-        if (!flow) {
-          throw new FactoryFlowServiceError(
-            'FACTORY_FLOW_NOT_FOUND',
-            `Fluxo ${flowId} não encontrado.`,
-            404,
-          );
-        }
+      const flow = await this.repository.withWriteLock(() =>
+        this.repository.runInTransaction(() => {
+          const flow = this.repository.getFlowById(flowId);
+          if (!flow) {
+            throw new FactoryFlowServiceError(
+              'FACTORY_FLOW_NOT_FOUND',
+              `Fluxo ${flowId} não encontrado.`,
+              404,
+            );
+          }
 
-        if (isFinalFactoryFlowState(flow.state)) {
-          throw new FactoryFlowServiceError(
-            'FACTORY_FLOW_INVALID_TRANSITION',
-            `Não é possível avançar etapa de um fluxo no estado final ${flow.state}.`,
-            409,
-          );
-        }
+          if (isFinalFactoryFlowState(flow.state)) {
+            throw new FactoryFlowServiceError(
+              'FACTORY_FLOW_INVALID_TRANSITION',
+              `Não é possível avançar etapa de um fluxo no estado final ${flow.state}.`,
+              409,
+            );
+          }
 
-        const nextStage = getNextFactoryStage(flow.currentStage);
-        if (!nextStage) {
-          throw new FactoryFlowServiceError(
-            'FACTORY_FLOW_INVALID_STAGE_ADVANCE',
-            `O fluxo já está na etapa final (${flow.currentStage}).`,
-            409,
-          );
-        }
+          const nextStage = getNextFactoryStage(flow.currentStage);
+          if (!nextStage || flow.currentStage === 'pr') {
+            throw new FactoryFlowServiceError(
+              'FACTORY_FLOW_INVALID_STAGE_ADVANCE',
+              flow.currentStage === 'pr'
+                ? 'A execução da Etapa 06 (PR) será disponibilizada em uma próxima implementação.'
+                : `O fluxo já está na etapa final (${flow.currentStage}).`,
+              409,
+            );
+          }
 
-        const nextState = flow.state === 'running' ? 'waiting_action' : 'running';
-        return this.repository.saveFlowTransition(
-          flowId,
-          {
-            to: nextState,
-            stage: nextStage,
-            at: parsed.data.at ?? this.now(),
-            reason: parsed.data.reason ?? `Avanço da etapa ${flow.currentStage} para ${nextStage}`,
-            currentSessionId: null,
-          },
-          { expectedUpdatedAt: parsed.data.expectedUpdatedAt },
-        );
-      });
+          const handoffConfig = isHandoffTargetStage(nextStage)
+            ? HANDOFF_CONFIG[nextStage]
+            : undefined;
+          if (handoffConfig) {
+            const details = this.getFlow(flowId);
+            const hasArtifacts = handoffConfig.requiredArtifacts.every(stage =>
+              isAvailableArtifact(getReadyFactoryStageArtifact(details, stage)),
+            );
+            if (flow.state !== 'waiting_action' || flow.currentSessionId || !hasArtifacts) {
+              throw new FactoryFlowServiceError(
+                'FACTORY_FLOW_INVALID_STAGE_ADVANCE',
+                handoffConfig.missingMessage,
+                409,
+              );
+            }
+          }
+          if (parsed.data.approvedNotes !== undefined && !handoffConfig?.acceptsApprovedNotes) {
+            throw new FactoryFlowServiceError(
+              'FACTORY_FLOW_INVALID_INPUT',
+              'As notas aprovadas são recebidas no avanço para Desenvolvimento, Testes ou Code Review.',
+              400,
+            );
+          }
+
+          const at = parsed.data.at ?? this.now();
+          const nextState = flow.state === 'running' ? 'waiting_action' : 'running';
+          const advanced = this.repository.saveFlowTransition(
+            flowId,
+            {
+              to: nextState,
+              stage: nextStage,
+              at,
+              reason: parsed.data.reason ?? `Avanço da etapa ${flow.currentStage} para ${nextStage}`,
+              currentSessionId: null,
+            },
+            { expectedUpdatedAt: parsed.data.expectedUpdatedAt },
+          );
+          if (parsed.data.approvedNotes !== undefined) {
+            this.repository.updateStage(flowId, nextStage, {
+              approvedNotes: parsed.data.approvedNotes,
+              updatedAt: at,
+            });
+          }
+          if (handoffConfig) {
+            return this.repository.saveFlowTransition(flowId, {
+              to: 'waiting_action',
+              stage: nextStage,
+              at,
+              reason: handoffConfig.handoffReason,
+            }).flow;
+          }
+          return advanced.flow;
+        }),
+      );
 
       return {
         contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
-        flow: result.flow,
+        flow,
+      };
+    } catch (error) {
+      throw mapUnexpectedError(error);
+    }
+  }
+
+  async returnStage(
+    flowIdInput: string,
+    requestInput: unknown,
+  ): Promise<TransitionFactoryFlowResponse> {
+    const flowId = this.parseFlowId(flowIdInput);
+
+    const parsed = ReturnFactoryStageRequestSchema.safeParse(requestInput);
+    if (!parsed.success) {
+      throw new FactoryFlowServiceError(
+        'FACTORY_FLOW_INVALID_INPUT',
+        'Os dados para retornar a etapa do fluxo são inválidos.',
+        400,
+        formatZodIssues(parsed.error),
+      );
+    }
+
+    try {
+      const flow = await this.repository.withWriteLock(() =>
+        this.repository.runInTransaction(() => {
+          const flow = this.repository.getFlowById(flowId);
+          if (!flow) {
+            throw new FactoryFlowServiceError(
+              'FACTORY_FLOW_NOT_FOUND',
+              `Fluxo ${flowId} não encontrado.`,
+              404,
+            );
+          }
+
+          if (isFinalFactoryFlowState(flow.state)) {
+            throw new FactoryFlowServiceError(
+              'FACTORY_FLOW_INVALID_TRANSITION',
+              `Não é possível retornar etapa de um fluxo no estado final ${flow.state}.`,
+              409,
+            );
+          }
+
+          const { targetStage } = parsed.data;
+          if (!canReturnFactoryStage(flow.currentStage, targetStage)) {
+            throw new FactoryFlowServiceError(
+              'FACTORY_FLOW_INVALID_STAGE_ADVANCE',
+              `Não é possível retornar a etapa de ${flow.currentStage} para ${targetStage}.`,
+              409,
+            );
+          }
+
+          if (flow.state !== 'waiting_action' || flow.currentSessionId) {
+            throw new FactoryFlowServiceError(
+              'FACTORY_FLOW_CONFLICT',
+              'Aguarde o término da sessão atual antes de retornar o fluxo para correções.',
+              409,
+            );
+          }
+
+          const details = this.getFlow(flowId);
+          const targetConfig = HANDOFF_CONFIG[targetStage];
+          const hasArtifacts = targetConfig.requiredArtifacts.every(stage =>
+            isAvailableArtifact(getReadyFactoryStageArtifact(details, stage)),
+          );
+          if (!hasArtifacts) {
+            throw new FactoryFlowServiceError(
+              'FACTORY_FLOW_INVALID_STAGE_ADVANCE',
+              targetConfig.missingMessage,
+              409,
+            );
+          }
+
+          const at = parsed.data.at ?? this.now();
+          this.repository.saveFlowTransition(
+            flowId,
+            {
+              to: 'running',
+              stage: targetStage,
+              at,
+              reason: parsed.data.reason ?? `Retorno da etapa ${flow.currentStage} para ${targetStage}`,
+              currentSessionId: null,
+            },
+            { expectedUpdatedAt: parsed.data.expectedUpdatedAt, direction: 'return' },
+          );
+          if (parsed.data.approvedNotes !== undefined) {
+            this.repository.updateStage(flowId, targetStage, {
+              approvedNotes: parsed.data.approvedNotes,
+              updatedAt: at,
+            });
+          }
+          return this.repository.saveFlowTransition(flowId, {
+            to: 'waiting_action',
+            stage: targetStage,
+            at,
+            reason: `Etapa ${targetStage} reaberta após retorno do Code Review`,
+          }).flow;
+        }),
+      );
+
+      return {
+        contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+        flow,
       };
     } catch (error) {
       throw mapUnexpectedError(error);

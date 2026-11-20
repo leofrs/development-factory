@@ -1,20 +1,18 @@
-import { useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import {
+  ChevronRight,
   Compass,
   FileText,
   GitPullRequest,
   Loader2,
-  Square,
   Terminal,
   X,
 } from 'lucide-react';
 import {
-  isFinalFactoryFlowState,
   type BackgroundSessionSummary,
   type FactoryFlow,
 } from '@development-factory/shared';
 import {
-  canOpenTerminalForFactoryStage,
   getFactoryFlowStatePresentation,
   getFactoryStageLabel,
   getFactoryStageStep,
@@ -35,10 +33,8 @@ interface BackgroundTasksPopoverProps {
   loadingFactoryFlows?: boolean;
   factoryFlowsError?: string | null;
   onOpenTerminal: (sessionId: string) => void;
-  onOpenFlowTerminal?: (flowId: string) => void;
+  onOpenFlowRoadmap?: (flowId: string) => void;
   onViewReport: (reportPath: string) => void;
-  onStopSession: (sessionId: string) => Promise<BackgroundSessionSummary>;
-  onCancelFlow?: (flowId: string) => Promise<FactoryFlow>;
   onClose: () => void;
 }
 
@@ -67,15 +63,10 @@ export function BackgroundTasksPopover({
   loadingFactoryFlows = false,
   factoryFlowsError = null,
   onOpenTerminal,
-  onOpenFlowTerminal,
+  onOpenFlowRoadmap,
   onViewReport,
-  onStopSession,
-  onCancelFlow,
   onClose,
 }: BackgroundTasksPopoverProps) {
-  const [stoppingIds, setStoppingIds] = useState<Set<string>>(() => new Set());
-  const [actionError, setActionError] = useState<string | null>(null);
-
   const items = useMemo<BackgroundOperationItem[]>(() => {
     const sessionsById = new Map<string, BackgroundSessionSummary>();
     const latestSessionByFlowId = new Map<string, BackgroundSessionSummary>();
@@ -136,69 +127,7 @@ export function BackgroundTasksPopover({
   }, [items]);
 
   const isLoading = (loadingSessions || loadingFactoryFlows) && items.length === 0;
-  const combinedError = actionError ?? sessionsError ?? factoryFlowsError;
-
-  async function handleStopSession(sessionId: string) {
-    if (stoppingIds.has(sessionId)) {
-      return;
-    }
-
-    setActionError(null);
-    setStoppingIds(current => {
-      const next = new Set(current);
-      next.add(sessionId);
-      return next;
-    });
-
-    try {
-      await onStopSession(sessionId);
-    } catch (error) {
-      setActionError(
-        error instanceof Error
-          ? error.message
-          : 'Não foi possível encerrar a operação em background.',
-      );
-    } finally {
-      setStoppingIds(current => {
-        const next = new Set(current);
-        next.delete(sessionId);
-        return next;
-      });
-    }
-  }
-
-  async function handleCancelFlow(flow: FactoryFlow, linkedSession?: BackgroundSessionSummary) {
-    if (stoppingIds.has(flow.id)) {
-      return;
-    }
-
-    setActionError(null);
-    setStoppingIds(current => {
-      const next = new Set(current);
-      next.add(flow.id);
-      return next;
-    });
-
-    try {
-      if (onCancelFlow) {
-        await onCancelFlow(flow.id);
-      } else if (linkedSession?.status === 'running') {
-        await onStopSession(linkedSession.sessionId);
-      }
-    } catch (error) {
-      setActionError(
-        error instanceof Error
-          ? error.message
-          : 'Não foi possível cancelar o fluxo da Factory.',
-      );
-    } finally {
-      setStoppingIds(current => {
-        const next = new Set(current);
-        next.delete(flow.id);
-        return next;
-      });
-    }
-  }
+  const combinedError = sessionsError ?? factoryFlowsError;
 
   return (
     <section
@@ -259,16 +188,9 @@ export function BackgroundTasksPopover({
                   linkedSession && linkedSession.status === 'running'
                     ? getSessionStatusPresentation(linkedSession)
                     : getFactoryFlowStatePresentation(flow.state);
-                const isStopping = stoppingIds.has(flow.id);
                 const isActive =
                   Boolean(activeSessionId) && linkedSession?.sessionId === activeSessionId;
                 const reportPath = linkedSession?.reportPath ?? null;
-                const canStop =
-                  !isFinalFactoryFlowState(flow.state) &&
-                  (Boolean(onCancelFlow) || linkedSession?.status === 'running');
-                const canOpenTerminal =
-                  canOpenTerminalForFactoryStage(flow.currentStage) &&
-                  (Boolean(linkedSession) || Boolean(onOpenFlowTerminal));
 
                 return (
                   <li
@@ -279,7 +201,15 @@ export function BackgroundTasksPopover({
                         : 'border-line bg-page/70 hover:border-line-strong'
                     }`}
                   >
-                    <div className="flex items-start justify-between gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onOpenFlowRoadmap?.(flow.id);
+                        onClose();
+                      }}
+                      aria-label={`Abrir roadmap do fluxo ${flow.title}`}
+                      className="flex w-full items-start justify-between gap-2 rounded-lg text-left transition hover:opacity-90 focus-visible:outline-2 focus-visible:outline-accent"
+                    >
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-1.5">
                           <span className="inline-flex items-center gap-1 rounded-md border border-accent/30 bg-selected px-1.5 py-0.5 text-[10px] font-medium text-accent">
@@ -309,28 +239,11 @@ export function BackgroundTasksPopover({
                           {flow.target.repoPath}
                         </p>
                       </div>
-                    </div>
+                      <ChevronRight size={15} className="mt-1 shrink-0 text-muted" />
+                    </button>
 
-                    <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
-                      {canOpenTerminal && (
-                        <button
-                          type="button"
-                          className="modal-button px-2.5 py-1.5 text-[11px]"
-                          onClick={() => {
-                            if (linkedSession) {
-                              onOpenTerminal(linkedSession.sessionId);
-                            } else {
-                              onOpenFlowTerminal?.(flow.id);
-                            }
-                            onClose();
-                          }}
-                        >
-                          <Terminal size={12} />
-                          <span>Abrir terminal</span>
-                        </button>
-                      )}
-
-                      {reportPath && (
+                    {reportPath && (
+                      <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
                         <button
                           type="button"
                           className="modal-button border-accent/35 px-2.5 py-1.5 text-[11px] text-accent hover:bg-selected"
@@ -342,27 +255,8 @@ export function BackgroundTasksPopover({
                           <FileText size={12} />
                           <span>{flow.currentStage === 'triage' ? 'Ver plano' : 'Ver artefato'}</span>
                         </button>
-                      )}
-
-                      {canStop && (
-                        <button
-                          type="button"
-                          disabled={isStopping}
-                          aria-busy={isStopping}
-                          className="modal-button ml-auto border-danger/25 px-2.5 py-1.5 text-[11px] text-danger hover:bg-danger/10"
-                          onClick={() => void handleCancelFlow(flow, linkedSession)}
-                        >
-                          <Square size={10} />
-                          <span>
-                            {isStopping
-                              ? 'Encerrando...'
-                              : linkedSession?.status === 'running'
-                                ? 'Encerrar'
-                                : 'Cancelar'}
-                          </span>
-                        </button>
-                      )}
-                    </div>
+                      </div>
+                    )}
                   </li>
                 );
               }
@@ -370,7 +264,6 @@ export function BackgroundTasksPopover({
               const { session } = item;
               const meta = getSessionStatusPresentation(session);
               const isFactory = session.mode === 'factory';
-              const isStopping = stoppingIds.has(session.sessionId);
               const isActive = activeSessionId === session.sessionId;
               const reportPath =
                 session.mode === 'factory' || session.historyState === 'saved'
@@ -428,17 +321,19 @@ export function BackgroundTasksPopover({
                   </div>
 
                   <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
-                    <button
-                      type="button"
-                      className="modal-button px-2.5 py-1.5 text-[11px]"
-                      onClick={() => {
-                        onOpenTerminal(session.sessionId);
-                        onClose();
-                      }}
-                    >
-                      <Terminal size={12} />
-                      <span>Abrir terminal</span>
-                    </button>
+                    {!isFactory && (
+                      <button
+                        type="button"
+                        className="modal-button px-2.5 py-1.5 text-[11px]"
+                        onClick={() => {
+                          onOpenTerminal(session.sessionId);
+                          onClose();
+                        }}
+                      >
+                        <Terminal size={12} />
+                        <span>Abrir terminal</span>
+                      </button>
+                    )}
 
                     {reportPath && (
                       <button
@@ -451,19 +346,6 @@ export function BackgroundTasksPopover({
                       >
                         <FileText size={12} />
                         <span>{isFactory ? 'Ver plano' : 'Ver parecer'}</span>
-                      </button>
-                    )}
-
-                    {session.status === 'running' && (
-                      <button
-                        type="button"
-                        disabled={isStopping}
-                        aria-busy={isStopping}
-                        className="modal-button ml-auto border-danger/25 px-2.5 py-1.5 text-[11px] text-danger hover:bg-danger/10"
-                        onClick={() => void handleStopSession(session.sessionId)}
-                      >
-                        <Square size={10} />
-                        <span>{isStopping ? 'Encerrando...' : 'Encerrar'}</span>
                       </button>
                     )}
                   </div>

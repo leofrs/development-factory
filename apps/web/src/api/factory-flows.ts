@@ -15,6 +15,7 @@ import {
   type FactoryFlowStage,
   type ListFactoryFlowsFilterInput,
   type RerunFactoryStageRequest,
+  type ReturnFactoryStageRequest,
 } from '@development-factory/shared';
 
 const API_BASE_URL = 'http://127.0.0.1:3001';
@@ -275,15 +276,17 @@ export async function createFactoryFlow(
   }
 }
 
-/** Avança um fluxo da Factory para a próxima etapa e opcionalmente inicia sua sessão. */
-export async function advanceFactoryFlowStage(
+async function postFlowStageTransition(
   flowId: string,
-  request: AdvanceFactoryStageRequest = {},
+  action: 'advance' | 'return',
+  request: AdvanceFactoryStageRequest | ReturnFactoryStageRequest,
+  fallbackError: string,
+  invalidFormatError: string,
   signal?: AbortSignal,
 ): Promise<AdvanceFactoryFlowResult> {
   try {
     const response = await fetch(
-      `${API_BASE_URL}/api/factory/flows/${encodeURIComponent(flowId)}/advance`,
+      `${API_BASE_URL}/api/factory/flows/${encodeURIComponent(flowId)}/${action}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -294,12 +297,12 @@ export async function advanceFactoryFlowStage(
     );
     const payload = await parseJsonResponse(response);
     if (!response.ok) {
-      throw extractApiError(payload, response.status, 'Não foi possível avançar a etapa do fluxo.');
+      throw extractApiError(payload, response.status, fallbackError);
     }
 
     if (!isRecord(payload) || payload.contractVersion !== FACTORY_FLOW_CONTRACT_VERSION) {
       throw new FactoryFlowApiError(
-        'Formato inesperado ao avançar a etapa do fluxo.',
+        invalidFormatError,
         'FACTORY_FLOW_INVALID_RESPONSE',
         response.status,
       );
@@ -308,7 +311,7 @@ export async function advanceFactoryFlowStage(
     const parsedFlow = FactoryFlowSchema.safeParse(payload.flow);
     if (!parsedFlow.success) {
       throw new FactoryFlowApiError(
-        'Formato inesperado ao avançar a etapa do fluxo.',
+        invalidFormatError,
         'FACTORY_FLOW_INVALID_RESPONSE',
         response.status,
       );
@@ -328,8 +331,40 @@ export async function advanceFactoryFlowStage(
     if (error instanceof DOMException && error.name === 'AbortError') {
       throw error;
     }
-    throw toFactoryFlowRequestError(error, 'Não foi possível avançar a etapa do fluxo.');
+    throw toFactoryFlowRequestError(error, fallbackError);
   }
+}
+
+/** Avança um fluxo da Factory para a próxima etapa e opcionalmente inicia sua sessão. */
+export function advanceFactoryFlowStage(
+  flowId: string,
+  request: AdvanceFactoryStageRequest = {},
+  signal?: AbortSignal,
+): Promise<AdvanceFactoryFlowResult> {
+  return postFlowStageTransition(
+    flowId,
+    'advance',
+    request,
+    'Não foi possível avançar a etapa do fluxo.',
+    'Formato inesperado ao avançar a etapa do fluxo.',
+    signal,
+  );
+}
+
+/** Retorna um fluxo da Factory (ex.: do Code Review para Desenvolvimento ou Testes). */
+export function returnFactoryFlowStage(
+  flowId: string,
+  request: ReturnFactoryStageRequest,
+  signal?: AbortSignal,
+): Promise<AdvanceFactoryFlowResult> {
+  return postFlowStageTransition(
+    flowId,
+    'return',
+    request,
+    'Não foi possível retornar a etapa do fluxo.',
+    'Formato inesperado ao retornar a etapa do fluxo.',
+    signal,
+  );
 }
 
 /** Inicia ou reexecuta uma etapa específica de um fluxo da Factory em segundo plano. */

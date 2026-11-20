@@ -15,9 +15,12 @@ import {
   ListFactoryFlowsFilterSchema,
   RegisterFactoryFlowArtifactRequestSchema,
   canAdvanceFactoryStage,
+  canReturnFactoryStage,
   canTransitionFactoryFlow,
   getNextFactoryStage,
+  getReadyFactoryStageArtifact,
   isFinalFactoryFlowState,
+  returnFactoryFlowStage,
   transitionFactoryFlow,
   type FactoryFlow,
   type FactoryFlowState,
@@ -309,4 +312,90 @@ test('valida etapas, artefatos, filtros e envelope de erro da API', () => {
     }).success,
     true,
   );
+});
+
+test('permite retorno controlado de review para development ou tests e resolve artefatos prontos', () => {
+  assert.equal(canReturnFactoryStage('review', 'development'), true);
+  assert.equal(canReturnFactoryStage('review', 'tests'), true);
+  assert.equal(canReturnFactoryStage('review', 'planning'), false);
+  assert.equal(canReturnFactoryStage('tests', 'development'), false);
+
+  let flow = inState('waiting_action');
+  for (const stage of ['planning', 'development', 'tests', 'review'] as const) {
+    flow = transitionFactoryFlow(flow, {
+      to: 'running',
+      stage,
+      at: waitingAt,
+      reason: `Avança para ${stage}`,
+      currentSessionId: null,
+    });
+    flow = transitionFactoryFlow(flow, {
+      to: 'waiting_action',
+      stage,
+      at: waitingAt,
+      reason: `Aguarda ação em ${stage}`,
+    });
+  }
+  assert.equal(flow.currentStage, 'review');
+
+  const returnedToTests = returnFactoryFlowStage(flow, {
+    to: 'running',
+    stage: 'tests',
+    at: waitingAt,
+    reason: 'Bloqueadores encontrados nos testes',
+  });
+  assert.equal(returnedToTests.currentStage, 'tests');
+
+  assert.throws(
+    () =>
+      returnFactoryFlowStage(flow, {
+        to: 'running',
+        stage: 'planning',
+        at: waitingAt,
+        reason: 'Retorno inválido',
+      }),
+    error =>
+      error instanceof FactoryFlowDomainError &&
+      error.code === 'FACTORY_FLOW_INVALID_STAGE_ADVANCE',
+  );
+
+  const testArtifact = getReadyFactoryStageArtifact(
+    {
+      stages: [
+        FactoryFlowStageSchema.parse({
+          contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+          id: stageId,
+          flowId,
+          name: 'tests',
+          state: 'waiting_action',
+          sessionId: null,
+          reportPath: '/home/user/repo/.code-reviews/test-report.md',
+          sessionPath: null,
+          createdAt,
+          updatedAt: waitingAt,
+          startedAt: runningAt,
+          finishedAt: null,
+          error: null,
+        }),
+      ],
+      artifacts: [
+        FactoryFlowArtifactSchema.parse({
+          contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+          id: artifactId,
+          flowId,
+          stage: 'tests',
+          sessionId,
+          kind: 'test_report',
+          format: 'markdown',
+          path: '/home/user/repo/.code-reviews/test-report.md',
+          status: 'ready',
+          createdAt,
+          updatedAt: waitingAt,
+          error: null,
+        }),
+      ],
+    },
+    'tests',
+  );
+  assert.equal(testArtifact?.kind, 'test_report');
 });

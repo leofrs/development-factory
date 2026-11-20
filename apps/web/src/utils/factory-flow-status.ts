@@ -37,17 +37,16 @@ const ARTIFACT_KIND_LABELS: Record<FactoryFlowArtifactKind, string> = {
   plan: 'Plano técnico',
   specification: 'Especificação',
   patch: 'Patch',
+  implementation_report: 'Relatório de Implementação',
   test_report: 'Relatório de testes',
   review_report: 'Code Review',
   pr_summary: 'Resumo do PR',
   session_log: 'Log da sessão',
 };
 
-const TERMINAL_HIDDEN_STAGES: ReadonlySet<FactoryStageName> = new Set(['triage', 'planning']);
-
 /** Indica se a etapa da Factory deve expor atalhos para abrir o terminal. */
-export function canOpenTerminalForFactoryStage(stage: FactoryStageName): boolean {
-  return !TERMINAL_HIDDEN_STAGES.has(stage);
+export function canOpenTerminalForFactoryStage(_stage: FactoryStageName): boolean {
+  return false;
 }
 
 /** Retorna o nome legível de uma etapa do ciclo da Factory. */

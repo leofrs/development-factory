@@ -22,10 +22,8 @@ interface FloatingDockProps {
   loadingFactoryFlows?: boolean;
   factoryFlowsError?: string | null;
   onOpenTerminal: (sessionId: string) => void;
-  onOpenFlowTerminal?: (flowId: string) => void;
+  onOpenFlowRoadmap?: (flowId: string) => void;
   onViewReport: (reportPath: string) => void;
-  onStopSession: (sessionId: string) => Promise<BackgroundSessionSummary>;
-  onCancelFlow?: (flowId: string) => Promise<FactoryFlow>;
   theme: Theme;
   onToggleTheme: () => void;
 }
@@ -45,10 +43,8 @@ export function FloatingDock({
   loadingFactoryFlows,
   factoryFlowsError,
   onOpenTerminal,
-  onOpenFlowTerminal,
+  onOpenFlowRoadmap,
   onViewReport,
-  onStopSession,
-  onCancelFlow,
   theme,
   onToggleTheme,
 }: FloatingDockProps) {
@@ -134,10 +130,8 @@ export function FloatingDock({
             loadingFactoryFlows={loadingFactoryFlows}
             factoryFlowsError={factoryFlowsError}
             onOpenTerminal={onOpenTerminal}
-            onOpenFlowTerminal={onOpenFlowTerminal}
+            onOpenFlowRoadmap={onOpenFlowRoadmap}
             onViewReport={onViewReport}
-            onStopSession={onStopSession}
-            onCancelFlow={onCancelFlow}
             onClose={() => setPopoverOpen(false)}
           />
         )}

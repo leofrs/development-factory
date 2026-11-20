@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -28,14 +28,15 @@ function createClock(startIso = '2026-11-19T12:00:00.000Z'): () => string {
   };
 }
 
-test('SqliteFactoryFlowRepository aplica migration v4 e persiste múltiplos fluxos entre reinícios', async () => {
+test('SqliteFactoryFlowRepository aplica migrations e persiste múltiplos fluxos entre reinícios', async () => {
   const { dir, dbPath } = createTempDbPath();
 
   try {
     const repo1 = SqliteFactoryFlowRepository.open({ dbPath });
     const applied = repo1.getAppliedMigrations();
     assert.equal(applied.length, REVIEW_MIGRATIONS.length);
-    assert.equal(applied.at(-1)?.name, 'add_factory_flows');
+    assert.ok(applied.some(migration => migration.name === 'add_factory_flows'));
+    assert.equal(applied.at(-1)?.name, 'add_factory_development_approved_notes');
 
     const service1 = new FactoryFlowService(repo1, { now: createClock() });
 
@@ -211,10 +212,8 @@ test('FactoryFlowService valida transições de estado, avanço sequencial de et
         error.statusCode === 409,
     );
 
-    for (const expectedStage of ['planning', 'development', 'tests', 'review', 'pr'] as const) {
-      const advanced = await service.advanceStage(created.flow.id);
-      assert.equal(advanced.flow.currentStage, expectedStage);
-    }
+    const advanced = await service.advanceStage(created.flow.id);
+    assert.equal(advanced.flow.currentStage, 'planning');
 
     await assert.rejects(
       () => service.advanceStage(created.flow.id),
@@ -224,18 +223,15 @@ test('FactoryFlowService valida transições de estado, avanço sequencial de et
         error.statusCode === 409,
     );
 
-    const completed = await service.transitionFlow(created.flow.id, {
-      to: 'completed',
-      reason: 'PR publicado com sucesso',
-    });
-    assert.equal(completed.flow.state, 'completed');
-    assert.ok(completed.flow.finishedAt !== null);
+    const cancelled = await service.cancelFlow(created.flow.id);
+    assert.equal(cancelled.flow.state, 'cancelled');
+    assert.ok(cancelled.flow.finishedAt !== null);
 
     await assert.rejects(
       () =>
         service.transitionFlow(created.flow.id, {
           to: 'running',
-          reason: 'Tentativa de reabrir fluxo concluído',
+          reason: 'Tentativa de reabrir fluxo cancelado',
         }),
       error =>
         error instanceof FactoryFlowServiceError &&
@@ -244,7 +240,9 @@ test('FactoryFlowService valida transições de estado, avanço sequencial de et
     );
 
     const details = service.getFlow(created.flow.id);
-    assert.ok(details.stages.every(stage => stage.state === 'completed'));
+    assert.equal(details.stages.find(stage => stage.name === 'triage')?.state, 'completed');
+    assert.equal(details.stages.find(stage => stage.name === 'planning')?.state, 'cancelled');
+    assert.equal(details.stages.find(stage => stage.name === 'development')?.state, 'pending');
   } finally {
     repo.close();
   }
@@ -361,5 +359,97 @@ test('FactoryFlowService trata erros de fluxo inexistente e payloads inválidos'
     );
   } finally {
     repo.close();
+  }
+});
+
+test('FactoryFlowService valida retorno de review para development/tests e reinicializa etapas posteriores', async () => {
+  const artifactsDir = mkdtempSync(join(tmpdir(), 'df-factory-return-'));
+  const repo = SqliteFactoryFlowRepository.open({ dbPath: ':memory:' });
+  try {
+    const service = new FactoryFlowService(repo, { now: createClock() });
+    const created = await service.createFlow({
+      task: { inputType: 'jira_key', value: 'PROD-505', repoPath: '/tmp/repo-return' },
+    });
+
+    const specPath = join(artifactsDir, 'spec.md');
+    const planPath = join(artifactsDir, 'plan.md');
+    const devPath = join(artifactsDir, 'dev.md');
+    const testsPath = join(artifactsDir, 'tests.md');
+    writeFileSync(specPath, '# Spec\n');
+    writeFileSync(planPath, '# Plan\n');
+    writeFileSync(devPath, '# Dev\n');
+    writeFileSync(testsPath, '# Tests\n');
+
+    await service.transitionFlow(created.flow.id, { to: 'running', reason: 'Triagem iniciada' });
+    await service.registerArtifact(created.flow.id, {
+      stage: 'triage',
+      kind: 'specification',
+      path: specPath,
+      status: 'ready',
+    });
+    await service.advanceStage(created.flow.id);
+    await service.registerArtifact(created.flow.id, {
+      stage: 'planning',
+      kind: 'plan',
+      path: planPath,
+      status: 'ready',
+    });
+
+    await service.advanceStage(created.flow.id, { approvedNotes: 'Notas dev' });
+    await service.registerArtifact(created.flow.id, {
+      stage: 'development',
+      kind: 'implementation_report',
+      path: devPath,
+      status: 'ready',
+    });
+
+    await service.advanceStage(created.flow.id, { approvedNotes: 'Notas testes' });
+    await service.registerArtifact(created.flow.id, {
+      stage: 'tests',
+      kind: 'test_report',
+      path: testsPath,
+      status: 'ready',
+    });
+
+    await service.advanceStage(created.flow.id, { approvedNotes: 'Notas review' });
+    const beforeReturn = service.getFlow(created.flow.id);
+    assert.equal(beforeReturn.flow.currentStage, 'review');
+    assert.equal(beforeReturn.flow.state, 'waiting_action');
+
+    const returned = await service.returnStage(created.flow.id, {
+      targetStage: 'development',
+      approvedNotes: 'Corrigir falha crítica apontada no review',
+    });
+    assert.equal(returned.flow.currentStage, 'development');
+    assert.equal(returned.flow.state, 'waiting_action');
+
+    const afterReturn = service.getFlow(created.flow.id);
+    const devStage = afterReturn.stages.find(stage => stage.name === 'development');
+    const testsStage = afterReturn.stages.find(stage => stage.name === 'tests');
+    const reviewStage = afterReturn.stages.find(stage => stage.name === 'review');
+    assert.equal(devStage?.state, 'waiting_action');
+    assert.equal(devStage?.finishedAt, null);
+    assert.equal(devStage?.approvedNotes, 'Corrigir falha crítica apontada no review');
+    assert.equal(testsStage?.state, 'pending');
+    assert.equal(testsStage?.startedAt, null);
+    assert.equal(testsStage?.finishedAt, null);
+    assert.equal(testsStage?.reportPath, null);
+    assert.equal(reviewStage?.state, 'pending');
+    assert.equal(reviewStage?.startedAt, null);
+    assert.equal(reviewStage?.finishedAt, null);
+
+    await assert.rejects(
+      () =>
+        service.returnStage(created.flow.id, {
+          targetStage: 'tests',
+        }),
+      error =>
+        error instanceof FactoryFlowServiceError &&
+        error.code === 'FACTORY_FLOW_INVALID_STAGE_ADVANCE' &&
+        error.statusCode === 409,
+    );
+  } finally {
+    repo.close();
+    rmSync(artifactsDir, { recursive: true, force: true });
   }
 });

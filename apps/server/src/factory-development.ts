@@ -1,0 +1,62 @@
+import { basename } from 'node:path';
+import type { FactoryFlowDetails } from '@development-factory/shared';
+import {
+  INFRA_AND_CONFIG_PATHS,
+  TEST_AND_FIXTURE_PATTERNS,
+  buildRestrictedRunnerArgs,
+  readReadyStageDocuments,
+  validateStructuredMarkdownReport,
+} from './factory-stage-runners.js';
+import {
+  IMPLEMENTATION_REPORT_SECTIONS,
+  IMPLEMENTATION_REPORT_TITLE,
+} from './prompts/factory-development.js';
+
+const SOURCE_EXTENSIONS = [
+  'astro', 'c', 'cc', 'cpp', 'cs', 'css', 'dart', 'ex', 'go', 'h', 'hpp', 'html',
+  'java', 'js', 'jsx', 'kt', 'kts', 'less', 'mjs', 'cjs', 'mts', 'cts', 'php', 'py',
+  'rb', 'rs', 'sass', 'scala', 'scss', 'sql', 'svelte', 'swift', 'ts', 'tsx', 'vue',
+];
+
+const PROTECTED_PATHS = [...TEST_AND_FIXTURE_PATTERNS, ...INFRA_AND_CONFIG_PATHS];
+
+export function buildDevelopmentRunnerArgs(reportPath: string): string[] {
+  return buildRestrictedRunnerArgs({
+    tools: ['Read', 'Glob', 'Grep', 'Edit', 'Write'],
+    allowed: [
+      'Read',
+      'Glob',
+      'Grep',
+      ...SOURCE_EXTENSIONS.map(extension => `Edit(**/*.${extension})`),
+      `Edit(/.code-reviews/${basename(reportPath)})`,
+    ],
+    denied: PROTECTED_PATHS.map(path => `Edit(${path})`),
+  });
+}
+
+export async function readFactoryDevelopmentInputs(details: FactoryFlowDetails) {
+  const paths = await readReadyStageDocuments(
+    details,
+    ['triage', 'planning'],
+    'Os documentos das Etapas 01 e 02 são obrigatórios.',
+  );
+  return {
+    understandingReportPath: paths.triage,
+    implementationPlanPath: paths.planning,
+    approvedNotes: details.stages.find(stage => stage.name === 'development')?.approvedNotes,
+  };
+}
+
+export function isImplementationReport(content: string): boolean {
+  const statusTableRow =
+    /^\|.+?\|\s*(?:\*\*)?(?:concluído|parcial|bloqueado|adiado)(?:\*\*)?\s*\|.*\|$/iu;
+  return validateStructuredMarkdownReport(
+    content,
+    IMPLEMENTATION_REPORT_TITLE,
+    IMPLEMENTATION_REPORT_SECTIONS,
+    {
+      [IMPLEMENTATION_REPORT_SECTIONS.planStatus]: body =>
+        body.some(line => statusTableRow.test(line.trim())),
+    },
+  );
+}

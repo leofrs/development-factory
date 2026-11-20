@@ -184,6 +184,13 @@ export const REVIEW_MIGRATIONS: readonly Migration[] = [
       `);
     },
   },
+  {
+    version: 5,
+    name: 'add_factory_development_approved_notes',
+    up(db) {
+      db.exec('ALTER TABLE factory_flow_stages ADD COLUMN approved_notes TEXT;');
+    },
+  },
 ];
 
 function validateMigrations(migrations: readonly Migration[]): void {

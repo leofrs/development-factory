@@ -18,6 +18,20 @@ import {
   buildFactoryArchitecturePrompt,
 } from '../src/prompts/factory-architecture.js';
 import { buildFactoryPlanPrompt } from '../src/prompts/factory-plan.js';
+import {
+  FACTORY_REVIEW_SYSTEM_PROMPT,
+  REVIEW_REPORT_SECTIONS,
+  REVIEW_REPORT_TITLE,
+  buildFactoryReviewPrompt,
+} from '../src/prompts/factory-review.js';
+import {
+  FACTORY_TESTS_SYSTEM_PROMPT,
+  TEST_REPORT_SECTIONS,
+  TEST_REPORT_TITLE,
+  buildFactoryTestsPrompt,
+} from '../src/prompts/factory-tests.js';
+import { buildReviewRunnerArgs, isReviewReport } from '../src/factory-review.js';
+import { buildTestsRunnerArgs, isTestReport } from '../src/factory-tests.js';
 import { createReviewServer } from '../src/server.js';
 
 async function until<T>(probe: () => T | undefined, label: string): Promise<T> {
@@ -116,6 +130,92 @@ test('buildFactoryArchitecturePrompt trata ausência de conteúdo prévio do Blo
     value: 'Ajustar fluxo',
   });
   assert(withoutBlockOne.includes('Nenhum documento prévio do Bloco 1 foi localizado automaticamente.'));
+});
+
+test('prompts, runners e validadores das Etapas 04 (tests) e 05 (review) seguem contratos e permissões', () => {
+  const testsPrompt = buildFactoryTestsPrompt({
+    task: 'PROD-1234',
+    understandingReportPath: '/tmp/repo/.code-reviews/spec.md',
+    implementationPlanPath: '/tmp/repo/.code-reviews/plan.md',
+    implementationReportPath: '/tmp/repo/.code-reviews/dev.md',
+    approvedNotes: 'Priorizar casos de borda na autenticação',
+    reportPath: '/tmp/repo/.code-reviews/tests-report.md',
+  });
+  assert(testsPrompt.includes(FACTORY_TESTS_SYSTEM_PROMPT));
+  assert(testsPrompt.includes('/tmp/repo/.code-reviews/spec.md'));
+  assert(testsPrompt.includes('/tmp/repo/.code-reviews/plan.md'));
+  assert(testsPrompt.includes('/tmp/repo/.code-reviews/dev.md'));
+  assert(testsPrompt.includes('Priorizar casos de borda na autenticação'));
+  assert(testsPrompt.includes(`# ${TEST_REPORT_TITLE}`));
+  for (const heading of Object.values(TEST_REPORT_SECTIONS)) {
+    assert(testsPrompt.includes(`## ${heading}`));
+  }
+
+  const testsArgs = buildTestsRunnerArgs('/tmp/repo/.code-reviews/tests-report.md');
+  assert(testsArgs.includes('--restricted'));
+  assert.equal(testsArgs[testsArgs.indexOf('--tools') + 1], 'Read,Glob,Grep,Edit,Write,Bash');
+  const testsAllowed = testsArgs[testsArgs.indexOf('--allowedTools') + 1] ?? '';
+  assert(testsAllowed.includes('Bash'));
+  assert(testsAllowed.includes('Edit(**/*.test.*)'));
+  assert(testsAllowed.includes('Write(**/fixtures/**)'));
+  assert(testsAllowed.includes('Edit(/.code-reviews/tests-report.md)'));
+  assert.equal(testsAllowed.includes('Edit(**/*.ts)'), false);
+  const testsDenied = testsArgs[testsArgs.indexOf('--disallowedTools') + 1] ?? '';
+  assert(testsDenied.includes('Bash(git push*)'));
+  assert(testsDenied.includes('Edit(**/.git/**)'));
+
+  const validTestReport = [
+    `# ${TEST_REPORT_TITLE}`,
+    `## ${TEST_REPORT_SECTIONS.testFiles}`,
+    '- tests/auth.test.ts',
+    `## ${TEST_REPORT_SECTIONS.executedCommands}`,
+    '- npm test (exit 0)',
+    `## ${TEST_REPORT_SECTIONS.results}`,
+    '10 testes passaram.',
+  ].join('\n');
+  assert.equal(isTestReport(validTestReport), true);
+  assert.equal(isTestReport(`# ${TEST_REPORT_TITLE}\n\nIncompleto.`), false);
+
+  const reviewPrompt = buildFactoryReviewPrompt({
+    task: 'PROD-1234',
+    understandingReportPath: '/tmp/repo/.code-reviews/spec.md',
+    implementationPlanPath: '/tmp/repo/.code-reviews/plan.md',
+    implementationReportPath: '/tmp/repo/.code-reviews/dev.md',
+    testReportPath: '/tmp/repo/.code-reviews/tests-report.md',
+    approvedNotes: 'Auditar exposição de tokens nos logs',
+    reportPath: '/tmp/repo/.code-reviews/review-report.md',
+  });
+  assert(reviewPrompt.includes(FACTORY_REVIEW_SYSTEM_PROMPT));
+  assert(reviewPrompt.includes('/tmp/repo/.code-reviews/tests-report.md'));
+  assert(reviewPrompt.includes('Auditar exposição de tokens nos logs'));
+  assert(reviewPrompt.includes(`# ${REVIEW_REPORT_TITLE}`));
+  for (const heading of Object.values(REVIEW_REPORT_SECTIONS)) {
+    assert(reviewPrompt.includes(`## ${heading}`));
+  }
+
+  const reviewArgs = buildReviewRunnerArgs('/tmp/repo/.code-reviews/review-report.md');
+  assert(reviewArgs.includes('--restricted'));
+  assert.equal(reviewArgs[reviewArgs.indexOf('--tools') + 1], 'Read,Glob,Grep,Edit,Write,Bash');
+  const reviewAllowed = reviewArgs[reviewArgs.indexOf('--allowedTools') + 1] ?? '';
+  assert(reviewAllowed.includes('Bash(git diff*)'));
+  assert(reviewAllowed.includes('Bash(git status*)'));
+  assert(reviewAllowed.includes('Bash(git log*)'));
+  assert(reviewAllowed.includes('Edit(/.code-reviews/review-report.md)'));
+  assert.equal(reviewAllowed.includes('Edit(**/*.test.*)'), false);
+  assert.equal(reviewAllowed.includes('Edit(**/*.ts)'), false);
+  assert.equal(reviewAllowed.split(',').includes('Bash'), false);
+
+  const validReviewReport = [
+    `# ${REVIEW_REPORT_TITLE}`,
+    `## ${REVIEW_REPORT_SECTIONS.executiveSummary}`,
+    'Alterações aderentes aos requisitos.',
+    `## ${REVIEW_REPORT_SECTIONS.findings}`,
+    'Nenhum bloqueador crítico encontrado.',
+    `## ${REVIEW_REPORT_SECTIONS.verdict}`,
+    'Aprovado para PR.',
+  ].join('\n');
+  assert.equal(isReviewReport(validReviewReport), true);
+  assert.equal(isReviewReport(`# ${REVIEW_REPORT_TITLE}\n\nIncompleto.`), false);
 });
 
 test('start_factory executa PTY, salva plano em Markdown e permite leitura formatada via API', { timeout: 30000 }, async context => {

@@ -7,7 +7,6 @@ import {
   GitBranch,
   GitPullRequest,
   Minimize2,
-  Square,
   Terminal as TerminalIcon,
 } from 'lucide-react';
 import { Terminal } from '@xterm/xterm';
@@ -42,7 +41,6 @@ export function TerminalModal({
   session,
   sessionSummary,
   onMinimize,
-  onStopSession,
   onBindSessionId,
   theme,
   onToggleTheme,
@@ -52,7 +50,6 @@ export function TerminalModal({
   session: TerminalSession;
   sessionSummary?: BackgroundSessionSummary;
   onMinimize: () => void;
-  onStopSession?: (sessionId: string) => Promise<BackgroundSessionSummary>;
   onBindSessionId?: (sessionId: string) => void;
   theme: Theme;
   onToggleTheme: () => void;
@@ -71,7 +68,6 @@ export function TerminalModal({
   const [exitCode, setExitCode] = useState<number>();
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
-  const [stopping, setStopping] = useState(false);
   const [attachedSession, setAttachedSession] = useState<BackgroundSessionSummary>();
   const [history, setHistory] = useState<Extract<ServerMessage, { type: 'history' }>>();
 
@@ -125,7 +121,6 @@ export function TerminalModal({
       }
       setStatus('connecting');
       setError('');
-      setStopping(false);
       setAttachedSession(undefined);
       setHistory(undefined);
       const terminal = new Terminal({
@@ -217,9 +212,6 @@ export function TerminalModal({
           started = message.state === 'running';
           setStatus(message.state);
           setExitCode(message.exitCode);
-          if (message.state === 'exited') {
-            setStopping(false);
-          }
           if (message.sessionId) {
             onBindSessionIdRef.current?.(message.sessionId);
           }
@@ -235,7 +227,6 @@ export function TerminalModal({
           // Eventos de ciclo de vida do review/fluxo (mantidos para compatibilidade).
         } else if (message.type === 'error') {
           setError(message.message);
-          setStopping(false);
           if (!started) {
             setStatus('exited');
           }
@@ -255,7 +246,6 @@ export function TerminalModal({
           setError('A conexão com o backend foi interrompida. Reabra o terminal para continuar.');
         }
         started = false;
-        setStopping(false);
         setStatus('exited');
       };
       listeners.push(terminal.onData(data => { if (started) send({ type: 'input', data }); }));
@@ -322,33 +312,6 @@ export function TerminalModal({
     } catch { if (terminalRef.current) setError('Não foi possível copiar a saída. Autorize o clipboard no navegador.'); }
   }
 
-  async function handleStopProcess() {
-    if (!effectiveSessionId || stopping || status === 'exited') {
-      return;
-    }
-    setStopping(true);
-    setError('');
-    try {
-      if (onStopSession) {
-        const updated = await onStopSession(effectiveSessionId);
-        setAttachedSession(updated);
-      } else if (wsRef.current?.readyState === WebSocket.OPEN) {
-        const stopMessage: ClientMessage = { type: 'stop_session', sessionId: effectiveSessionId };
-        wsRef.current.send(JSON.stringify(stopMessage));
-      } else {
-        setError('Conexão indisponível para encerrar o processo.');
-        setStopping(false);
-      }
-    } catch (stopError) {
-      setError(
-        stopError instanceof Error
-          ? stopError.message
-          : 'Não foi possível encerrar o processo no servidor.',
-      );
-      setStopping(false);
-    }
-  }
-
   const TargetIcon = session.mode === 'factory'
     ? Compass
     : sessionRequest
@@ -366,12 +329,23 @@ export function TerminalModal({
       : sessionRequest.value
     : effectiveSummary?.title ?? 'Sessão em background';
   const repoPath = sessionRequest?.repoPath ?? effectiveSummary?.repoPath ?? '';
+  const isReportStage =
+    session.mode === 'factory' &&
+    (effectiveSummary?.stage === 'development' ||
+      effectiveSummary?.stage === 'tests' ||
+      effectiveSummary?.stage === 'review');
   const savedLabel = session.mode === 'factory'
     ? history?.state === 'saved'
-      ? 'Plano salvo'
+      ? isReportStage
+        ? 'Relatório salvo'
+        : 'Plano salvo'
       : history?.state === 'incomplete'
-        ? 'Plano incompleto'
-        : 'Plano em elaboração'
+        ? isReportStage
+          ? 'Relatório incompleto'
+          : 'Plano incompleto'
+        : isReportStage
+          ? 'Relatório em elaboração'
+          : 'Plano em elaboração'
     : history?.state === 'saved'
       ? 'Parecer salvo'
       : history?.state === 'incomplete'
@@ -387,9 +361,6 @@ export function TerminalModal({
           <ThemeToggle theme={theme} onToggle={onToggleTheme} />
           <button type="button" className="modal-button" onClick={() => void copyOutput()}>{copied ? <Check size={13} /> : <Copy size={13} />}<span>{copied ? 'Copiado!' : 'Copiar saída'}</span></button>
           <button type="button" className="modal-button" onClick={onMinimize} title="Fechar janela e manter execução em segundo plano"><Minimize2 size={13} /><span>{status === 'exited' ? 'Fechar' : 'Segundo plano'}</span></button>
-          {status !== 'exited' && (
-            <button type="button" className="modal-button border-danger/20 text-danger hover:bg-danger/10 disabled:cursor-not-allowed disabled:opacity-50" disabled={!effectiveSessionId || stopping} aria-busy={stopping} onClick={() => void handleStopProcess()}><Square size={11} /><span>{stopping ? 'Encerrando...' : 'Encerrar processo'}</span></button>
-          )}
         </div>
       </header>
       {error && <div role="alert" className="border-b border-danger/15 bg-danger/5 px-5 py-3 text-xs leading-5 text-danger">{error}</div>}

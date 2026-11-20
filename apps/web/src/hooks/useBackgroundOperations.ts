@@ -12,6 +12,7 @@ import type {
   FactoryRequest,
   FactoryStageName,
   RerunFactoryStageRequest,
+  ReturnFactoryStageRequest,
   ReviewRequest,
 } from '@development-factory/shared';
 import {
@@ -20,6 +21,7 @@ import {
   createFactoryFlow,
   fetchFactoryFlows,
   rerunFactoryFlowStage,
+  returnFactoryFlowStage,
   type AdvanceFactoryFlowResult,
   type CreateFactoryFlowResult,
   type RerunFactoryFlowResult,
@@ -81,6 +83,10 @@ export interface BackgroundOperationsState {
     flowId: string,
     request?: RerunFactoryStageRequest,
   ) => Promise<RerunFactoryFlowResult>;
+  returnFlowStage: (
+    flowId: string,
+    request: ReturnFactoryStageRequest,
+  ) => Promise<AdvanceFactoryFlowResult>;
   cancelFlow: (flowId: string, request?: CancelFactoryFlowRequest) => Promise<FactoryFlow>;
   openTerminal: (sessionId: string) => void;
   openFlowTerminal: (flowId: string) => boolean;
@@ -107,7 +113,30 @@ function sortFactoryFlowsByRecent(flowsMap: ReadonlyMap<string, FactoryFlow>): F
   );
 }
 
-function buildNotification(
+const REPORT_STAGE_NOTIFICATION_LABELS: Partial<
+  Record<
+    FactoryStageName,
+    {
+      readonly saved: string;
+      readonly completed: string;
+    }
+  >
+> = {
+  development: {
+    saved: 'Relatório de implementação salvo',
+    completed: 'Desenvolvimento concluído',
+  },
+  tests: {
+    saved: 'Relatório de testes salvo',
+    completed: 'Testes concluídos',
+  },
+  review: {
+    saved: 'Relatório de code review salvo',
+    completed: 'Code review concluído',
+  },
+};
+
+export function buildNotification(
   session: BackgroundSessionSummary,
   kind: 'history_saved' | 'finished',
 ): AppNotification {
@@ -118,9 +147,14 @@ function buildNotification(
       : null;
   const flowId = session.flowId ?? null;
   const stage = session.stage ?? null;
+  const reportLabels =
+    session.mode === 'factory' && stage ? REPORT_STAGE_NOTIFICATION_LABELS[stage] : undefined;
 
   if (kind === 'history_saved') {
-    const message = session.mode === 'factory' ? 'Plano salvo' : 'Parecer salvo';
+    const message =
+      session.mode === 'factory'
+        ? (reportLabels?.saved ?? 'Plano salvo')
+        : 'Parecer salvo';
     return {
       id,
       sessionId: session.sessionId,
@@ -186,7 +220,12 @@ function buildNotification(
       status: session.status,
       historyState: session.historyState,
       reportPath,
-      message: session.mode === 'factory' ? 'Plano incompleto' : 'Parecer incompleto',
+      message:
+        session.mode === 'factory'
+          ? reportLabels
+            ? 'Relatório incompleto'
+            : 'Plano incompleto'
+          : 'Parecer incompleto',
       severity: 'warning',
       createdAt: session.finishedAt ?? new Date().toISOString(),
     };
@@ -203,7 +242,10 @@ function buildNotification(
     status: session.status,
     historyState: session.historyState,
     reportPath,
-    message: session.mode === 'factory' ? 'Plano salvo' : 'Parecer salvo',
+    message:
+      session.mode === 'factory'
+        ? (reportLabels?.completed ?? 'Plano salvo')
+        : 'Parecer salvo',
     severity: 'success',
     createdAt: session.finishedAt ?? new Date().toISOString(),
   };
@@ -592,6 +634,21 @@ export function useBackgroundOperations(): BackgroundOperationsState {
     [upsertFactoryFlow, upsertSession],
   );
 
+  const returnFlowStage = useCallback(
+    async (
+      flowId: string,
+      request: ReturnFactoryStageRequest,
+    ): Promise<AdvanceFactoryFlowResult> => {
+      const result = await returnFactoryFlowStage(flowId, request);
+      upsertFactoryFlow(result.flow);
+      if (result.session) {
+        upsertSession(result.session);
+      }
+      return result;
+    },
+    [upsertFactoryFlow, upsertSession],
+  );
+
   const cancelFlow = useCallback(
     async (flowId: string, request?: CancelFactoryFlowRequest): Promise<FactoryFlow> => {
       const updated = await cancelFactoryFlow(flowId, request);
@@ -687,6 +744,7 @@ export function useBackgroundOperations(): BackgroundOperationsState {
     createFlow,
     advanceFlowStage,
     rerunFlowStage,
+    returnFlowStage,
     cancelFlow,
     openTerminal,
     openFlowTerminal,

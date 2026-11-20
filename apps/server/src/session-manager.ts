@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { existsSync, statSync } from 'node:fs';
+import { existsSync, realpathSync, statSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import * as pty from 'node-pty';
 import { WebSocket } from 'ws';
@@ -22,11 +22,17 @@ import {
   type ServerMessage,
 } from '@development-factory/shared';
 import { resolveReviewReportDirectory } from './artifacts.js';
+import { buildDevelopmentRunnerArgs, readFactoryDevelopmentInputs } from './factory-development.js';
 import { FactoryFlowServiceError, type FactoryFlowService } from './factory-flow-service.js';
+import { buildReviewRunnerArgs, readFactoryReviewInputs } from './factory-review.js';
+import { buildTestsRunnerArgs, readFactoryTestsInputs } from './factory-tests.js';
 import { createFactoryHistory } from './history.js';
 import { buildCodeReviewPrompt } from './prompts/code-review.js';
 import { buildFactoryArchitecturePrompt } from './prompts/factory-architecture.js';
+import { buildFactoryDevelopmentPrompt } from './prompts/factory-development.js';
 import { buildFactoryPlanPrompt } from './prompts/factory-plan.js';
+import { buildFactoryReviewPrompt } from './prompts/factory-review.js';
+import { buildFactoryTestsPrompt } from './prompts/factory-tests.js';
 import { createReviewReportDraft } from './review-report.js';
 import { ReviewServiceError, type ReviewService } from './review-service.js';
 import {
@@ -47,6 +53,7 @@ export type SessionManagerErrorCode =
   | 'SESSION_NOT_FOUND'
   | 'INVALID_REPO_PATH'
   | 'INVALID_REPORT_DIRECTORY'
+  | 'FACTORY_STAGE_CONFLICT'
   | 'MAX_SESSIONS_REACHED'
   | 'SESSION_NOT_RUNNING'
   | 'SESSION_CREATION_FAILED';
@@ -113,11 +120,60 @@ function buildFactoryFlowError(code: string, message: string, retryable: boolean
 const STAGE_ARTIFACT_KIND: Readonly<Record<FactoryStageName, FactoryFlowArtifactKind>> = {
   triage: 'specification',
   planning: 'plan',
-  development: 'patch',
+  development: 'implementation_report',
   tests: 'test_report',
   review: 'review_report',
   pr: 'pr_summary',
 };
+
+type RestrictedRunnerStage = 'development' | 'tests' | 'review';
+
+const RESTRICTED_RUNNER_STAGE_CONFIG: Readonly<
+  Record<
+    RestrictedRunnerStage,
+    {
+      readonly label: string;
+      readonly previousLabel: string;
+      readonly mutatesRepo: boolean;
+      readonly missingInputsError: string;
+      readonly incompleteArtifactError: string;
+    }
+  >
+> = {
+  development: {
+    label: 'Desenvolvimento',
+    previousLabel: 'Planejamento',
+    mutatesRepo: true,
+    missingInputsError:
+      'Não foi possível ler os artefatos das Etapas 01 e 02 para o Desenvolvimento.',
+    incompleteArtifactError:
+      'O Claude encerrou sem entregar um Relatório de Implementação válido.',
+  },
+  tests: {
+    label: 'Testes',
+    previousLabel: 'Desenvolvimento',
+    mutatesRepo: true,
+    missingInputsError:
+      'Não foi possível ler os artefatos das Etapas 01, 02 e 03 para os Testes.',
+    incompleteArtifactError:
+      'O Claude encerrou sem entregar um Relatório de Testes válido.',
+  },
+  review: {
+    label: 'Code Review',
+    previousLabel: 'Testes',
+    mutatesRepo: false,
+    missingInputsError:
+      'Não foi possível ler os artefatos das Etapas 01 a 04 para o Code Review.',
+    incompleteArtifactError:
+      'O Claude encerrou sem entregar um Relatório de Code Review válido.',
+  },
+};
+
+function isRestrictedRunnerStage(
+  stage: FactoryStageName | undefined,
+): stage is RestrictedRunnerStage {
+  return stage === 'development' || stage === 'tests' || stage === 'review';
+}
 
 function formatReviewTitle(request: ReviewRequest): string {
   return request.targetType === 'pr' ? `PR #${request.identifier}` : `Branch ${request.identifier}`;
@@ -188,6 +244,7 @@ export class SessionManager {
   readonly #bufferMaxBytes: number;
   readonly #now: () => number;
   readonly #runtimes = new Map<string, SessionRuntime>();
+  readonly #startingMutatingRepos = new Set<string>();
   #cleanupTimer: ReturnType<typeof setInterval> | undefined;
 
   constructor(reviewService: ReviewService, options: SessionManagerOptions = {}) {
@@ -517,6 +574,16 @@ export class SessionManager {
     validateRepoPath(input.repoPath);
     this.#assertCapacity();
 
+    if (input.stage === 'pr' || (isRestrictedRunnerStage(input.stage) && !input.flowId)) {
+      throw new SessionManagerError(
+        'FACTORY_STAGE_CONFLICT',
+        input.stage === 'pr'
+          ? 'A execução da Etapa 06 (PR) ainda não está disponível.'
+          : `Avance o fluxo do ${RESTRICTED_RUNNER_STAGE_CONFIG[input.stage].previousLabel} para ${RESTRICTED_RUNNER_STAGE_CONFIG[input.stage].label} antes de iniciar a sessão.`,
+        409,
+      );
+    }
+
     let activeFactorySession: ActiveFactorySession | undefined;
     let flowDetails: FactoryFlowDetails | undefined;
     if (this.#factoryFlowService) {
@@ -562,6 +629,131 @@ export class SessionManager {
       }
     }
 
+    const stage = activeFactorySession?.stage ?? input.stage ?? 'triage';
+    if (flowDetails?.flow.currentStage === 'pr') {
+      throw new SessionManagerError(
+        'FACTORY_STAGE_CONFLICT',
+        'A execução da Etapa 06 (PR) ainda não está disponível.',
+        409,
+      );
+    }
+    if (!isRestrictedRunnerStage(stage) && !isRestrictedRunnerStage(flowDetails?.flow.currentStage)) {
+      return this.#startFactoryRunner(input, stage, activeFactorySession, flowDetails);
+    }
+    if (
+      !isRestrictedRunnerStage(stage) ||
+      !flowDetails ||
+      flowDetails.flow.currentStage !== stage
+    ) {
+      const targetStage = isRestrictedRunnerStage(stage)
+        ? stage
+        : (flowDetails?.flow.currentStage as RestrictedRunnerStage);
+      const stageMeta = RESTRICTED_RUNNER_STAGE_CONFIG[targetStage];
+      throw new SessionManagerError(
+        'FACTORY_STAGE_CONFLICT',
+        `Avance o fluxo do ${stageMeta.previousLabel} para ${stageMeta.label} antes de iniciar a sessão.`,
+        409,
+      );
+    }
+    const stageMeta = RESTRICTED_RUNNER_STAGE_CONFIG[stage];
+    const repoPath = realpathSync(input.repoPath);
+    if (repoPath !== realpathSync(flowDetails.flow.target.repoPath)) {
+      throw new SessionManagerError(
+        'INVALID_REPO_PATH',
+        `Use o repositório de destino do fluxo para executar ${stageMeta.label}.`,
+        400,
+      );
+    }
+    if (stageMeta.mutatesRepo) {
+      const hasMutatingSessionOnRepo =
+        this.#startingMutatingRepos.has(repoPath) ||
+        [...this.#runtimes.values()].some(({ session }) => {
+          const activeStage = session.activeFactorySession?.stage;
+          return (
+            session.status === 'running' &&
+            session.repoPath === repoPath &&
+            isRestrictedRunnerStage(activeStage) &&
+            RESTRICTED_RUNNER_STAGE_CONFIG[activeStage].mutatesRepo
+          );
+        });
+      if (hasMutatingSessionOnRepo) {
+        throw new SessionManagerError(
+          'FACTORY_STAGE_CONFLICT',
+          `Já existe uma sessão em execução modificando este repositório (${stageMeta.label}).`,
+          409,
+        );
+      }
+
+      this.#startingMutatingRepos.add(repoPath);
+    }
+    try {
+      return await this.#startFactoryRunner(
+        { ...input, repoPath, value: flowDetails.flow.target.value },
+        stage,
+        activeFactorySession,
+        flowDetails,
+      );
+    } finally {
+      if (stageMeta.mutatesRepo) {
+        this.#startingMutatingRepos.delete(repoPath);
+      }
+    }
+  }
+
+  async #prepareRestrictedRunnerFactory(
+    stage: RestrictedRunnerStage,
+    flowDetails: FactoryFlowDetails,
+    task: string,
+  ): Promise<(reportPath: string) => { prompt: string; runnerArgs: string[] }> {
+    if (stage === 'development') {
+      const inputs = await readFactoryDevelopmentInputs(flowDetails);
+      return reportPath => ({
+        prompt: buildFactoryDevelopmentPrompt({ ...inputs, task, reportPath }),
+        runnerArgs: buildDevelopmentRunnerArgs(reportPath),
+      });
+    }
+    if (stage === 'tests') {
+      const inputs = await readFactoryTestsInputs(flowDetails);
+      return reportPath => ({
+        prompt: buildFactoryTestsPrompt({ ...inputs, task, reportPath }),
+        runnerArgs: buildTestsRunnerArgs(reportPath),
+      });
+    }
+    const inputs = await readFactoryReviewInputs(flowDetails);
+    return reportPath => ({
+      prompt: buildFactoryReviewPrompt({ ...inputs, task, reportPath }),
+      runnerArgs: buildReviewRunnerArgs(reportPath),
+    });
+  }
+
+  async #startFactoryRunner(
+    input: StartFactorySessionInput,
+    stage: FactoryStageName,
+    activeFactorySession?: ActiveFactorySession,
+    flowDetails?: FactoryFlowDetails,
+  ): Promise<ManagedSession> {
+    let buildRunnerConfig: ((reportPath: string) => { prompt: string; runnerArgs: string[] }) | undefined;
+    if (isRestrictedRunnerStage(stage) && flowDetails) {
+      try {
+        buildRunnerConfig = await this.#prepareRestrictedRunnerFactory(stage, flowDetails, input.value);
+      } catch {
+        throw new SessionManagerError(
+          'FACTORY_STAGE_CONFLICT',
+          RESTRICTED_RUNNER_STAGE_CONFIG[stage].missingInputsError,
+          409,
+        );
+      }
+      const current = this.#factoryFlowService?.getFlow(flowDetails.flow.id).flow;
+      if (!current || isFinalFactoryFlowState(current.state) || current.currentStage !== stage) {
+        throw new SessionManagerError(
+          'FACTORY_STAGE_CONFLICT',
+          `O fluxo mudou enquanto os artefatos eram preparados para ${RESTRICTED_RUNNER_STAGE_CONFIG[stage].label}.`,
+          409,
+        );
+      }
+      this.#assertCapacity();
+    }
+
     const session: ManagedSession = {
       sessionId: randomUUID(),
       mode: 'factory',
@@ -595,7 +787,7 @@ export class SessionManager {
     let factoryHistory: ReturnType<typeof createFactoryHistory>;
     try {
       factoryHistory = createFactoryHistory(
-        input,
+        { ...input, stage },
         state => {
           session.historyState = state;
           if (state === 'saved') {
@@ -627,17 +819,17 @@ export class SessionManager {
       );
     } catch (error) {
       const detail = error instanceof Error ? error.message : 'Falha desconhecida';
-      if (this.#factoryFlowService && activeFactorySession) {
+      if (this.#factoryFlowService && activeFactorySession && !isRestrictedRunnerStage(stage)) {
         await this.#failFactoryStart(
           activeFactorySession.flowId,
           activeFactorySession.stage,
           'FACTORY_HISTORY_INIT_FAILED',
-          `Não foi possível preparar os arquivos do planejamento: ${detail}`,
+          `Não foi possível preparar os arquivos da etapa: ${detail}`,
         );
       }
       throw new SessionManagerError(
         'SESSION_CREATION_FAILED',
-        `Não foi possível preparar os arquivos do planejamento: ${detail}`,
+        `Não foi possível preparar os arquivos da etapa: ${detail}`,
         500,
       );
     }
@@ -646,21 +838,27 @@ export class SessionManager {
     session.reportPath = factoryHistory.reportPath;
     session.sessionPath = factoryHistory.sessionPath;
 
-    const stage = activeFactorySession?.stage ?? input.stage ?? 'triage';
-    const prompt = await this.#buildFactoryStagePrompt(
-      input,
-      stage,
-      factoryHistory.reportPath,
-      flowDetails,
-    );
-
-    const allowedTools = buildFactoryAllowedTools(stage, factoryHistory.reportPath);
+    let prompt: string;
+    let runnerArgs: string[];
+    if (buildRunnerConfig) {
+      const prepared = buildRunnerConfig(factoryHistory.reportPath);
+      prompt = prepared.prompt;
+      runnerArgs = prepared.runnerArgs;
+    } else {
+      prompt = await this.#buildFactoryStagePrompt(
+        input,
+        stage,
+        factoryHistory.reportPath,
+        flowDetails,
+      );
+      runnerArgs = ['--allowedTools', buildFactoryAllowedTools(stage, factoryHistory.reportPath).join(',')];
+    }
 
     let child: pty.IPty;
     try {
       child = pty.spawn(
         'claude',
-        ['--verbose', '--allowedTools', allowedTools.join(','), '-p', prompt],
+        ['--verbose', ...runnerArgs, '-p', prompt],
         {
           name: 'xterm-256color',
           cols: input.cols,
@@ -673,7 +871,7 @@ export class SessionManager {
       const detail = error instanceof Error ? error.message : 'Falha desconhecida';
       session.history = undefined;
       factoryHistory.finish(`falha ao iniciar processo PTY: ${detail}`);
-      if (this.#factoryFlowService && activeFactorySession) {
+      if (this.#factoryFlowService && activeFactorySession && !isRestrictedRunnerStage(stage)) {
         await this.#failFactoryStart(
           activeFactorySession.flowId,
           activeFactorySession.stage,
@@ -908,7 +1106,10 @@ export class SessionManager {
     disposePtyProcess(session, false);
     const currentHistory = session.history;
     session.history = undefined;
-    currentHistory?.finish(`processo finalizado com código ${exitCode}`);
+    currentHistory?.finish(
+      `processo finalizado com código ${exitCode}`,
+      !isRestrictedRunnerStage(session.activeFactorySession?.stage) || exitCode === 0,
+    );
 
     session.exitCode = exitCode;
     session.signal = signal ?? null;
@@ -1059,7 +1260,9 @@ export class SessionManager {
               status: 'incomplete',
               error: buildFactoryFlowError(
                 'FACTORY_ARTIFACT_INCOMPLETE',
-                'O processo PTY encerrou sem salvar o artefato final da etapa.',
+                isRestrictedRunnerStage(stage)
+                  ? RESTRICTED_RUNNER_STAGE_CONFIG[stage].incompleteArtifactError
+                  : 'O processo PTY encerrou sem salvar o artefato final da etapa.',
                 true,
               ),
             },
@@ -1111,7 +1314,11 @@ export class SessionManager {
       `Processo PTY encerrado com código ${exitCode}.`,
       true,
     );
-    if (session.reportPath && session.historyState !== 'saved' && !runtime.factoryReportRegistered) {
+    if (
+      session.reportPath &&
+      (isRestrictedRunnerStage(stage) || session.historyState !== 'saved') &&
+      !runtime.factoryReportRegistered
+    ) {
       runtime.factoryReportRegistered = true;
       await this.#factoryFlowService.registerArtifact(
         flowId,
@@ -1276,7 +1483,7 @@ export class SessionManager {
 
     const currentHistory = session.history;
     session.history = undefined;
-    currentHistory?.finish(reason);
+    currentHistory?.finish(reason, !isRestrictedRunnerStage(session.activeFactorySession?.stage));
 
     session.status = 'cancelled';
     session.finishedAt = new Date(this.#now()).toISOString();

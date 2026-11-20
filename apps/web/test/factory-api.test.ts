@@ -12,6 +12,7 @@ import {
   createFactoryFlow,
   fetchFactoryFlowDetails,
   fetchFactoryFlows,
+  returnFactoryFlowStage,
 } from '../src/api/factory-flows';
 import { parseAppEventMessage } from '../src/api/sessions';
 import {
@@ -82,6 +83,9 @@ test('utilitários de factory-flow-status retornam rótulos e estados consistent
   assert.equal(getFactoryStageStep('pr'), '06');
   assert.equal(getFactoryInputTypeLabel('jira_key'), 'Chave JIRA');
   assert.equal(getFactoryArtifactKindLabel('specification'), 'Especificação');
+  assert.equal(getFactoryArtifactKindLabel('implementation_report'), 'Relatório de Implementação');
+  assert.equal(getFactoryArtifactKindLabel('test_report'), 'Relatório de testes');
+  assert.equal(getFactoryArtifactKindLabel('review_report'), 'Code Review');
 
   assert.equal(isFactoryFlowActivelyRunning({ state: 'running' }), true);
   assert.equal(isFactoryFlowActivelyRunning({ state: 'queued' }), true);
@@ -94,10 +98,10 @@ test('utilitários de factory-flow-status retornam rótulos e estados consistent
 
   assert.equal(canOpenTerminalForFactoryStage('triage'), false);
   assert.equal(canOpenTerminalForFactoryStage('planning'), false);
-  assert.equal(canOpenTerminalForFactoryStage('development'), true);
-  assert.equal(canOpenTerminalForFactoryStage('tests'), true);
-  assert.equal(canOpenTerminalForFactoryStage('review'), true);
-  assert.equal(canOpenTerminalForFactoryStage('pr'), true);
+  assert.equal(canOpenTerminalForFactoryStage('development'), false);
+  assert.equal(canOpenTerminalForFactoryStage('tests'), false);
+  assert.equal(canOpenTerminalForFactoryStage('review'), false);
+  assert.equal(canOpenTerminalForFactoryStage('pr'), false);
 });
 
 test('parseAppEventMessage valida eventos de fluxo da Factory via SSE', () => {
@@ -179,6 +183,32 @@ test('cliente HTTP factory-flows cria, lista, detalha e cancela fluxos com valid
       );
     }
 
+    if (url.endsWith(`/api/factory/flows/${flow.id}/return`) && method === 'POST') {
+      return new Response(
+        JSON.stringify({
+          contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+          flow: {
+            ...flow,
+            currentStage: 'development',
+            state: 'waiting_action',
+            currentSessionId: null,
+            updatedAt: '2026-11-19T12:01:00.000Z',
+            transitions: [
+              ...flow.transitions,
+              {
+                from: 'running',
+                to: 'waiting_action',
+                stage: 'development',
+                at: '2026-11-19T12:01:00.000Z',
+                reason: 'Retorno para correções',
+              },
+            ],
+          },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
+
     if (url.endsWith(`/api/factory/flows/${flow.id}/cancel`) && method === 'POST') {
       return new Response(
         JSON.stringify({
@@ -235,6 +265,12 @@ test('cliente HTTP factory-flows cria, lista, detalha e cancela fluxos com valid
   const cancelled = await cancelFactoryFlow(flow.id, { reason: 'Teste' });
   assert.equal(cancelled.state, 'cancelled');
 
+  const returned = await returnFactoryFlowStage(flow.id, {
+    targetStage: 'development',
+    approvedNotes: 'Corrigir erro apontado',
+  });
+  assert.equal(returned.flow.currentStage, 'development');
+
   await assert.rejects(
     () => fetchFactoryFlowDetails('99999999-9999-4999-8999-999999999999'),
     (error: unknown) =>
@@ -243,5 +279,5 @@ test('cliente HTTP factory-flows cria, lista, detalha e cancela fluxos com valid
       error.statusCode === 404,
   );
 
-  assert.equal(requests.length, 5);
+  assert.equal(requests.length, 6);
 });

@@ -64,6 +64,16 @@ Abra **Histórico** e selecione **Pareceres salvos** para consultar os reviews, 
 
 Use **Arquivos locais** para navegar pelo WSL e consultar arquivos legados em `.code-reviews/` ou outros arquivos Markdown. Conteúdo Markdown é exibido com tabelas, listas de tarefas e blocos de código. A leitura aceita arquivos regulares de até 5 MiB e não renderiza HTML embutido.
 
+## Etapa 03 da Factory
+
+No card **Planejamento**, confira o Diagnóstico Técnico + Plano de Implementação, preencha **Notas / Decisões Aprovadas** se houver e clique em **Avançar para Desenvolvimento**. A sessão usa o Documento de Entendimento da Triagem, o plano e as notas aprovadas. As notas ficam salvas no fluxo para reexecução.
+
+O Claude Code roda em modo restrito, com ferramentas de leitura e edição autorizadas para código de produção e para o arquivo do relatório. Os padrões de proteção bloqueiam arquivos e diretórios de teste, e a sessão fica sem ferramentas de shell. Use uma versão do Claude Code com suporte a `--restricted`. [Referência do Claude Code CLI](https://code.claude.com/docs/en/cli-reference#cli-flags)
+
+Quando a execução concluir com um relatório válido, abra **Ver artefato** no card **Desenvolvimento**. **Avançar para Testes** entrega o fluxo à Etapa 04. A execução da Etapa 04 será adicionada futuramente.
+
+Cole o prompt operacional definitivo em `FACTORY_DEVELOPMENT_SYSTEM_PROMPT` no arquivo [apps/server/src/prompts/factory-development.ts](apps/server/src/prompts/factory-development.ts).
+
 ## Verificações
 
 ```bash
