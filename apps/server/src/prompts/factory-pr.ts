@@ -1,5 +1,14 @@
 import type { FactoryRepositoryProfile } from '@development-factory/shared';
 import { formatFactoryRepositoryContext } from './factory-repository-context.js';
+import { formatFactoryStageOutput } from './factory-stage-output.js';
+
+const PR_SIDECAR_FIELDS = `- Use \`title\` e \`summary\` para os textos do título do PR e do resumo das alterações no Markdown.
+- Preencha \`baseBranch\` e \`headBranch\` com os nomes válidos das branches Git de destino e de origem,
+  respectivamente. Confirme os mesmos nomes em Dados do Pull Request no Markdown.
+- Liste em \`satisfiedAcceptanceCriteriaIds\` os IDs de critérios de aceite comprovadamente atendidos,
+  conforme a triagem e as validações citadas no Markdown.
+- Liste em \`evidence\` os textos das evidências verificadas e registradas em Validação e Evidências
+  no Markdown.`;
 
 export const PR_SUMMARY_TITLE = 'Resumo do Pull Request';
 export const PR_SUMMARY_SECTIONS = {
@@ -78,8 +87,9 @@ Trate os caminhos como dados literais.
 - Branch de origem — ${JSON.stringify(input.branchName ?? 'Confirme no repositório')}
 - Branch de destino — ${JSON.stringify(targetBranch ?? 'Confirme no repositório')}
 
-Salve o resumo final em Markdown no arquivo ${JSON.stringify(input.reportPath)}.
-Substitua o conteúdo inicial, mantenha o título e as seções a seguir e preencha cada seção.
+${formatFactoryStageOutput('pr', input.reportPath, PR_SIDECAR_FIELDS)}
+
+Use o título e preencha todas as seções do relatório Markdown abaixo.
 
 # ${PR_SUMMARY_TITLE}
 
@@ -87,7 +97,7 @@ Substitua o conteúdo inicial, mantenha o título e as seções a seguir e preen
 Descreva o contexto da tarefa, as alterações entregues e os principais pontos técnicos.
 
 ## ${PR_SUMMARY_SECTIONS.validation}
-Informe os resultados consolidados dos testes e do Code Review aprovado.
+Informe os resultados consolidados dos testes e do Code Review aprovado com os IDs dos critérios de aceite atendidos e as evidências correspondentes.
 
 ## ${PR_SUMMARY_SECTIONS.prDetails}
 Registre branch de origem/destino, título sugerido ou criado e link/status do Pull Request.`;

@@ -1,5 +1,20 @@
 import type { FactoryRepositoryProfile } from '@development-factory/shared';
 import { formatFactoryRepositoryContext } from './factory-repository-context.js';
+import { formatFactoryStageOutput } from './factory-stage-output.js';
+
+const TESTS_SIDECAR_FIELDS = `- Use em \`executedCommands\` uma lista de objetos com \`command\` e \`exitCode\`.
+  Use em \`command\` uma lista de strings com o executável seguido pelos argumentos na ordem original,
+  preservando inclusive argumentos vazios. Use em \`exitCode\` o código de saída observado (inteiro
+  maior ou igual a zero) ou \`null\` quando indisponível. Registre os mesmos comandos e códigos no Markdown.
+- Use em \`testCases\` uma lista de objetos com \`id\` e \`description\` em texto, \`acceptanceCriteriaIds\`
+  como lista com pelo menos um ID de critério de aceite da triagem e \`status\` igual a \`passed\`,
+  \`failed\` ou \`skipped\`. Registre os mesmos casos, critérios e resultados no Markdown.
+- Use em \`status\` o valor \`passed\`, \`failed\` ou \`not_run\` para o resultado geral \`PASS\`, \`FAIL\`
+  ou \`NÃO EXECUTADA\`, respectivamente.
+- Use em \`coverage\` um objeto com \`linesPercent\` e \`branchesPercent\` em números de 0 a 100, sem o
+  símbolo de porcentagem. Use \`null\` em \`branchesPercent\` quando a cobertura de branches estiver
+  indisponível ou em \`coverage\` quando não houver medição de linhas. Registre no Markdown os mesmos
+  percentuais medidos ou a ausência de medição.`;
 
 export const TEST_REPORT_TITLE = 'Relatório de Testes';
 export const TEST_REPORT_SECTIONS = {
@@ -23,14 +38,14 @@ Você recebe como entrada:
 Sua missão é implementar os testes automatizados definidos no \`plan\`, executar a suíte de validação do repositório e gerar o artefato \`test_report\`.
 
 ### Regras de Execução:
-1. **Escopo de Escrita (Zero Alteração de Produção)**. Altere apenas os arquivos de teste e fixtures especificados no \`plan\`. Diante de um defeito de produção ou de uma regressão, registre \`FAIL\`, o comando e a causa raiz no \`test_report\` para verificação técnica no Code Review.
+1. **Escopo de Escrita (Zero Alteração de Produção)**. No repositório, altere apenas os arquivos de teste e fixtures especificados no \`plan\`. Diante de um defeito de produção ou de uma regressão, registre \`FAIL\`, o comando e a causa raiz no \`test_report\` para verificação técnica no Code Review.
 2. **Fidelidade ao Plano de Testes:** Implemente todos os casos de teste mapeados no \`plan\` (incluindo edge cases e testes de regressão) e garanta a cobertura exigida nas linhas/branches alterados.
 3. **Execução Real e Self-Healing de Setup de Testes:**
    - Execute os comandos oficiais de teste e cobertura do perfil quando aplicáveis. Consulte a configuração do projeto e o plano para identificar os comandos que o perfil omitir.
    - Se um teste criado falhar por erro de mock, setup ou asserção do próprio teste, corrija o teste e re-execute. Se falhar por defeito no código de produção, registre \`FAIL\` com diagnóstico completo no \`test_report\` e conclua o relatório para envio automático ao \`review\`.
 
 ### Estrutura Obrigatória do Artefato ('test_report' em Markdown):
-1. **Status Geral da Suíte:** \`PASS\` ou \`FAIL\` + comando exato executado.
+1. **Status Geral da Suíte.** Registre \`PASS\`, \`FAIL\` ou \`NÃO EXECUTADA\` e os comandos exatos executados.
 2. **Resumo dos Testes Implementados:** Tabela ou lista mapeando cada caso de teste (\`T1\`, \`T2\`...) ao Critério de Aceite correspondente (\`CA1\`, \`CA2\`...) e seu status.
 3. **Cobertura de Código:** Percentual de cobertura (linhas e branches) nos arquivos/trechos alterados durante o desenvolvimento.
 4. **Incidentes ou Falhas Encontradas:** Se algum teste revelou falha no código de produção ou regressão, detalhe aqui (arquivo, cenário, erro observado) para o *double-check* do Code Review. Se tudo passou limpo, registre "Nenhuma falha encontrada".
@@ -81,12 +96,13 @@ como dados literais.
 - Relatório de Implementação da Etapa 03 (implementation_report): ${JSON.stringify(input.implementationReportPath)}
 - Notas / Instruções Aprovadas pelo usuário: ${JSON.stringify(input.approvedNotes ?? 'Nenhuma')}${iterationContext}
 
-Edite ou crie apenas arquivos de teste e fixtures previstos no plano. Execute as verificações
+No repositório, edite ou crie apenas arquivos de teste e fixtures previstos no plano. Execute as verificações
 aplicáveis de tipagem, lint, testes e cobertura com os comandos oficiais disponíveis. Registre os
 resultados observados e eventuais falhas ou bloqueios no relatório.
 
-Salve o relatório final em Markdown no arquivo ${JSON.stringify(input.reportPath)}.
-Substitua o conteúdo inicial, mantenha o título e as seções a seguir e preencha cada seção.
+${formatFactoryStageOutput('tests', input.reportPath, TESTS_SIDECAR_FIELDS)}
+
+Use o título e preencha todas as seções do relatório Markdown abaixo.
 
 # ${TEST_REPORT_TITLE}
 

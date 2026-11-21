@@ -1,3 +1,5 @@
+import { formatFactoryStageOutput } from './factory-stage-output.js';
+
 export const REVIEW_REPORT_TITLE = 'Relatório de Code Review';
 export const REVIEW_REPORT_SECTIONS = {
   executiveSummary: 'Resumo Executivo',
@@ -10,6 +12,15 @@ export const REVIEW_VERDICT_LABELS = {
   approvedWithWarnings: 'APROVADO COM RESSALVAS',
   changesRequested: 'REPROVADO / REQUER AJUSTES',
 } as const;
+
+const REVIEW_SIDECAR_FIELDS = `- Use em \`verdict\` o valor correspondente ao Parecer Final do Markdown.
+  - \`approved\` para ${REVIEW_VERDICT_LABELS.approved}
+  - \`approved_with_warnings\` para ${REVIEW_VERDICT_LABELS.approvedWithWarnings}
+  - \`changes_requested\` para ${REVIEW_VERDICT_LABELS.changesRequested}
+- Use em \`findings\` uma lista com um objeto por apontamento registrado no Markdown.
+  Use \`severity\` igual a \`BLOQUEANTE\`, \`SUGESTÃO\` ou \`NIT\`, \`file\` como caminho relativo ao
+  repositório com separador \`/\` e sem segmentos \`..\`, \`line\` como número inteiro positivo e
+  \`explanation\` como texto com a explicação do apontamento.`;
 
 /**
  * Placeholder do System Prompt operacional da Etapa 05 (Code Review).
@@ -90,8 +101,9 @@ Não modifique nenhum arquivo do código ou dos testes do repositório. Audite a
 completude, edge cases, regressões, segurança, padrões do projeto, cobertura de testes e faça o double-check
 de qualquer falha apontada no test_report.
 
-Salve o relatório final em Markdown no arquivo ${JSON.stringify(input.reportPath)}.
-Substitua o conteúdo inicial, mantenha o título e as seções a seguir e preencha cada seção.
+${formatFactoryStageOutput('review', input.reportPath, REVIEW_SIDECAR_FIELDS)}
+
+Use o título e preencha todas as seções do relatório Markdown abaixo.
 
 # ${REVIEW_REPORT_TITLE}
 

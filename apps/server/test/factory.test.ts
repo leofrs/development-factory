@@ -10,11 +10,12 @@ import { test } from 'node:test';
 import { WebSocket } from 'ws';
 import {
   ClientMessageSchema,
+  FACTORY_STAGE_SIDECAR_CONTRACT_VERSION,
   HistoryFileSchema,
   ServerMessageSchema,
   type ServerMessage,
 } from '@development-factory/shared';
-import type { FactoryRepositoryProfile } from '@development-factory/shared';
+import type { FactoryRepositoryProfile, FactoryStageName } from '@development-factory/shared';
 import {
   FACTORY_ARCHITECTURE_SYSTEM_PROMPT,
   buildFactoryArchitecturePrompt,
@@ -115,29 +116,69 @@ test('ClientMessageSchema valida entradas de start_factory', () => {
   assert.equal(validTitle.success, true);
 });
 
-test('buildFactoryPlanPrompt inclui tipo, valor e caminho do relatório', () => {
-  const prompt = buildFactoryPlanPrompt(
-    'jira_key',
-    'PROD-1234',
-    '/tmp/factory-artifacts/flow-1/plano.md',
-  );
+function assertFactoryStageOutput(
+  prompt: string,
+  stage: FactoryStageName,
+  reportPath: string,
+  sidecarFields: readonly string[],
+): void {
+  const sidecarPath = getFactoryStageSidecarPath(reportPath);
+  const versionRule =
+    `Grave o número \`${FACTORY_STAGE_SIDECAR_CONTRACT_VERSION}\` em \`contractVersion\`.`;
+  assert.ok(prompt.includes(`Grave o relatório Markdown em ${JSON.stringify(reportPath)}.`), stage);
+  assert.ok(prompt.includes(`Grave o sidecar JSON em ${JSON.stringify(sidecarPath)}.`), stage);
+  assert.ok(prompt.includes(versionRule), stage);
+  assert.ok(prompt.includes(`Grave o texto \`"${stage}"\` em \`stage\`.`), stage);
+  assert.match(prompt, /JSON puro em UTF-8/, stage);
+  assert.match(prompt, /todos os campos listados e use somente as chaves\s+especificadas/, stage);
+  assert.match(prompt, /Compare o sidecar com o relatório Markdown/, stage);
+  for (const field of sidecarFields) {
+    assert.ok(prompt.includes(`\`${field}\``), `${stage}.${field}`);
+  }
+}
+
+test('buildFactoryPlanPrompt inclui a tarefa e o contrato dos artefatos de triagem', () => {
+  const reportPath = '/tmp/factory-artifacts/flow-1/triagem fase.3.md';
+  const prompt = buildFactoryPlanPrompt('jira_key', 'PROD-1234', reportPath);
   assert(prompt.includes('Chave da tarefa no JIRA: "PROD-1234"'));
-  assert(prompt.includes('/tmp/factory-artifacts/flow-1/plano.md'));
+  assertFactoryStageOutput(prompt, 'triage', reportPath, [
+    'acceptanceCriteria',
+    'id',
+    'description',
+    'negativeScope',
+    'blockers',
+    'jiraContext',
+    'key',
+    'url',
+    'technicalContext',
+  ]);
+  assert.match(prompt, /Use IDs únicos.*mesmos IDs e descrições em Critérios de Aceite/);
+  assert.match(prompt, /Use `null` em `jiraContext` quando não houver uma\s+chave confirmada/);
 });
 
-test('buildFactoryArchitecturePrompt inclui saída do Bloco 1, destino e placeholder do Bloco 2', () => {
+test('buildFactoryArchitecturePrompt descreve a entrada e a entrega do planejamento', () => {
+  const reportPath = '/tmp/factory-artifacts/flow-1/arquitetura.md';
   const prompt = buildFactoryArchitecturePrompt({
     inputType: 'jira_key',
     value: 'PROD-1234',
     understandingDocument: '#### 1. Síntese Central (Core)\nQuando X, deve Y.',
     understandingReportPath: '/tmp/factory-artifacts/flow-1/entendimento.md',
-    reportPath: '/tmp/factory-artifacts/flow-1/arquitetura.md',
+    reportPath,
   });
   assert(prompt.includes('Chave da tarefa no JIRA: "PROD-1234"'));
-  assert(prompt.includes('/tmp/factory-artifacts/flow-1/arquitetura.md'));
   assert(prompt.includes('/tmp/factory-artifacts/flow-1/entendimento.md'));
   assert(prompt.includes('#### 1. Síntese Central (Core)'));
   assert(prompt.includes(FACTORY_ARCHITECTURE_SYSTEM_PROMPT));
+  assertFactoryStageOutput(prompt, 'planning', reportPath, [
+    'pendingDecisions',
+    'question',
+    'options',
+    'recommendedOption',
+    'plannedFiles',
+    'testPlan',
+  ]);
+  assert.match(prompt, /pelo menos dois textos.*`recommendedOption` com o texto exato/);
+  assert.match(prompt, /`plannedFiles`.*caminhos relativos ao repositório/);
 });
 
 test('buildFactoryArchitecturePrompt trata ausência de conteúdo prévio do Bloco 1', () => {
@@ -241,13 +282,14 @@ test('prompts, runners e validadores das Etapas 03 a 06 seguem contratos e permi
   assert(devAllowed.includes('Write(//tmp/factory-artifacts/flow-1/dev-report.json)'));
   assert.equal(devAllowed.includes('.code-reviews'), false);
 
+  const testsReportPath = '/tmp/factory-artifacts/flow-1/tests-report.md';
   const testsPrompt = buildFactoryTestsPrompt({
     task: 'PROD-1234',
     understandingReportPath: '/tmp/factory-artifacts/flow-1/spec.md',
     implementationPlanPath: '/tmp/factory-artifacts/flow-1/plan.md',
     implementationReportPath: '/tmp/factory-artifacts/flow-1/dev.md',
     approvedNotes: 'Priorizar casos de borda na autenticação',
-    reportPath: '/tmp/factory-artifacts/flow-1/tests-report.md',
+    reportPath: testsReportPath,
   });
   assert(testsPrompt.includes(FACTORY_TESTS_SYSTEM_PROMPT));
   assert(testsPrompt.includes('/tmp/factory-artifacts/flow-1/spec.md'));
@@ -258,8 +300,28 @@ test('prompts, runners e validadores das Etapas 03 a 06 seguem contratos e permi
   for (const heading of Object.values(TEST_REPORT_SECTIONS)) {
     assert(testsPrompt.includes(`## ${heading}`));
   }
+  assertFactoryStageOutput(testsPrompt, 'tests', testsReportPath, [
+    'executedCommands',
+    'command',
+    'exitCode',
+    'testCases',
+    'id',
+    'description',
+    'acceptanceCriteriaIds',
+    'status',
+    'coverage',
+    'linesPercent',
+    'branchesPercent',
+  ]);
+  assert.match(
+    testsPrompt,
+    /`command` uma lista de strings com o executável seguido pelos argumentos/,
+  );
+  assert.match(testsPrompt, /`acceptanceCriteriaIds`\s+como lista com pelo menos um ID/);
+  assert.match(testsPrompt, /`passed`,\s+`failed` ou `skipped`/);
+  assert.match(testsPrompt, /`passed`, `failed` ou `not_run`/);
 
-  const testsArgs = buildTestsRunnerArgs('/tmp/factory-artifacts/flow-1/tests-report.md');
+  const testsArgs = buildTestsRunnerArgs(testsReportPath);
   assert(testsArgs.includes('--restricted'));
   assert.equal(testsArgs[testsArgs.indexOf('--tools') + 1], 'Read,Glob,Grep,Edit,Write,Bash');
   const testsAllowed = testsArgs[testsArgs.indexOf('--allowedTools') + 1] ?? '';
@@ -286,6 +348,7 @@ test('prompts, runners e validadores das Etapas 03 a 06 seguem contratos e permi
   assert.equal(isTestReport(validTestReport), true);
   assert.equal(isTestReport(`# ${TEST_REPORT_TITLE}\n\nIncompleto.`), false);
 
+  const reviewReportPath = '/tmp/factory-artifacts/flow-1/review-report.md';
   const reviewPrompt = buildFactoryReviewPrompt({
     task: 'PROD-1234',
     understandingReportPath: '/tmp/factory-artifacts/flow-1/spec.md',
@@ -293,7 +356,7 @@ test('prompts, runners e validadores das Etapas 03 a 06 seguem contratos e permi
     implementationReportPath: '/tmp/factory-artifacts/flow-1/dev.md',
     testReportPath: '/tmp/factory-artifacts/flow-1/tests-report.md',
     approvedNotes: 'Auditar exposição de tokens nos logs',
-    reportPath: '/tmp/factory-artifacts/flow-1/review-report.md',
+    reportPath: reviewReportPath,
   });
   assert(reviewPrompt.includes(FACTORY_REVIEW_SYSTEM_PROMPT));
   assert(reviewPrompt.includes('/tmp/factory-artifacts/flow-1/tests-report.md'));
@@ -302,8 +365,25 @@ test('prompts, runners e validadores das Etapas 03 a 06 seguem contratos e permi
   for (const heading of Object.values(REVIEW_REPORT_SECTIONS)) {
     assert(reviewPrompt.includes(`## ${heading}`));
   }
+  assertFactoryStageOutput(reviewPrompt, 'review', reviewReportPath, [
+    'verdict',
+    'findings',
+    'severity',
+    'file',
+    'line',
+    'explanation',
+  ]);
+  const verdictMappings = {
+    approved: REVIEW_VERDICT_LABELS.approved,
+    approved_with_warnings: REVIEW_VERDICT_LABELS.approvedWithWarnings,
+    changes_requested: REVIEW_VERDICT_LABELS.changesRequested,
+  };
+  for (const [verdict, label] of Object.entries(verdictMappings)) {
+    assert.ok(reviewPrompt.includes(`\`${verdict}\` para ${label}`));
+  }
+  assert.match(reviewPrompt, /`BLOQUEANTE`, `SUGESTÃO` ou `NIT`/);
 
-  const reviewArgs = buildReviewRunnerArgs('/tmp/factory-artifacts/flow-1/review-report.md');
+  const reviewArgs = buildReviewRunnerArgs(reviewReportPath);
   assert(reviewArgs.includes('--restricted'));
   assert.equal(reviewArgs[reviewArgs.indexOf('--tools') + 1], 'Read,Glob,Grep,Edit,Write,Bash');
   const reviewAllowed = reviewArgs[reviewArgs.indexOf('--allowedTools') + 1] ?? '';
@@ -368,6 +448,7 @@ test('prompts, runners e validadores das Etapas 03 a 06 seguem contratos e permi
   assert.equal(parseReviewVerdict(ambiguousReviewReport), null);
   assert.equal(isReviewReport(ambiguousReviewReport), false);
 
+  const developmentReportPath = '/tmp/factory-artifacts/flow-1/dev-2.md';
   const reentryDevPrompt = buildFactoryDevelopmentPrompt({
     task: 'PROD-1234',
     understandingReportPath: '/tmp/factory-artifacts/flow-1/spec.md',
@@ -376,7 +457,7 @@ test('prompts, runners e validadores das Etapas 03 a 06 seguem contratos e permi
     testReportPath: '/tmp/factory-artifacts/flow-1/tests-1.md',
     reviewReportPath: '/tmp/factory-artifacts/flow-1/review-1.md',
     approvedNotes: 'Preservar assinatura pública',
-    reportPath: '/tmp/factory-artifacts/flow-1/dev-2.md',
+    reportPath: developmentReportPath,
     iteration: 2,
     maxIterations: 3,
   });
@@ -388,7 +469,17 @@ test('prompts, runners e validadores das Etapas 03 a 06 seguem contratos e permi
   for (const heading of Object.values(IMPLEMENTATION_REPORT_SECTIONS)) {
     assert(reentryDevPrompt.includes(`## ${heading}`));
   }
+  assertFactoryStageOutput(reentryDevPrompt, 'development', developmentReportPath, [
+    'changedFiles',
+    'summary',
+    'deviations',
+    'description',
+    'justification',
+  ]);
+  assert.match(reentryDevPrompt, /`changedFiles`.*\s+Use caminhos relativos ao repositório/);
+  assert.match(reentryDevPrompt, /mesmos desvios do plano e justificativas/);
 
+  const prReportPath = '/tmp/factory-artifacts/flow-1/pr-summary.md';
   const prPrompt = buildFactoryPrPrompt({
     task: 'PROD-1234',
     understandingReportPath: '/tmp/factory-artifacts/flow-1/spec.md',
@@ -396,7 +487,7 @@ test('prompts, runners e validadores das Etapas 03 a 06 seguem contratos e permi
     implementationReportPath: '/tmp/factory-artifacts/flow-1/dev-2.md',
     testReportPath: '/tmp/factory-artifacts/flow-1/tests-2.md',
     reviewReportPath: '/tmp/factory-artifacts/flow-1/review-2.md',
-    reportPath: '/tmp/factory-artifacts/flow-1/pr-summary.md',
+    reportPath: prReportPath,
   });
   assert(prPrompt.includes(FACTORY_PR_SYSTEM_PROMPT));
   assert(prPrompt.includes('/tmp/factory-artifacts/flow-1/review-2.md'));
@@ -404,8 +495,18 @@ test('prompts, runners e validadores das Etapas 03 a 06 seguem contratos e permi
   for (const heading of Object.values(PR_SUMMARY_SECTIONS)) {
     assert(prPrompt.includes(`## ${heading}`));
   }
+  assertFactoryStageOutput(prPrompt, 'pr', prReportPath, [
+    'title',
+    'summary',
+    'baseBranch',
+    'headBranch',
+    'satisfiedAcceptanceCriteriaIds',
+    'evidence',
+  ]);
+  assert.match(prPrompt, /`baseBranch` e `headBranch`.*destino e de origem,\s+respectivamente/);
+  assert.match(prPrompt, /`evidence`.*evidências verificadas e registradas/);
 
-  const prArgs = buildPrRunnerArgs('/tmp/factory-artifacts/flow-1/pr-summary.md');
+  const prArgs = buildPrRunnerArgs(prReportPath);
   assert(prArgs.includes('--restricted'));
   const prAllowed = prArgs[prArgs.indexOf('--allowedTools') + 1] ?? '';
   assert(prAllowed.includes('Edit(//tmp/factory-artifacts/flow-1/pr-summary.md)'));

@@ -1,5 +1,12 @@
 import type { FactoryRepositoryProfile } from '@development-factory/shared';
 import { formatFactoryRepositoryContext } from './factory-repository-context.js';
+import { formatFactoryStageOutput } from './factory-stage-output.js';
+
+const DEVELOPMENT_SIDECAR_FIELDS = `- Liste em \`changedFiles\` os mesmos arquivos de produção registrados em Arquivos alterados no Markdown.
+  Use caminhos relativos ao repositório com separador \`/\` e sem segmentos \`..\`.
+- Use \`summary\` para um texto com o Resumo das mudanças aplicadas e verificações realizadas.
+- Use em \`deviations\` uma lista de objetos com \`description\` e \`justification\` em texto. Registre os
+  mesmos desvios do plano e justificativas em Status dos passos do plano no Markdown.`;
 
 export const IMPLEMENTATION_REPORT_TITLE = 'Relatório de Implementação';
 export const IMPLEMENTATION_REPORT_SECTIONS = {
@@ -90,8 +97,9 @@ alterações existentes. Deixe a criação e edição de testes e a execução d
 Revise estaticamente os arquivos editados quando aplicável. Informe bloqueios e decisões pendentes
 sem ampliar o escopo.
 
-Salve o relatório final em Markdown no arquivo ${JSON.stringify(input.reportPath)}.
-Substitua o conteúdo inicial, mantenha o título e as seções a seguir e preencha cada seção.
+${formatFactoryStageOutput('development', input.reportPath, DEVELOPMENT_SIDECAR_FIELDS)}
+
+Use o título e preencha todas as seções do relatório Markdown abaixo.
 
 # ${IMPLEMENTATION_REPORT_TITLE}
 
