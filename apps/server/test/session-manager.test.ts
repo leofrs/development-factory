@@ -385,7 +385,10 @@ test('sessão factory sem clientes conectados consolida falha e estado incomplet
     assert.equal(finishedEvent.session.historyState, 'incomplete');
     assert.equal(finishedEvent.session.reportPath, session.reportPath);
     assert.ok(session.reportPath && existsSync(session.reportPath));
-    assert.match(readFileSync(session.reportPath, 'utf8'), /Plano da tarefa incompleto/);
+    assert.match(
+      readFileSync(session.reportPath, 'utf8'),
+      /Documento de Entendimento do Problema incompleto/,
+    );
     assert.equal(existsSync(join(env.repoB, '.code-reviews')), false);
   } finally {
     unsubscribe();

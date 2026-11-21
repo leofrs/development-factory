@@ -8,6 +8,7 @@ import {
   FACTORY_FLOW_CONTRACT_VERSION,
   REVIEW_CONTRACT_VERSION,
   getNextFactoryStage,
+  getReadyFactoryStageArtifact,
   isFactoryReviewApprovedVerdict,
   isFinalFactoryFlowState,
   type AppEvent,
@@ -23,7 +24,7 @@ import {
   type ReviewRequest,
   type ServerMessage,
 } from '@development-factory/shared';
-import type { FactoryRepositoryProfile } from '@development-factory/shared';
+import type { FactoryRepositoryProfile, HistoryFile } from '@development-factory/shared';
 import { resolveReviewReportDirectory } from './artifacts.js';
 import { buildDevelopmentRunnerArgs, readFactoryDevelopmentInputs } from './factory-development.js';
 import { FactoryFlowServiceError, type FactoryFlowService } from './factory-flow-service.js';
@@ -34,7 +35,11 @@ import {
 } from './factory-repository-profile.js';
 import type { FactoryRepositoryProfileErrorCode } from './factory-repository-profile.js';
 import { buildReviewRunnerArgs, parseReviewVerdict, readFactoryReviewInputs } from './factory-review.js';
-import { buildReportFileToolPermissions } from './factory-stage-runners.js';
+import {
+  FactoryStageArtifactError,
+  buildReportFileToolPermissions,
+  readFactoryStageDocument,
+} from './factory-stage-runners.js';
 import { buildTestsRunnerArgs, readFactoryTestsInputs } from './factory-tests.js';
 import {
   FactoryWorktreeError,
@@ -80,7 +85,12 @@ export class SessionManagerError extends Error {
   readonly code: SessionManagerErrorCode;
   readonly statusCode: number;
 
-  constructor(code: SessionManagerErrorCode, message: string, statusCode: number) {
+  constructor(
+    code: SessionManagerErrorCode,
+    message: string,
+    statusCode: number,
+    public readonly details?: readonly string[],
+  ) {
     super(message);
     this.name = 'SessionManagerError';
     this.code = code;
@@ -112,7 +122,6 @@ interface SessionRuntime {
   readonly session: ManagedSession;
   operationChain: Promise<void>;
   finalized: boolean;
-  factoryReportRegistered: boolean;
 }
 
 function buildReviewError(code: string, message: string, retryable: boolean): ReviewError {
@@ -452,7 +461,6 @@ export class SessionManager {
       session,
       operationChain: Promise.resolve(),
       finalized: false,
-      factoryReportRegistered: false,
     };
 
     let child: pty.IPty;
@@ -950,21 +958,35 @@ export class SessionManager {
     repositoryProfile?: FactoryRepositoryProfile,
   ): Promise<ManagedSession> {
     let buildRunnerConfig: ((reportPath: string) => { prompt: string; runnerArgs: string[] }) | undefined;
-    if (isRestrictedRunnerStage(stage) && flowDetails) {
-      try {
+    let understanding: HistoryFile | undefined;
+    try {
+      if (isRestrictedRunnerStage(stage) && flowDetails) {
         buildRunnerConfig = await this.#prepareRestrictedRunnerFactory(
           stage,
           flowDetails,
           input.value,
           repositoryProfile,
         );
-      } catch {
+      } else if (stage === 'planning' && flowDetails) {
+        const triageArtifact = getReadyFactoryStageArtifact(flowDetails, 'triage');
+        if (triageArtifact) {
+          understanding = await readFactoryStageDocument('triage', triageArtifact.path);
+        }
+      }
+    } catch (error) {
+      if (error instanceof FactoryStageArtifactError) {
+        throw new SessionManagerError('FACTORY_STAGE_CONFLICT', error.message, 409, error.details);
+      }
+      if (isRestrictedRunnerStage(stage)) {
         throw new SessionManagerError(
           'FACTORY_STAGE_CONFLICT',
           RESTRICTED_RUNNER_STAGE_CONFIG[stage].missingInputsError,
           409,
         );
       }
+      throw error;
+    }
+    if (isRestrictedRunnerStage(stage) && flowDetails) {
       const current = this.#factoryFlowService?.getFlow(flowDetails.flow.id).flow;
       if (!current || isFinalFactoryFlowState(current.state) || current.currentStage !== stage) {
         throw new SessionManagerError(
@@ -1003,7 +1025,6 @@ export class SessionManager {
       session,
       operationChain: Promise.resolve(),
       finalized: false,
-      factoryReportRegistered: false,
     };
 
     let factoryHistory: ReturnType<typeof createFactoryHistory>;
@@ -1021,11 +1042,6 @@ export class SessionManager {
               type: 'session.history_saved',
               session: toBackgroundSessionSummary(session),
             });
-            if (this.#factoryFlowService && activeFactorySession && !runtime.finalized) {
-              this.#enqueue(runtime, () =>
-                this.#syncFactoryReportSaved(runtime, activeFactorySession, factoryHistory),
-              );
-            }
           } else {
             this.#emitEvent({
               type: 'session.updated',
@@ -1071,13 +1087,17 @@ export class SessionManager {
       prompt = prepared.prompt;
       runnerArgs = prepared.runnerArgs;
     } else {
-      prompt = await this.#buildFactoryStagePrompt(
-        input,
-        stage,
-        factoryHistory.reportPath,
-        flowDetails,
-        repositoryProfile,
-      );
+      prompt =
+        stage === 'planning'
+          ? buildFactoryArchitecturePrompt({
+              inputType: input.inputType,
+              value: input.value,
+              understandingDocument: understanding?.content,
+              understandingReportPath: understanding?.path,
+              reportPath: factoryHistory.reportPath,
+              repositoryProfile,
+            })
+          : buildFactoryPlanPrompt(input.inputType, input.value, factoryHistory.reportPath);
       runnerArgs = ['--allowedTools', buildFactoryAllowedTools(stage, factoryHistory.reportPath).join(',')];
     }
 
@@ -1195,47 +1215,6 @@ export class SessionManager {
     } catch {
       // Preserva o erro original de criação da sessão.
     }
-  }
-
-  async #buildFactoryStagePrompt(
-    input: StartFactorySessionInput,
-    stage: FactoryStageName,
-    reportPath: string,
-    flowDetails?: FactoryFlowDetails,
-    repositoryProfile?: FactoryRepositoryProfile,
-  ): Promise<string> {
-    if (stage !== 'planning') {
-      return buildFactoryPlanPrompt(input.inputType, input.value, reportPath);
-    }
-
-    const triageArtifact = [...(flowDetails?.artifacts ?? [])]
-      .reverse()
-      .find(
-        artifact =>
-          artifact.stage === 'triage' &&
-          artifact.kind === 'specification' &&
-          artifact.status === 'ready',
-      );
-    const triageStage = flowDetails?.stages.find(item => item.name === 'triage');
-    const understandingReportPath = triageArtifact?.path ?? triageStage?.reportPath ?? undefined;
-
-    let understandingDocument: string | undefined;
-    if (understandingReportPath) {
-      try {
-        understandingDocument = await readFile(understandingReportPath, 'utf8');
-      } catch {
-        understandingDocument = undefined;
-      }
-    }
-
-    return buildFactoryArchitecturePrompt({
-      inputType: input.inputType,
-      value: input.value,
-      understandingDocument,
-      understandingReportPath,
-      reportPath,
-      repositoryProfile,
-    });
   }
 
   async #readReviewVerdictFromReport(reportPath: string | null): Promise<FactoryReviewVerdict | null> {
@@ -1371,38 +1350,28 @@ export class SessionManager {
     }
   }
 
-  async #syncFactoryReportSaved(
-    runtime: SessionRuntime,
+  async #registerFactorySessionReport(
+    session: ManagedSession,
     activeFactory: ActiveFactorySession,
-    factoryHistory: { reportPath: string; sessionPath: string },
+    status: 'ready' | 'incomplete' | 'failed',
+    error: FactoryFlowError | null,
   ): Promise<void> {
-    if (!this.#factoryFlowService) {
+    if (!this.#factoryFlowService || !session.reportPath) {
       return;
     }
-    const { session } = runtime;
-    if (!runtime.factoryReportRegistered) {
-      runtime.factoryReportRegistered = true;
-      await this.#factoryFlowService.registerArtifact(
-        activeFactory.flowId,
-        {
-          stage: activeFactory.stage,
-          sessionId: session.sessionId,
-          kind: STAGE_ARTIFACT_KIND[activeFactory.stage],
-          format: 'markdown',
-          path: factoryHistory.reportPath,
-          status: 'ready',
-        },
-        {
-          reportPath: factoryHistory.reportPath,
-          sessionPath: factoryHistory.sessionPath,
-        },
-      );
-    }
-    const details = this.#factoryFlowService.getFlow(activeFactory.flowId);
-    this.#emitEvent({
-      type: 'factory_flow.updated',
-      flow: details.flow,
-    });
+    await this.#factoryFlowService.registerArtifact(
+      activeFactory.flowId,
+      {
+        stage: activeFactory.stage,
+        sessionId: session.sessionId,
+        kind: STAGE_ARTIFACT_KIND[activeFactory.stage],
+        format: 'markdown',
+        path: session.reportPath,
+        status,
+        error,
+      },
+      { reportPath: session.reportPath },
+    );
   }
 
   #handlePtyExit(
@@ -1420,7 +1389,7 @@ export class SessionManager {
     disposePtyProcess(session, false);
     const currentHistory = session.history;
     session.history = undefined;
-    currentHistory?.finish(
+    const artifactError = currentHistory?.finish(
       `processo finalizado com código ${exitCode}`,
       !isRestrictedRunnerStage(session.activeFactorySession?.stage) || exitCode === 0,
     );
@@ -1431,6 +1400,8 @@ export class SessionManager {
     session.status = exitCode === 0 ? 'exited' : 'failed';
     if (exitCode !== 0) {
       session.error = `Processo PTY encerrado com código ${exitCode}.`;
+    } else if (artifactError) {
+      session.error = artifactError.message;
     }
 
     broadcast(session, {
@@ -1453,7 +1424,7 @@ export class SessionManager {
     if (activeFactory && this.#factoryFlowService) {
       this.#enqueue(runtime, async () => {
         try {
-          await this.#finishFactorySession(runtime, activeFactory, exitCode);
+          await this.#finishFactorySession(session, activeFactory, exitCode, artifactError);
         } finally {
           this.#emitEvent({
             type: 'session.finished',
@@ -1520,15 +1491,15 @@ export class SessionManager {
   }
 
   async #finishFactorySession(
-    runtime: SessionRuntime,
+    session: ManagedSession,
     activeFactory: ActiveFactorySession,
     exitCode: number,
+    artifactError: FactoryStageArtifactError | undefined,
   ): Promise<void> {
     if (!this.#factoryFlowService) {
       return;
     }
 
-    const { session } = runtime;
     const { flowId, stage } = activeFactory;
 
     if (session.sessionPath) {
@@ -1546,45 +1517,31 @@ export class SessionManager {
       );
     }
 
-    if (exitCode === 0) {
-      if (session.reportPath && !runtime.factoryReportRegistered) {
-        runtime.factoryReportRegistered = true;
-        if (session.historyState === 'saved') {
-          await this.#factoryFlowService.registerArtifact(
-            flowId,
-            {
-              stage,
-              sessionId: session.sessionId,
-              kind: STAGE_ARTIFACT_KIND[stage],
-              format: 'markdown',
-              path: session.reportPath,
-              status: 'ready',
-            },
-            { reportPath: session.reportPath },
+    const failureError =
+      exitCode === 0
+        ? null
+        : buildFactoryFlowError(
+            'FACTORY_PTY_FAILED',
+            `Processo PTY encerrado com código ${exitCode}.`,
+            true,
           );
-        } else {
-          await this.#factoryFlowService.registerArtifact(
-            flowId,
-            {
-              stage,
-              sessionId: session.sessionId,
-              kind: STAGE_ARTIFACT_KIND[stage],
-              format: 'markdown',
-              path: session.reportPath,
-              status: 'incomplete',
-              error: buildFactoryFlowError(
-                'FACTORY_ARTIFACT_INCOMPLETE',
-                isRestrictedRunnerStage(stage)
-                  ? RESTRICTED_RUNNER_STAGE_CONFIG[stage].incompleteArtifactError
-                  : 'O processo PTY encerrou sem salvar o artefato final da etapa.',
-                true,
-              ),
-            },
-            { reportPath: session.reportPath },
-          );
-        }
-      }
+    if (session.historyState === 'saved') {
+      await this.#registerFactorySessionReport(session, activeFactory, 'ready', null);
+    } else if (failureError) {
+      await this.#registerFactorySessionReport(session, activeFactory, 'failed', failureError);
+    } else {
+      const message =
+        artifactError?.message ??
+        (isRestrictedRunnerStage(stage)
+          ? RESTRICTED_RUNNER_STAGE_CONFIG[stage].incompleteArtifactError
+          : 'O processo PTY encerrou sem salvar o artefato final da etapa.');
+      await this.#registerFactorySessionReport(session, activeFactory, 'incomplete', {
+        ...buildFactoryFlowError(artifactError?.code ?? 'FACTORY_ARTIFACT_INCOMPLETE', message, true),
+        ...(artifactError?.issues.length ? { issues: artifactError.issues } : {}),
+      });
+    }
 
+    if (!failureError) {
       const currentFlow = this.#factoryFlowService.getFlow(flowId).flow;
       if (isFinalFactoryFlowState(currentFlow.state)) {
         return;
@@ -1788,32 +1745,6 @@ export class SessionManager {
       return;
     }
 
-    const failureError = buildFactoryFlowError(
-      'FACTORY_PTY_FAILED',
-      `Processo PTY encerrado com código ${exitCode}.`,
-      true,
-    );
-    if (
-      session.reportPath &&
-      (isRestrictedRunnerStage(stage) || session.historyState !== 'saved') &&
-      !runtime.factoryReportRegistered
-    ) {
-      runtime.factoryReportRegistered = true;
-      await this.#factoryFlowService.registerArtifact(
-        flowId,
-        {
-          stage,
-          sessionId: session.sessionId,
-          kind: STAGE_ARTIFACT_KIND[stage],
-          format: 'markdown',
-          path: session.reportPath,
-          status: 'failed',
-          error: failureError,
-        },
-        { reportPath: session.reportPath },
-      );
-    }
-
     const currentFlow = this.#factoryFlowService.getFlow(flowId).flow;
     if (isFinalFactoryFlowState(currentFlow.state)) {
       return;
@@ -2004,6 +1935,9 @@ export class SessionManager {
     } else if (activeFactory && this.#factoryFlowService) {
       const flowService = this.#factoryFlowService;
       this.#enqueue(runtime, async () => {
+        if (session.historyState === 'saved') {
+          await this.#registerFactorySessionReport(session, activeFactory, 'ready', null);
+        }
         if (session.sessionPath) {
           await flowService.registerArtifact(
             activeFactory.flowId,

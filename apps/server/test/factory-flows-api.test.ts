@@ -23,6 +23,12 @@ import {
   type ServerMessage,
 } from '@development-factory/shared';
 import { createReviewServer } from '../src/server.js';
+import { getFactoryStageSidecarPath } from '../src/factory-stage-runners.js';
+import {
+  planningMarkdown,
+  triageMarkdown,
+  writeFactoryStageSidecar,
+} from './fixtures/factory-stage-artifacts.js';
 
 const ALLOWED_ORIGIN = 'http://localhost:5173';
 
@@ -352,9 +358,11 @@ test('API REST /api/factory/flows valida origem, idempotência, filtros e ciclo 
   });
   assert.equal(rerunRunningRes.status, 409);
 
-  // 5. Simula salvamento do plano no Fluxo A e saída com código 0.
+  // 5. Entrega a especificação e o sidecar do Fluxo A e encerra a triagem.
   assert(sessionASummary.reportPath);
-  writeFileSync(sessionASummary.reportPath, '# Entendimento do Problema\n\nFluxo A salvo.\n');
+  writeFileSync(sessionASummary.reportPath, triageMarkdown('Fluxo A salvo.'));
+  writeFactoryStageSidecar(sessionASummary.reportPath, 'triage');
+  sessionManager.writeInput(sessionAId, 'EXIT0');
   await waitFor(() =>
     events.some(
       event =>
@@ -362,7 +370,6 @@ test('API REST /api/factory/flows valida origem, idempotência, filtros e ciclo 
     ),
   );
 
-  sessionManager.writeInput(sessionAId, 'EXIT0');
   await waitFor(() =>
     events.some(
       event =>
@@ -418,7 +425,7 @@ test('API REST /api/factory/flows valida origem, idempotência, filtros e ciclo 
   const promptArgIndex = args.indexOf('-p') + 1;
   assert.ok(promptArgIndex > 0);
   const planningPrompt = args[promptArgIndex] ?? '';
-  assert.ok(planningPrompt.includes('# Entendimento do Problema'));
+  assert.ok(planningPrompt.includes('# Documento de Entendimento do Problema'));
   assert.ok(planningPrompt.includes('Fluxo A salvo.'));
   assert.ok(planningPrompt.includes('Sub-etapa A'));
 
@@ -591,9 +598,11 @@ test(
       return Boolean(s1?.buffer.replay().includes('READY:') && s2?.buffer.replay().includes('READY:'));
     });
 
-    // Salva planos distintos para cada fluxo no mesmo repositório.
-    writeFileSync(createdOne.session.reportPath, '# Plano Fluxo 1\n\nJWT isolado.\n');
-    writeFileSync(createdTwo.session.reportPath, '# Plano Fluxo 2\n\nPaginação isolada.\n');
+    // Salva especificações distintas para cada fluxo no mesmo repositório.
+    writeFileSync(createdOne.session.reportPath, triageMarkdown('JWT isolado.'));
+    writeFactoryStageSidecar(createdOne.session.reportPath, 'triage');
+    writeFileSync(createdTwo.session.reportPath, triageMarkdown('Paginação isolada.'));
+    writeFactoryStageSidecar(createdTwo.session.reportPath, 'triage');
 
     sessionManager.writeInput(createdOne.session.sessionId, 'EXIT0');
     sessionManager.writeInput(createdTwo.session.sessionId, 'EXIT0');
@@ -658,7 +667,16 @@ test(
 
     const planPath = sessionManager.getSession(planningSessionOne)?.reportPath;
     assert.ok(planPath);
-    writeFileSync(planPath, '# Diagnóstico Técnico + Plano de Implementação\n\n1. Ajustar JWT.\n');
+    writeFileSync(planPath, planningMarkdown('Ajustar JWT.'));
+    writeFactoryStageSidecar(planPath, 'planning');
+    const invalidPlanPath = sessionManager.getSession(planningSessionTwo)?.reportPath;
+    assert.ok(invalidPlanPath);
+    writeFileSync(invalidPlanPath, planningMarkdown('Ajustar paginação.'));
+    writeFactoryStageSidecar(invalidPlanPath, 'planning', {
+      pendingDecisions: [
+        { question: 'Motor de paginação?', options: ['A', 'B'], recommendedOption: 'C' },
+      ],
+    });
     sessionManager.writeInput(planningSessionOne, 'EXIT0');
     sessionManager.writeInput(planningSessionTwo, 'EXIT0');
     await waitFor(() => {
@@ -679,6 +697,16 @@ test(
     const afterPlanTwo = FactoryFlowDetailsSchema.parse(await afterPlanTwoRes.json());
     assert.equal(afterPlanOne.flow.state, 'waiting_action');
     assert.equal(afterPlanTwo.flow.state, 'waiting_action');
+    const invalidPlan = afterPlanTwo.artifacts.find(artifact => artifact.path === invalidPlanPath);
+    assert.equal(invalidPlan?.status, 'incomplete');
+    assert.equal(invalidPlan.error?.code, 'FACTORY_SIDECAR_INVALID_SCHEMA');
+    assert.deepEqual(invalidPlan.error.issues, [
+      {
+        code: 'custom',
+        path: ['pendingDecisions', 0, 'recommendedOption'],
+        message: 'A recomendação deve corresponder a uma das opções',
+      },
+    ]);
 
     const specOne = afterPlanOne.artifacts.find(
       artifact => artifact.stage === 'triage' && artifact.kind === 'specification',
@@ -769,6 +797,7 @@ test(
       '| Ajustar JWT | Concluído | Código de produção atualizado |',
       '',
     ].join('\n'));
+    writeFactoryStageSidecar(rerun.reportPath, 'development', { changedFiles: ['src/jwt.ts'] });
     sessionManager.writeInput(rerun.sessionId, 'EXIT0');
 
     // 1. Development (iteração 1) conclui com relatório válido e dispara Tests automaticamente.
@@ -846,6 +875,10 @@ test(
         '',
       ].join('\n'),
     );
+    writeFactoryStageSidecar(rerunTests.reportPath, 'tests', {
+      status: 'failed',
+      executedCommands: [{ command: ['npm', 'test'], exitCode: 1 }],
+    });
     sessionManager.writeInput(rerunTests.sessionId, 'EXIT0');
 
     await waitFor(() =>
@@ -915,6 +948,7 @@ test(
       '',
     ].join('\n');
     writeFileSync(rerunReview.reportPath, rejectedReviewMarkdown);
+    writeFactoryStageSidecar(rerunReview.reportPath, 'review', { verdict: 'changes_requested' });
     sessionManager.writeInput(rerunReview.sessionId, 'EXIT0');
 
     await waitFor(() => {
@@ -964,6 +998,7 @@ test(
       '| Ajustar JWT | Concluído | Correção aplicada na iteração 2 |',
       '',
     ].join('\n'));
+    writeFactoryStageSidecar(iter2DevSession.reportPath, 'development', { changedFiles: ['src/jwt.ts'] });
     sessionManager.writeInput(iter2DevSession.sessionId, 'EXIT0');
 
     await waitFor(() => {
@@ -997,6 +1032,7 @@ test(
         '',
       ].join('\n'),
     );
+    writeFactoryStageSidecar(iter2TestsSession.reportPath, 'tests');
     sessionManager.writeInput(iter2TestsSession.sessionId, 'EXIT0');
 
     // Tests (Iteração 2) conclui -> dispara Review (Iteração 2) automaticamente.
@@ -1030,6 +1066,7 @@ test(
       '',
     ].join('\n');
     writeFileSync(iter2ReviewSession.reportPath, approvedReviewMarkdown);
+    writeFactoryStageSidecar(iter2ReviewSession.reportPath, 'review');
     sessionManager.writeInput(iter2ReviewSession.sessionId, 'EXIT0');
 
     // 4. Review aprovado -> avança para PR e PAUSA em waiting_action (100% manual!).
@@ -1041,6 +1078,7 @@ test(
     assert.equal(prPausedDetails.flow.state, 'waiting_action');
     assert.equal(prPausedDetails.flow.currentSessionId, null);
     assert.equal(prPausedDetails.flow.lastReviewVerdict, 'approved');
+    assert.ok(prPausedDetails.baseBranch && prPausedDetails.branchName);
     assert.equal(prPausedDetails.flow.iteration, 2);
     assert.ok(!sessionManager.listSessions().some(session => session.stage === 'pr'));
 
@@ -1052,7 +1090,15 @@ test(
       2,
     );
 
-    // 5. Disparo manual da etapa PR via POST /start -> conclui o fluxo ao salvar pr_summary.
+    // 5. O runner de PR revalida o sidecar do Code Review antes de usar o relatório pronto.
+    writeFileSync(getFactoryStageSidecarPath(iter2ReviewSession.reportPath), '{');
+    const invalidHandoff = await postAction('start', { stage: 'pr' });
+    assert.equal(invalidHandoff.status, 409);
+    const handoffError = FactoryFlowApiErrorResponseSchema.parse(await invalidHandoff.json());
+    assert.match(handoffError.error.message, /sidecar contém JSON inválido/);
+    assert.match(handoffError.error.details?.[0] ?? '', /^\$ \(/);
+    writeFactoryStageSidecar(iter2ReviewSession.reportPath, 'review');
+
     const startPrRes = await postAction('start', { stage: 'pr' });
     assert.equal(startPrRes.status, 200);
     const prSession = z.object({ session: BackgroundSessionSummarySchema }).parse(
@@ -1077,6 +1123,10 @@ test(
         '',
       ].join('\n'),
     );
+    writeFactoryStageSidecar(prSession.reportPath, 'pr', {
+      baseBranch: prPausedDetails.baseBranch,
+      headBranch: prPausedDetails.branchName,
+    });
     sessionManager.writeInput(prSession.sessionId, 'EXIT0');
     const completedPrDetails = await waitForFlowDetails(
       getDetails,
@@ -1206,12 +1256,14 @@ test(
       /READY:[^\n]*\n/.test(sessionManager.getSession(created.session.sessionId)?.buffer.replay() ?? ''),
     );
     assert.ok(created.session.reportPath);
-    writeFileSync(created.session.reportPath, '# Especificação\n\nEscopo definido.\n');
+    writeFileSync(created.session.reportPath, triageMarkdown('Escopo definido.'));
+    writeFactoryStageSidecar(created.session.reportPath, 'triage');
     sessionManager.writeInput(created.session.sessionId, 'EXIT0');
 
     const planningSession = await waitForStageSession('planning', seen);
     assert.ok(planningSession.reportPath);
-    writeFileSync(planningSession.reportPath, '# Plano\n\n1. Implementar.\n');
+    writeFileSync(planningSession.reportPath, planningMarkdown('Implementar a alteração.'));
+    writeFactoryStageSidecar(planningSession.reportPath, 'planning');
     sessionManager.writeInput(planningSession.sessionId, 'EXIT0');
     await waitFor(() => sessionManager.getSession(planningSession.sessionId)?.status === 'exited');
 
@@ -1239,6 +1291,7 @@ test(
           `| Passo 1 | Concluído | Iteração ${iteration} |`,
         ].join('\n'),
       );
+      writeFactoryStageSidecar(devSession.reportPath, 'development');
       sessionManager.writeInput(devSession.sessionId, 'EXIT0');
 
       const testsSession = await waitForStageSession('tests', seen);
@@ -1255,6 +1308,10 @@ test(
           `FAIL na iteração ${iteration}.`,
         ].join('\n'),
       );
+      writeFactoryStageSidecar(testsSession.reportPath, 'tests', {
+        status: 'failed',
+        executedCommands: [{ command: ['npm', 'test'], exitCode: 1 }],
+      });
       sessionManager.writeInput(testsSession.sessionId, 'EXIT0');
 
       const reviewSession = await waitForStageSession('review', seen);
@@ -1272,6 +1329,7 @@ test(
           'Ajuste necessário.',
         ].join('\n'),
       );
+      writeFactoryStageSidecar(reviewSession.reportPath, 'review', { verdict: 'changes_requested' });
       sessionManager.writeInput(reviewSession.sessionId, 'EXIT0');
       await waitFor(() => sessionManager.getSession(reviewSession.sessionId)?.status === 'exited');
     }
@@ -1376,7 +1434,8 @@ test(
     for (const item of [flowOne, flowTwo]) {
       assert.ok(item.session.reportPath);
       await waitFor(() => Boolean(sessionManager.getSession(item.session.sessionId)?.buffer.replay().includes('READY:')));
-      writeFileSync(item.session.reportPath, `# Especificação ${item.flow.id}\n\nEscopo ok.\n`);
+      writeFileSync(item.session.reportPath, triageMarkdown(`Escopo do fluxo ${item.flow.id}.`));
+      writeFactoryStageSidecar(item.session.reportPath, 'triage');
       sessionManager.writeInput(item.session.sessionId, 'EXIT0');
 
       await waitFor(() =>
@@ -1389,7 +1448,8 @@ test(
         .find(s => s.flowId === item.flow.id && s.stage === 'planning');
       assert.ok(planningSession && planningSession.reportPath);
       await waitFor(() => Boolean(sessionManager.getSession(planningSession.sessionId)?.buffer.replay().includes('READY:')));
-      writeFileSync(planningSession.reportPath, `# Plano ${item.flow.id}\n\n1. Implementar.\n`);
+      writeFileSync(planningSession.reportPath, planningMarkdown(`Implementar ${item.flow.id}.`));
+      writeFactoryStageSidecar(planningSession.reportPath, 'planning');
       sessionManager.writeInput(planningSession.sessionId, 'EXIT0');
       await waitFor(() => sessionManager.getSession(planningSession.sessionId)?.status === 'exited');
     }
@@ -1648,12 +1708,14 @@ test(
       /READY:[^\n]*\n/.test(sessionManager.getSession(created.session.sessionId)?.buffer.replay() ?? ''),
     );
     assert.ok(created.session.reportPath);
-    writeFileSync(created.session.reportPath, '# Especificação\n\nEscopo ok.\n');
+    writeFileSync(created.session.reportPath, triageMarkdown('Escopo definido.'));
+    writeFactoryStageSidecar(created.session.reportPath, 'triage');
     sessionManager.writeInput(created.session.sessionId, 'EXIT0');
 
     const planSession = await waitForStageSession('planning', seen);
     assert.ok(planSession.reportPath);
-    writeFileSync(planSession.reportPath, '# Plano\n\n1. Implementar feature.\n');
+    writeFileSync(planSession.reportPath, planningMarkdown('Implementar a funcionalidade.'));
+    writeFactoryStageSidecar(planSession.reportPath, 'planning');
     sessionManager.writeInput(planSession.sessionId, 'EXIT0');
     await waitFor(() => sessionManager.getSession(planSession.sessionId)?.status === 'exited');
 
@@ -1691,6 +1753,7 @@ test(
         '| 1 | Concluído | Iter 1 |',
       ].join('\n'),
     );
+    writeFactoryStageSidecar(dev1.reportPath, 'development');
     sessionManager.writeInput(dev1.sessionId, 'EXIT0');
 
     // Tests Iteração 1: adiciona arquivo de teste no worktree.
@@ -1710,6 +1773,10 @@ test(
         'FAIL na validação iter 1.',
       ].join('\n'),
     );
+    writeFactoryStageSidecar(tests1.reportPath, 'tests', {
+      status: 'failed',
+      executedCommands: [{ command: ['npm', 'test'], exitCode: 1 }],
+    });
     sessionManager.writeInput(tests1.sessionId, 'EXIT0');
 
     // Review Iteração 1: verifica checkpoints gravados até aqui e reprova para abrir Iteração 2.
@@ -1741,6 +1808,7 @@ test(
         'Veredito: REPROVADO / REQUER AJUSTES',
       ].join('\n'),
     );
+    writeFactoryStageSidecar(review1.reportPath, 'review', { verdict: 'changes_requested' });
     sessionManager.writeInput(review1.sessionId, 'EXIT0');
 
     // Development Iteração 2: introduz regressão + arquivo extra e sai com relatório incompleto para pausar em waiting_action.
@@ -1814,6 +1882,7 @@ test(
         '| 1 | Concluído | Final |',
       ].join('\n'),
     );
+    writeFactoryStageSidecar(dev2Rerun.reportPath, 'development');
     sessionManager.writeInput(dev2Rerun.sessionId, 'EXIT0');
 
     const tests2 = await waitForStageSession('tests', seen);
@@ -1830,6 +1899,7 @@ test(
         'PASS 100%.',
       ].join('\n'),
     );
+    writeFactoryStageSidecar(tests2.reportPath, 'tests');
     sessionManager.writeInput(tests2.sessionId, 'EXIT0');
 
     const review2 = await waitForStageSession('review', seen);
@@ -1846,6 +1916,7 @@ test(
         'Veredito: APROVADO PARA PR',
       ].join('\n'),
     );
+    writeFactoryStageSidecar(review2.reportPath, 'review');
     sessionManager.writeInput(review2.sessionId, 'EXIT0');
 
     await waitForFlowDetails(
@@ -1873,6 +1944,7 @@ test(
         `Branch ${branchName} -> main.`,
       ].join('\n'),
     );
+    writeFactoryStageSidecar(prSession.reportPath, 'pr', { headBranch: branchName });
     sessionManager.writeInput(prSession.sessionId, 'EXIT0');
 
     const completed = await waitForFlowDetails(getDetails, d => d.flow.state === 'completed');

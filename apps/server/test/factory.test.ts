@@ -48,8 +48,10 @@ import { buildDevelopmentRunnerArgs } from '../src/factory-development.js';
 import { buildPrRunnerArgs, isPrSummary } from '../src/factory-pr.js';
 import { loadFactoryRepositoryProfile } from '../src/factory-repository-profile.js';
 import { buildReviewRunnerArgs, isReviewReport, parseReviewVerdict } from '../src/factory-review.js';
+import { getFactoryStageSidecarPath } from '../src/factory-stage-runners.js';
 import { buildTestsRunnerArgs, isTestReport } from '../src/factory-tests.js';
 import { createReviewServer } from '../src/server.js';
+import { triageMarkdown, writeFactoryStageSidecar } from './fixtures/factory-stage-artifacts.js';
 
 async function until<T>(probe: () => T | undefined, label: string): Promise<T> {
   const deadline = Date.now() + 5000;
@@ -235,6 +237,8 @@ test('prompts, runners e validadores das Etapas 03 a 06 seguem contratos e permi
   const devAllowed = devArgs[devArgs.indexOf('--allowedTools') + 1] ?? '';
   assert(devAllowed.includes('Edit(//tmp/factory-artifacts/flow-1/dev-report.md)'));
   assert(devAllowed.includes('Write(//tmp/factory-artifacts/flow-1/dev-report.md)'));
+  assert(devAllowed.includes('Edit(//tmp/factory-artifacts/flow-1/dev-report.json)'));
+  assert(devAllowed.includes('Write(//tmp/factory-artifacts/flow-1/dev-report.json)'));
   assert.equal(devAllowed.includes('.code-reviews'), false);
 
   const testsPrompt = buildFactoryTestsPrompt({
@@ -424,7 +428,7 @@ test('prompts, runners e validadores das Etapas 03 a 06 seguem contratos e permi
   assert.equal(isPrSummary(`# ${PR_SUMMARY_TITLE}\n\nIncompleto.`), false);
 });
 
-test('start_factory executa PTY, salva plano em diretório externo sem sujar git status e permite leitura via API', { timeout: 30000 }, async context => {
+test('start_factory executa PTY, salva par em diretório externo sem sujar git status e permite ler o Markdown via API', { timeout: 30000 }, async context => {
   const directory = await mkdtemp(join(tmpdir(), 'factory-pty-'));
   const repoDir = join(directory, 'repo');
   const xdgDataHome = join(directory, 'xdg-data');
@@ -501,12 +505,15 @@ test('start_factory executa PTY, salva plano em diretório externo sem sujar git
   assert.equal(execFileSync('git', ['status', '--porcelain'], { cwd: repoDir, encoding: 'utf8' }), '');
   assert.equal(statSync(dirname(pendingHistory.reportPath)).mode & 0o777, 0o700);
   assert.equal(statSync(pendingHistory.reportPath).mode & 0o777, 0o600);
+  assert.equal(statSync(getFactoryStageSidecarPath(pendingHistory.reportPath)).mode & 0o777, 0o600);
   assert.equal(statSync(pendingHistory.sessionPath).mode & 0o777, 0o600);
 
   await until(() => (output.includes('PROD-1234') ? true : undefined), 'prompt output');
 
-  const planMarkdown = '# Plano PROD-1234\n\n## Resumo da tarefa\n- Implementar fluxo inicial.\n';
+  const planMarkdown = triageMarkdown('PROD-1234 precisa de um fluxo inicial.');
   writeFileSync(pendingHistory.reportPath, planMarkdown);
+  writeFactoryStageSidecar(pendingHistory.reportPath, 'triage');
+  socket.send(JSON.stringify({ type: 'input', data: 'EXIT0' }));
 
   await until(
     () => messages.find(m => m.type === 'history' && m.state === 'saved'),

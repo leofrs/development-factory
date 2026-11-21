@@ -232,12 +232,20 @@ export function canReturnFactoryStage(from: FactoryStageName, to: FactoryStageNa
   return from === 'review' && (to === 'development' || to === 'tests');
 }
 
+const factoryArtifactIssueSchema = z.strictObject({
+  code: text,
+  path: z.array(z.union([z.string(), z.number().int().nonnegative()])),
+  message: text,
+});
+export type FactoryArtifactIssue = z.infer<typeof factoryArtifactIssueSchema>;
+
 export const FactoryFlowErrorSchema = z.strictObject({
   contractVersion: version,
   code: z.string().regex(/^[A-Z][A-Z0-9_]*$/, 'Código de erro inválido'),
   message: text,
   occurredAt: timestamp,
   retryable: z.boolean(),
+  issues: z.array(factoryArtifactIssueSchema).optional(),
 });
 export type FactoryFlowError = z.infer<typeof FactoryFlowErrorSchema>;
 

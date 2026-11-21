@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, closeSync, constants, fstatSync, openSync, readFileSync, watchFile, unwatchFile, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, constants, openSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { stripVTControlCharacters } from 'node:util';
 import type { FactoryRequest, FactoryStageName } from '@development-factory/shared';
@@ -7,37 +7,36 @@ import { resolveFactoryArtifactsDirectory } from './artifacts.js';
 import { isImplementationReport } from './factory-development.js';
 import { isPrSummary } from './factory-pr.js';
 import { isReviewReport } from './factory-review.js';
+import {
+  FactoryStageArtifactError,
+  getFactoryStageSidecarPath,
+  readFactoryArtifactFile,
+  readFactoryStageSidecar,
+  validateStructuredMarkdownReport,
+} from './factory-stage-runners.js';
 import { isTestReport } from './factory-tests.js';
-import { maxHistoryBytes } from './history-reader.js';
 import { IMPLEMENTATION_REPORT_TITLE } from './prompts/factory-development.js';
 import { PR_SUMMARY_TITLE } from './prompts/factory-pr.js';
 import { REVIEW_REPORT_TITLE } from './prompts/factory-review.js';
 import { TEST_REPORT_TITLE } from './prompts/factory-tests.js';
 
-type HistoryState = 'pending' | 'saved' | 'incomplete';
+type HistoryResult = 'saved' | 'incomplete';
 
-interface SessionHistoryConfig {
-  readonly repoPath: string;
-  readonly flowId?: string;
-  readonly slugSource: string;
-  readonly prefix: string;
-  readonly metadata: string;
+interface StageHistoryConfig {
+  readonly prefixSegment: string;
   readonly reportPlaceholderTitle: string;
   readonly reportPlaceholderNote: string;
   readonly sessionTitle: string;
-  readonly incompleteTitle: string;
-  readonly incompleteNote: string;
-  readonly validateReport?: (content: string) => boolean;
+  readonly validateReport: (content: string) => boolean;
 }
 
-function readValidatedReport(path: string): string {
-  const descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-  try {
-    const info = fstatSync(descriptor);
-    return info.isFile() && info.size <= maxHistoryBytes ? readFileSync(descriptor, 'utf8') : '';
-  } finally {
-    closeSync(descriptor);
-  }
+interface SessionHistoryConfig extends StageHistoryConfig {
+  readonly stage: FactoryStageName;
+  readonly inputType: FactoryRequest['inputType'];
+  readonly repoPath: string;
+  readonly flowId?: string;
+  readonly slugSource: string;
+  readonly metadata: string;
 }
 
 function writeReportFileSafely(path: string, content: string): void {
@@ -55,101 +54,192 @@ function writeReportFileSafely(path: string, content: string): void {
 
 function createSessionHistory(
   config: SessionHistoryConfig,
-  onChange: (state: HistoryState) => void,
+  onChange: (state: HistoryResult) => void,
   onError: (message: string) => void,
 ) {
   const startedAt = new Date().toISOString();
   let descriptor = -1;
   const directory = resolveFactoryArtifactsDirectory(config.repoPath, config.flowId);
-  const slug = config.slugSource.replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 60) || config.prefix;
-  const fileBasename = `${startedAt.replace(/[:.]/g, '-')}-${config.prefix}-${slug}-${randomUUID()}`;
+  const prefix = `${config.prefixSegment}-${config.inputType}`;
+  const slug = config.slugSource.replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 60) || prefix;
+  const fileBasename = `${startedAt.replace(/[:.]/g, '-')}-${prefix}-${slug}-${randomUUID()}`;
   const reportPath = join(directory, `${fileBasename}.md`);
+  const sidecarPath = getFactoryStageSidecarPath(reportPath);
   const sessionPath = join(directory, `${fileBasename}.session.md`);
   const placeholder = `# ${config.reportPlaceholderTitle}\n\n${config.metadata}\n> ${config.reportPlaceholderNote}\n`;
   writeFileSync(reportPath, placeholder, { flag: 'wx', mode: 0o600 });
   try {
+    writeFileSync(sidecarPath, '', { flag: 'wx', mode: 0o600 });
     descriptor = openSync(sessionPath, 'wx', 0o600);
-    appendFileSync(descriptor, `# ${config.sessionTitle}\n\n${config.metadata}\n> Registro textual da TUI; pode conter redesenhos e repetições. O arquivo final fica em ${JSON.stringify(reportPath)}.\n\n## Saída do terminal\n\n    `);
+    appendFileSync(
+      descriptor,
+      `# ${config.sessionTitle}\n\n${config.metadata}\n` +
+        `> Registro textual da TUI. O relatório fica em ${JSON.stringify(reportPath)}.\n` +
+        `> O sidecar JSON fica em ${JSON.stringify(sidecarPath)}.\n\n## Saída do terminal\n\n    `,
+    );
   } catch (error) {
     if (descriptor !== -1) {
       closeSync(descriptor);
     }
     writeReportFileSafely(
       reportPath,
-      `# ${config.reportPlaceholderTitle} não iniciado\n\n${config.metadata}\nNão foi possível criar o registro da sessão.\n`,
+      `# ${config.reportPlaceholderTitle} não iniciado\n\n${config.metadata}\n` +
+        'Falha ao preparar o sidecar JSON ou o registro da sessão.\n',
     );
     throw error;
   }
   let finished = false;
   let failed = false;
-  let saved = false;
   let escapeTail = '';
-  const checkReport = () => {
-    try {
-      const content = readValidatedReport(reportPath).trim();
-      const nextSaved =
-        content.length > 0 &&
-        content !== placeholder.trim() &&
-        (config.validateReport?.(content) ?? true);
-      if (nextSaved !== saved) { saved = nextSaved; onChange(saved ? 'saved' : 'pending'); }
-    } catch { /* Um editor pode substituir o arquivo de forma atômica. */ }
-  };
-  if (!config.validateReport) {
-    watchFile(reportPath, { interval: 500, persistent: false }, checkReport);
-  }
 
   const record = (data: string) => {
-    if (finished || failed) return;
+    if (finished || failed) {
+      return;
+    }
     try {
       // Aguarda sequências ANSI divididas entre chunks antes de removê-las.
       const text = escapeTail + data;
-      const incomplete = text.match(/\x1b(?:\[[0-?]*[ -/]*|\][^\x07\x1b]*(?:\x1b)?|[PX^_][^\x1b]*(?:\x1b)?)?$/);
+      const incomplete = text.match(
+        /\x1b(?:\[[0-?]*[ -/]*|\][^\x07\x1b]*(?:\x1b)?|[PX^_][^\x1b]*(?:\x1b)?)?$/,
+      );
       escapeTail = incomplete?.[0] ?? '';
       const complete = escapeTail ? text.slice(0, -escapeTail.length) : text;
-      const plain = stripVTControlCharacters(complete).replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+      const plain = stripVTControlCharacters(complete)
+        .replace(/\r\n/g, '\n')
+        .replace(/\r/g, '\n')
         .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
       appendFileSync(descriptor, plain.replace(/\n/g, '\n    '));
     } catch {
       failed = true;
-      onError('Não foi possível continuar salvando o registro da sessão. Verifique o espaço e as permissões do diretório de artefatos.');
+      onError(
+        'Não foi possível continuar salvando o registro da sessão. Verifique o espaço e as permissões do diretório de artefatos.',
+      );
     }
   };
   const finish = (reason: string, acceptReport = true) => {
-    if (finished) return;
-    finished = true;
-    unwatchFile(reportPath, checkReport);
-    if (acceptReport) {
-      checkReport();
+    if (finished) {
+      return undefined;
     }
-    try {
-      appendFileSync(descriptor, `\n\n- Encerramento: ${reason}\n- Fim: ${new Date().toISOString()}\n`);
-      if (!saved) {
-        if (!config.validateReport) {
-          writeReportFileSafely(
+    finished = true;
+    let content: string | undefined;
+    let artifactError: FactoryStageArtifactError | undefined;
+    // Consolida a entrega após o encerramento para validar os dois arquivos já gravados.
+    if (acceptReport) {
+      try {
+        content = readFactoryArtifactFile(reportPath).toString('utf8');
+        if (!config.validateReport(content.trim())) {
+          throw new FactoryStageArtifactError(
+            'FACTORY_MARKDOWN_INVALID',
+            config.stage,
             reportPath,
-            `# ${config.incompleteTitle}\n\n${config.metadata}\n${config.incompleteNote} (${reason}).\n\nConsulte o registro da sessão: [${fileBasename}.session.md](./${fileBasename}.session.md).\n`,
+            'O relatório Markdown não contém o título e as seções obrigatórias',
           );
         }
-        onChange('incomplete');
+        readFactoryStageSidecar(config.stage, reportPath);
+      } catch (error) {
+        artifactError =
+          error instanceof FactoryStageArtifactError
+            ? error
+            : new FactoryStageArtifactError(
+                'FACTORY_MARKDOWN_READ_FAILED',
+                config.stage,
+                reportPath,
+                'Não foi possível ler o relatório Markdown como arquivo regular de até 5 MB, sem link simbólico',
+              );
       }
-    } catch { onError('Falha ao finalizar os arquivos de histórico. Verifique o espaço e as permissões do diretório de artefatos.'); }
-    finally { closeSync(descriptor); }
+    }
+    const saved = acceptReport && !artifactError;
+    try {
+      appendFileSync(
+        descriptor,
+        `\n\n- Encerramento: ${reason}\n- Fim: ${new Date().toISOString()}\n`,
+      );
+      if (
+        !saved &&
+        content === placeholder &&
+        (config.stage === 'triage' || config.stage === 'planning')
+      ) {
+        writeReportFileSafely(
+          reportPath,
+          `# ${config.reportPlaceholderTitle} incompleto\n\n${config.metadata}\n` +
+            `O relatório final não foi salvo antes do encerramento (${reason}).\n\n` +
+            `Consulte o registro da sessão: [${fileBasename}.session.md](./${fileBasename}.session.md).\n`,
+        );
+      }
+    } catch {
+      onError(
+        'Falha ao finalizar os arquivos de histórico. Verifique o espaço e as permissões do diretório de artefatos.',
+      );
+    } finally {
+      closeSync(descriptor);
+    }
+    onChange(saved ? 'saved' : 'incomplete');
+    if (artifactError) {
+      onError(artifactError.message);
+    }
+    return artifactError;
   };
-  return { reportPath, sessionPath, record, finish };
+  return { reportPath, sidecarPath, sessionPath, record, finish };
 }
 
-const REPORT_STAGE_HISTORY_CONFIG: Partial<
-  Record<
-    FactoryStageName,
-    {
-      readonly prefixSegment: string;
-      readonly reportPlaceholderTitle: string;
-      readonly reportPlaceholderNote: string;
-      readonly sessionTitle: string;
-      readonly validateReport: (content: string) => boolean;
-    }
-  >
-> = {
+const TRIAGE_REPORT_TITLE = 'Documento de Entendimento do Problema';
+const TRIAGE_REPORT_SECTIONS = {
+  summary: 'Síntese Central (Core)',
+  scenario: 'Detalhamento do Cenário (Causa e Expectativa)',
+  acceptanceCriteria: 'Critérios de Aceite',
+  negativeScope: 'Escopo Negativo (Fora do Escopo)',
+  technicalClues: 'Pistas Técnicas Citadas na Task',
+};
+const PLANNING_REPORT_TITLE = 'Diagnóstico Técnico + Plano de Implementação';
+const PLANNING_REPORT_SECTIONS = {
+  diagnosis: 'Diagnóstico Técnico',
+  decisions: 'Decisões de Design & Contratos',
+  changes: 'Plano de Alterações (Arquivo por Arquivo)',
+  regression: 'Cuidados de Regressão',
+  tests: 'Plano de Testes',
+};
+
+function validateEarlyStageReport(
+  content: string,
+  title: string,
+  sections: Readonly<Record<string, string>>,
+): boolean {
+  const sectionTitles = new Set(Object.values(sections));
+  const normalizeTitle = (heading: string) =>
+    heading.replaceAll('**', '').trim().replace(/[.:]$/, '');
+  const normalized = content
+    .replace(/^# (.+)$/m, (_, heading: string) => `# ${normalizeTitle(heading)}`)
+    .replace(
+      /^#{2,6}[ \t]+(?:\d+\.[ \t]+)?(.+)$/gm,
+      (_, heading: string) => `## ${normalizeTitle(heading)}`,
+    )
+    .replace(
+      /^\d+\.[ \t]+\*\*([^*\r\n]+)\*\*[.:]?[ \t]*([^\r\n]*)/gm,
+      (line: string, heading: string, body: string) => {
+        const sectionTitle = normalizeTitle(heading);
+        return sectionTitles.has(sectionTitle) ? `## ${sectionTitle}\n${body}` : line;
+      },
+    );
+  return validateStructuredMarkdownReport(normalized, title, sections);
+}
+
+const REPORT_STAGE_HISTORY_CONFIG: Readonly<Record<FactoryStageName, StageHistoryConfig>> = {
+  triage: {
+    prefixSegment: 'factory-triage',
+    reportPlaceholderTitle: TRIAGE_REPORT_TITLE,
+    reportPlaceholderNote: 'Triagem em andamento. O documento final será salvo aqui.',
+    sessionTitle: 'Registro da sessão de triagem (Factory)',
+    validateReport: content =>
+      validateEarlyStageReport(content, TRIAGE_REPORT_TITLE, TRIAGE_REPORT_SECTIONS),
+  },
+  planning: {
+    prefixSegment: 'factory-planning',
+    reportPlaceholderTitle: PLANNING_REPORT_TITLE,
+    reportPlaceholderNote: 'Planejamento em andamento. O plano final será salvo aqui.',
+    sessionTitle: 'Registro da sessão de planejamento (Factory)',
+    validateReport: content =>
+      validateEarlyStageReport(content, PLANNING_REPORT_TITLE, PLANNING_REPORT_SECTIONS),
+  },
   development: {
     prefixSegment: 'factory-development',
     reportPlaceholderTitle: IMPLEMENTATION_REPORT_TITLE,
@@ -182,7 +272,7 @@ const REPORT_STAGE_HISTORY_CONFIG: Partial<
 
 export function createFactoryHistory(
   request: FactoryRequest,
-  onChange: (state: HistoryState) => void,
+  onChange: (state: HistoryResult) => void,
   onError: (message: string) => void,
 ) {
   const startedAt = new Date().toISOString();
@@ -192,26 +282,18 @@ export function createFactoryHistory(
     title: 'Título da tarefa',
   };
   const metadata = `- Origem: ${labels[request.inputType]}\n- Tarefa: ${JSON.stringify(request.value)}\n- Repositório: ${JSON.stringify(request.repoPath)}\n- Início: ${startedAt}\n`;
-  const stageConfig = request.stage ? REPORT_STAGE_HISTORY_CONFIG[request.stage] : undefined;
+  const stage = request.stage ?? 'triage';
+  const stageConfig = REPORT_STAGE_HISTORY_CONFIG[stage];
 
   return createSessionHistory(
     {
+      ...stageConfig,
+      stage,
+      inputType: request.inputType,
       repoPath: request.repoPath,
       ...(request.flowId ? { flowId: request.flowId } : {}),
       slugSource: request.value,
-      prefix: stageConfig
-        ? `${stageConfig.prefixSegment}-${request.inputType}`
-        : `factory-${request.inputType}`,
       metadata,
-      reportPlaceholderTitle: stageConfig?.reportPlaceholderTitle ?? 'Plano da tarefa',
-      reportPlaceholderNote:
-        stageConfig?.reportPlaceholderNote ??
-        'Planejamento em andamento. O plano final será salvo aqui pelo Claude Code.',
-      sessionTitle:
-        stageConfig?.sessionTitle ?? 'Registro da sessão de planejamento (Factory)',
-      incompleteTitle: 'Plano da tarefa incompleto',
-      incompleteNote: 'O plano final não foi salvo pelo Claude antes do encerramento',
-      ...(stageConfig ? { validateReport: stageConfig.validateReport } : {}),
     },
     onChange,
     onError,

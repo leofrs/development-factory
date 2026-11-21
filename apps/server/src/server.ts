@@ -805,6 +805,7 @@ async function handleFactoryFlowApiRequest(
       sendFactoryFlowApiError(res, error.statusCode, {
         code: mapSessionErrorToFactoryCode(error.code),
         message: error.message,
+        ...(error.details?.length ? { details: [...error.details] } : {}),
       });
       return;
     }
