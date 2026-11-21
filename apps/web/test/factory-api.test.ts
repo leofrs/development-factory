@@ -4,8 +4,12 @@ import {
   FACTORY_FLOW_CONTRACT_VERSION,
   FACTORY_MAX_AUTO_ITERATIONS,
   FACTORY_STAGE_ORDER,
-  type FactoryFlow,
-  type FactoryFlowStage,
+} from '@development-factory/shared';
+import type {
+  FactoryFlow,
+  FactoryFlowStage,
+  FactoryPreflightRequest,
+  FactoryPreflightResponse,
 } from '@development-factory/shared';
 import {
   FactoryFlowApiError,
@@ -13,6 +17,7 @@ import {
   createFactoryFlow,
   fetchFactoryFlowDetails,
   fetchFactoryFlows,
+  fetchFactoryPreflight,
   returnFactoryFlowStage,
   rollbackFactoryFlowCheckpoint,
 } from '../src/api/factory-flows';
@@ -129,6 +134,89 @@ test('parseAppEventMessage valida eventos de fluxo da Factory via SSE', () => {
 
   assert.equal(parseAppEventMessage('{invalid-json'), null);
   assert.equal(parseAppEventMessage(JSON.stringify({ type: 'unknown' })), null);
+});
+
+test('cliente HTTP envia o preflight e preserva os resultados aprovado e bloqueado', async context => {
+  const repoPath = '/home/dev/repos/app';
+  const controller = new AbortController();
+  const approvedRequest: FactoryPreflightRequest = { repoPath, inputType: 'title' };
+  const approved: FactoryPreflightResponse = {
+    contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+    blocked: false,
+    checks: {
+      claude: { status: 'ok', message: 'Claude Code disponível.' },
+      jiraMcp: { status: 'ok', message: 'A entrada por título dispensa o MCP do Jira.' },
+      github: { status: 'warning', message: 'Use gh auth login antes da etapa de PR.' },
+      git: { status: 'ok', message: 'A branch base main existe.' },
+      profile: { status: 'ok', message: 'A Factory usará o perfil padrão deste repositório.' },
+    },
+  };
+  const blockedRequest: FactoryPreflightRequest = { repoPath, inputType: 'jira_url' };
+  const blocked: FactoryPreflightResponse = {
+    ...approved,
+    blocked: true,
+    checks: {
+      ...approved.checks,
+      jiraMcp: { status: 'error', message: 'Conecte o Atlassian Rovo em /mcp no Claude Code.' },
+    },
+  };
+  const cases = [
+    { request: approvedRequest, result: approved },
+    { request: blockedRequest, result: blocked },
+  ];
+  const fetchMock = context.mock.method(
+    globalThis,
+    'fetch',
+    async (url: string | URL | Request, init?: RequestInit) => {
+      const expected = cases.shift();
+      assert.ok(expected);
+      assert.equal(url, 'http://127.0.0.1:3001/api/factory/preflight');
+      assert.equal(init?.method, 'POST');
+      assert.equal(new Headers(init?.headers).get('Content-Type'), 'application/json');
+      assert.equal(init?.body, JSON.stringify(expected.request));
+      assert.equal(init?.cache, 'no-store');
+      assert.equal(init?.signal, controller.signal);
+      return Response.json(expected.result);
+    },
+  );
+
+  assert.deepEqual(await fetchFactoryPreflight(approvedRequest, controller.signal), approved);
+  assert.deepEqual(await fetchFactoryPreflight(blockedRequest, controller.signal), blocked);
+  assert.equal(fetchMock.mock.callCount(), 2);
+});
+
+test('cliente HTTP rejeita preflight inválido e preserva o erro retornado pela API', async context => {
+  const request: FactoryPreflightRequest = { repoPath: '/home/dev/repos/app', inputType: 'title' };
+  const responses = [
+    Response.json({ contractVersion: FACTORY_FLOW_CONTRACT_VERSION, blocked: false }),
+    Response.json(
+      {
+        error: {
+          code: 'FACTORY_FLOW_INVALID_INPUT',
+          message: 'Os dados para verificar o ambiente da Factory são inválidos.',
+        },
+      },
+      { status: 400 },
+    ),
+  ];
+  context.mock.method(globalThis, 'fetch', async () => {
+    const response = responses.shift();
+    assert.ok(response);
+    return response;
+  });
+
+  await assert.rejects(
+    fetchFactoryPreflight(request),
+    (error: unknown) =>
+      error instanceof FactoryFlowApiError && error.code === 'FACTORY_FLOW_INVALID_RESPONSE',
+  );
+  await assert.rejects(
+    fetchFactoryPreflight(request),
+    (error: unknown) =>
+      error instanceof FactoryFlowApiError &&
+      error.code === 'FACTORY_FLOW_INVALID_INPUT' &&
+      error.statusCode === 400,
+  );
 });
 
 test('cliente HTTP factory-flows cria, lista, detalha e cancela fluxos com validação Zod', async context => {

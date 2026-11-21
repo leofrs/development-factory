@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
+import type { FormEvent } from 'react';
 import {
   ArrowRight,
   FolderGit2,
@@ -9,57 +10,56 @@ import {
   Type,
   X,
 } from 'lucide-react';
-import {
-  FactoryTaskInputSchema,
-  type FactoryFlowInputType,
-  type FactoryTaskInput,
-} from '@development-factory/shared';
+import { FactoryFlowInputTypeSchema, FactoryTaskInputSchema } from '@development-factory/shared';
+import type { FactoryFlowInputType, FactoryTaskInput } from '@development-factory/shared';
+import type { FactoryPreflight } from '../hooks/useFactoryPreflight.js';
+import { FactoryPreflightPanel } from './FactoryPreflightPanel.js';
 
 interface FactoryTaskModalProps {
   repoPath: string;
+  inputType: FactoryFlowInputType;
+  preflight: FactoryPreflight;
+  onInputTypeChange: (inputType: FactoryFlowInputType) => void;
   onPickDirectory: () => void;
   onClose: () => void;
   onCreateFlow: (input: FactoryTaskInput) => Promise<void>;
 }
 
-const inputOptions: ReadonlyArray<{
-  type: FactoryFlowInputType;
-  label: string;
-  fieldLabel: string;
-  placeholder: string;
-  icon: typeof Link2;
-}> = [
-  {
-    type: 'jira_url',
+const inputOptions: Record<
+  FactoryFlowInputType,
+  { label: string; fieldLabel: string; placeholder: string; icon: typeof Link2 }
+> = {
+  jira_url: {
     label: 'URL do JIRA',
     fieldLabel: 'URL da tarefa no JIRA',
     placeholder: 'https://empresa.atlassian.net/browse/PROD-1234',
     icon: Link2,
   },
-  {
-    type: 'jira_key',
+  jira_key: {
     label: 'Chave da tarefa',
     fieldLabel: 'Chave da tarefa no JIRA',
     placeholder: 'PROD-1234',
     icon: Hash,
   },
-  {
-    type: 'title',
+  title: {
     label: 'Título da tarefa',
     fieldLabel: 'Título da tarefa',
     placeholder: 'Ex.: Implementar fluxo de recuperação de senha',
     icon: Type,
   },
-];
+};
 
 export function FactoryTaskModal({
   repoPath,
+  inputType,
+  preflight,
+  onInputTypeChange,
   onPickDirectory,
   onClose,
   onCreateFlow,
 }: FactoryTaskModalProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
-  const [inputType, setInputType] = useState<FactoryFlowInputType>('jira_key');
+  const preflightStatusId = useId();
   const [value, setValue] = useState('');
   const [error, setError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -75,16 +75,13 @@ export function FactoryTaskModal({
     };
   }, []);
 
-  const currentOption = inputOptions.find(option => option.type === inputType) ?? inputOptions[0]!;
+  const currentOption = inputOptions[inputType];
   const CurrentIcon = currentOption.icon;
+  const canStartFlow = preflight.state.status === 'checked' && !preflight.state.result.blocked;
 
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (isSubmitting) {
-      return;
-    }
-    if (!repoPath) {
-      setError('Selecione a pasta do repositório no WSL.');
+    if (isSubmitting || !canStartFlow) {
       return;
     }
 
@@ -100,16 +97,14 @@ export function FactoryTaskModal({
 
     setError('');
     setIsSubmitting(true);
-    try {
-      await onCreateFlow(parsed.data);
-    } catch (submitError) {
+    onCreateFlow(parsed.data).catch((submitError: unknown) => {
       setError(
         submitError instanceof Error
           ? submitError.message
           : 'Não foi possível iniciar o fluxo da Factory.',
       );
       setIsSubmitting(false);
-    }
+    });
   }
 
   return (
@@ -122,7 +117,7 @@ export function FactoryTaskModal({
         }
       }}
       aria-labelledby="factory-task-title"
-      className="terminal-dialog m-auto w-[calc(100%-1rem)] max-w-xl overflow-hidden rounded-2xl border border-line-strong bg-surface p-0 text-primary shadow-2xl sm:w-full"
+      className="terminal-dialog m-auto max-h-[calc(100dvh-1rem)] w-[calc(100%-1rem)] max-w-xl overflow-y-auto rounded-2xl border border-line-strong bg-surface p-0 text-primary shadow-2xl sm:w-full"
     >
       <div className="flex items-center justify-between border-b border-line bg-elevated px-6 py-4">
         <div>
@@ -145,42 +140,40 @@ export function FactoryTaskModal({
         </button>
       </div>
 
-      <form
-        onSubmit={event => {
-          void handleSubmit(event);
-        }}
-        className="space-y-5 p-6"
-      >
+      <form onSubmit={handleSubmit} className="space-y-5 p-6">
         <fieldset disabled={isSubmitting}>
           <legend className="mb-2.5 text-xs font-medium text-secondary">
             Como você quer identificar a tarefa?
           </legend>
           <div className="grid grid-cols-1 gap-1.5 rounded-lg border border-line-subtle bg-page p-1 sm:grid-cols-3">
-            {inputOptions.map(({ type, label, icon: Icon }) => (
-              <label
-                key={type}
-                className={`flex cursor-pointer items-center justify-center gap-2 rounded-md px-2.5 py-2.5 text-xs transition has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-accent ${
-                  inputType === type
-                    ? 'bg-selected text-accent ring-1 ring-accent/20'
-                    : 'text-muted hover:text-primary'
-                }`}
-              >
-                <input
-                  className="sr-only"
-                  type="radio"
-                  name="factoryInputType"
-                  value={type}
-                  checked={inputType === type}
-                  onChange={() => {
-                    setInputType(type);
-                    setValue('');
-                    setError('');
-                  }}
-                />
-                <Icon size={14} />
-                {label}
-              </label>
-            ))}
+            {FactoryFlowInputTypeSchema.options.map(type => {
+              const { label, icon: Icon } = inputOptions[type];
+              return (
+                <label
+                  key={type}
+                  className={`flex cursor-pointer items-center justify-center gap-2 rounded-md px-2.5 py-2.5 text-xs transition has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-accent ${
+                    inputType === type
+                      ? 'bg-selected text-accent ring-1 ring-accent/20'
+                      : 'text-muted hover:text-primary'
+                  }`}
+                >
+                  <input
+                    className="sr-only"
+                    type="radio"
+                    name="factoryInputType"
+                    value={type}
+                    checked={inputType === type}
+                    onChange={() => {
+                      onInputTypeChange(type);
+                      setValue('');
+                      setError('');
+                    }}
+                  />
+                  <Icon size={14} />
+                  {label}
+                </label>
+              );
+            })}
           </div>
         </fieldset>
 
@@ -227,6 +220,12 @@ export function FactoryTaskModal({
           </button>
         </div>
 
+        <FactoryPreflightPanel
+          preflight={preflight}
+          statusId={preflightStatusId}
+          isSubmitting={isSubmitting}
+        />
+
         {error && (
           <p role="alert" className="text-xs text-danger">
             {error}
@@ -235,7 +234,8 @@ export function FactoryTaskModal({
 
         <button
           type="submit"
-          disabled={isSubmitting}
+          disabled={isSubmitting || !canStartFlow}
+          aria-describedby={preflightStatusId}
           aria-busy={isSubmitting}
           className="flex w-full items-center justify-center gap-3 rounded-lg bg-accent py-3.5 text-sm font-semibold text-on-accent transition hover:bg-accent-hover active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-60"
         >

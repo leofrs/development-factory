@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
 import { ArrowRight, Check, ChevronRight, Folder, FolderGit2, GitBranch, GitPullRequest, Layers3, LockKeyhole, ScanLine, Terminal } from 'lucide-react';
 import { ClientMessageSchema, ReviewDestinationSchema } from '@development-factory/shared';
-import type { TargetType } from '@development-factory/shared';
+import type { FactoryFlowInputType, TargetType } from '@development-factory/shared';
 import { TerminalModal } from './components/TerminalModal';
 import { readSavedTheme, themeStorageKey } from './theme';
 import { DirectoryPicker } from './components/DirectoryPicker';
@@ -14,6 +14,7 @@ import { MarkdownViewerModal } from './components/MarkdownViewerModal';
 import { NotificationToastCenter } from './components/NotificationToastCenter';
 import { SeverityMatrixModal } from './components/SeverityMatrixModal';
 import { useBackgroundOperations } from './hooks/useBackgroundOperations';
+import { useFactoryPreflight } from './hooks/useFactoryPreflight.js';
 
 const storageKey = 'development-factory.repoPath';
 const reportDirectoryKey = 'development-factory.reportDirectory';
@@ -70,6 +71,9 @@ export default function App() {
     clearAllNotifications,
   } = useBackgroundOperations();
   const [configuringFactoryTask, setConfiguringFactoryTask] = useState(false);
+  const [factoryInputType, setFactoryInputType] = useState<FactoryFlowInputType>('jira_key');
+  const repositoryPreflight = useFactoryPreflight(view === 'factory' ? repoPath : '', 'title');
+  const taskPreflight = useFactoryPreflight(configuringFactoryTask ? repoPath : '', factoryInputType);
   const [roadmapFlowId, setRoadmapFlowId] = useState<string | null>(null);
   const [viewingMarkdownPath, setViewingMarkdownPath] = useState<string | null>(null);
   const [pickingDirectory, setPickingDirectory] = useState<'repository' | 'report' | null>(null);
@@ -146,8 +150,12 @@ export default function App() {
       {view === 'factory' ? (
         <FactoryPage
           repoPath={repoPath}
+          preflight={repositoryPreflight}
           onPickDirectory={() => setPickingDirectory('repository')}
-          onOpenNewFlow={() => setConfiguringFactoryTask(true)}
+          onOpenNewFlow={() => {
+            setFactoryInputType('jira_key');
+            setConfiguringFactoryTask(true);
+          }}
         />
       ) : (
         <main className="mx-auto max-w-6xl px-6 pb-28 pt-12 sm:px-10 sm:pt-20">
@@ -249,6 +257,9 @@ export default function App() {
       {configuringFactoryTask && (
         <FactoryTaskModal
           repoPath={repoPath}
+          inputType={factoryInputType}
+          preflight={taskPreflight}
+          onInputTypeChange={setFactoryInputType}
           onPickDirectory={() => setPickingDirectory('repository')}
           onClose={() => setConfiguringFactoryTask(false)}
           onCreateFlow={async task => {

@@ -5,20 +5,25 @@ import {
   FactoryFlowListResponseSchema,
   FactoryFlowSchema,
   FactoryFlowStageSchema,
+  FactoryPreflightResponseSchema,
   RollbackFactoryFlowCheckpointResponseSchema,
   TransitionFactoryFlowResponseSchema,
-  type AdvanceFactoryStageRequest,
-  type BackgroundSessionSummary,
-  type CancelFactoryFlowRequest,
-  type CreateFactoryFlowRequest,
-  type FactoryFlow,
-  type FactoryFlowDetails,
-  type FactoryFlowStage,
-  type ListFactoryFlowsFilterInput,
-  type RerunFactoryStageRequest,
-  type ReturnFactoryStageRequest,
-  type RollbackFactoryFlowCheckpointRequest,
-  type RollbackFactoryFlowCheckpointResponse,
+} from '@development-factory/shared';
+import type {
+  AdvanceFactoryStageRequest,
+  BackgroundSessionSummary,
+  CancelFactoryFlowRequest,
+  CreateFactoryFlowRequest,
+  FactoryFlow,
+  FactoryFlowDetails,
+  FactoryFlowStage,
+  FactoryPreflightRequest,
+  FactoryPreflightResponse,
+  ListFactoryFlowsFilterInput,
+  RerunFactoryStageRequest,
+  ReturnFactoryStageRequest,
+  RollbackFactoryFlowCheckpointRequest,
+  RollbackFactoryFlowCheckpointResponse,
 } from '@development-factory/shared';
 
 const API_BASE_URL = 'http://127.0.0.1:3001';
@@ -126,6 +131,41 @@ function parseOptionalSession(
     throw new FactoryFlowApiError(errorMessage, 'FACTORY_FLOW_INVALID_RESPONSE', statusCode);
   }
   return parsed.data;
+}
+
+export async function fetchFactoryPreflight(
+  request: FactoryPreflightRequest,
+  signal?: AbortSignal,
+): Promise<FactoryPreflightResponse> {
+  const fallbackMessage = 'Não foi possível verificar o ambiente da Factory.';
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/factory/preflight`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+      cache: 'no-store',
+      signal,
+    });
+    const payload = await parseJsonResponse(response);
+    if (!response.ok) {
+      throw extractApiError(payload, response.status, fallbackMessage);
+    }
+
+    const parsed = FactoryPreflightResponseSchema.safeParse(payload);
+    if (!parsed.success) {
+      throw new FactoryFlowApiError(
+        'Formato inesperado ao verificar o ambiente da Factory.',
+        'FACTORY_FLOW_INVALID_RESPONSE',
+        response.status,
+      );
+    }
+    return parsed.data;
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw error;
+    }
+    throw toFactoryFlowRequestError(error, fallbackMessage);
+  }
 }
 
 /** Lista fluxos da Factory persistidos no backend, com filtros opcionais. */

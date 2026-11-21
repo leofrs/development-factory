@@ -5,8 +5,11 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import {
   FACTORY_FLOW_CONTRACT_VERSION,
   FACTORY_MAX_AUTO_ITERATIONS,
-  type BackgroundSessionSummary,
-  type FactoryFlow,
+} from '@development-factory/shared';
+import type {
+  BackgroundSessionSummary,
+  FactoryFlow,
+  FactoryPreflightResponse,
 } from '@development-factory/shared';
 import { BackgroundTasksPopover } from '../src/components/BackgroundTasksPopover';
 import { FactoryFlowRoadmapModal } from '../src/components/FactoryFlowRoadmapModal';
@@ -15,10 +18,9 @@ import { FactoryTaskModal } from '../src/components/FactoryTaskModal';
 import { HistoryModal } from '../src/components/HistoryModal';
 import { MarkdownViewerModal } from '../src/components/MarkdownViewerModal';
 import { NotificationToastCenter } from '../src/components/NotificationToastCenter';
-import {
-  buildNotification,
-  type AppNotification,
-} from '../src/hooks/useBackgroundOperations';
+import { buildNotification } from '../src/hooks/useBackgroundOperations';
+import type { AppNotification } from '../src/hooks/useBackgroundOperations';
+import type { FactoryPreflight } from '../src/hooks/useFactoryPreflight.js';
 
 function createFlow(overrides: Partial<FactoryFlow> = {}): FactoryFlow {
   return {
@@ -71,11 +73,55 @@ function createSession(
 
 const noop = () => undefined;
 const noopAsync = async () => undefined;
+const repoPath = '/home/dev/repos/api-core';
+const checkingPreflight: FactoryPreflight = { state: { status: 'checking' }, revalidate: noop };
+const approvedPreflight: FactoryPreflightResponse = {
+  contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+  blocked: false,
+  checks: {
+    claude: { status: 'ok', message: 'O Claude Code está disponível no WSL.' },
+    jiraMcp: { status: 'ok', message: 'O MCP do Jira está conectado pelo Atlassian Rovo.' },
+    github: { status: 'warning', message: 'Use gh auth login antes da etapa de PR.' },
+    git: { status: 'ok', message: 'A branch base main existe.' },
+    profile: { status: 'ok', message: 'A Factory usará o perfil padrão deste repositório.' },
+  },
+};
 
-test('FactoryPage exibe apenas seleção de repositório e botão Iniciar fluxo', () => {
+function renderFactoryViews(preflight: FactoryPreflight) {
+  return [
+    renderToStaticMarkup(
+      createElement(FactoryPage, {
+        repoPath,
+        preflight,
+        onPickDirectory: noop,
+        onOpenNewFlow: noop,
+      }),
+    ),
+    renderToStaticMarkup(
+      createElement(FactoryTaskModal, {
+        repoPath,
+        inputType: 'jira_key',
+        preflight,
+        onInputTypeChange: noop,
+        onPickDirectory: noop,
+        onClose: noop,
+        onCreateFlow: noopAsync,
+      }),
+    ),
+  ];
+}
+
+function getStartButton(html: string): string {
+  const button = html.match(/<button\b[^>]*aria-describedby="[^"]+"[^>]*>/)?.[0];
+  assert.ok(button);
+  return button;
+}
+
+test('FactoryPage exibe a seleção do repositório e aguarda o preflight', () => {
   const html = renderToStaticMarkup(
     createElement(FactoryPage, {
-      repoPath: '/home/dev/repos/api-core',
+      repoPath,
+      preflight: checkingPreflight,
       onPickDirectory: noop,
       onOpenNewFlow: noop,
     }),
@@ -83,9 +129,52 @@ test('FactoryPage exibe apenas seleção de repositório e botão Iniciar fluxo'
 
   assert.match(html, /Iniciar fluxo/);
   assert.match(html, /\/home\/dev\/repos\/api-core/);
+  assert.match(html, /Verificando o ambiente/);
+  assert.match(getStartButton(html), / disabled=""/);
   assert.doesNotMatch(html, /Fluxos em andamento e concluídos/);
   assert.doesNotMatch(html, /Artefatos do fluxo selecionado/);
   assert.doesNotMatch(html, /Parar/);
+});
+
+test('FactoryPage e FactoryTaskModal exibem os checks e permitem iniciar com preflight aprovado', () => {
+  for (const html of renderFactoryViews({
+    state: { status: 'checked', result: approvedPreflight },
+    revalidate: noop,
+  })) {
+    assert.doesNotMatch(getStartButton(html), / disabled=""/);
+    assert.match(html, /Verificação concluída/);
+    assert.match(html, />claude</);
+    assert.match(html, />Jira MCP</);
+    assert.match(html, />gh auth</);
+    assert.match(html, />Git</);
+    assert.match(html, /Perfil do repositório/);
+    assert.match(html, /perfil padrão/);
+    assert.match(html, /Aviso/);
+    assert.match(html, /gh auth login/);
+  }
+});
+
+test('FactoryPage e FactoryTaskModal bloqueiam o início e exibem instruções de correção', () => {
+  const blockedPreflight: FactoryPreflightResponse = {
+    ...approvedPreflight,
+    blocked: true,
+    checks: {
+      ...approvedPreflight.checks,
+      git: { status: 'error', message: 'Corrija os problemas apontados pelo git fsck.' },
+      profile: { status: 'ok', message: 'O manifesto .development-factory.json é válido.' },
+    },
+  };
+
+  for (const html of renderFactoryViews({
+    state: { status: 'checked', result: blockedPreflight },
+    revalidate: noop,
+  })) {
+    assert.match(getStartButton(html), / disabled=""/);
+    assert.match(html, /Corrija as falhas abaixo/);
+    assert.match(html, /git fsck/);
+    assert.match(html, /\.development-factory\.json/);
+    assert.match(html, /Revalidar/);
+  }
 });
 
 test('FactoryFlowRoadmapModal exibe botão Parar apenas quando o fluxo está Em execução', () => {
@@ -446,7 +535,10 @@ test('Etapas 04 (tests) e 05 (review) geram notificações e botões de reexecu�
 
   const taskModalHtml = renderToStaticMarkup(
     createElement(FactoryTaskModal, {
-      repoPath: '/home/dev/repos/api-core',
+      repoPath,
+      inputType: 'jira_key',
+      preflight: checkingPreflight,
+      onInputTypeChange: noop,
       onPickDirectory: noop,
       onClose: noop,
       onCreateFlow: noopAsync,

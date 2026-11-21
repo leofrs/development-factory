@@ -1,12 +1,24 @@
+import { useId } from 'react';
 import { FolderGit2, Layers, Plus, Sparkles } from 'lucide-react';
+import type { FactoryPreflight } from '../hooks/useFactoryPreflight.js';
+import { FactoryPreflightPanel } from './FactoryPreflightPanel.js';
 
 interface FactoryPageProps {
   repoPath: string;
+  preflight: FactoryPreflight;
   onPickDirectory: () => void;
   onOpenNewFlow: () => void;
 }
 
-export function FactoryPage({ repoPath, onPickDirectory, onOpenNewFlow }: FactoryPageProps) {
+export function FactoryPage({
+  repoPath,
+  preflight,
+  onPickDirectory,
+  onOpenNewFlow,
+}: FactoryPageProps) {
+  const preflightStatusId = useId();
+  const canOpenFlow = preflight.state.status === 'checked' && !preflight.state.result.blocked;
+
   return (
     <main className="mx-auto flex min-h-[calc(100dvh-7rem)] max-w-4xl flex-col justify-center px-6 pb-32 pt-12 sm:px-10 sm:pt-16">
       <div className="mb-6 flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.18em] text-accent">
@@ -49,11 +61,17 @@ export function FactoryPage({ repoPath, onPickDirectory, onOpenNewFlow }: Factor
           <button
             type="button"
             onClick={onOpenNewFlow}
-            className="flex shrink-0 items-center justify-center gap-2.5 rounded-xl bg-accent px-6 py-3 text-sm font-semibold text-on-accent shadow-lg shadow-black/15 transition hover:bg-accent-hover active:scale-[0.99]"
+            disabled={!canOpenFlow}
+            aria-describedby={preflightStatusId}
+            className="flex shrink-0 items-center justify-center gap-2.5 rounded-xl bg-accent px-6 py-3 text-sm font-semibold text-on-accent shadow-lg shadow-black/15 transition enabled:hover:bg-accent-hover enabled:active:scale-[0.99]"
           >
             <Plus size={17} />
             Iniciar fluxo
           </button>
+        </div>
+
+        <div className="mt-5">
+          <FactoryPreflightPanel preflight={preflight} statusId={preflightStatusId} checkJiraInTask />
         </div>
 
         <p className="mt-4 flex items-center gap-2 border-t border-line-subtle pt-4 text-xs text-muted">
