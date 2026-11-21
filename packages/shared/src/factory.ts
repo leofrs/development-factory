@@ -36,6 +36,106 @@ export const GitBranchNameSchema = text
   );
 const gitBranchNameSchema = GitBranchNameSchema;
 
+const manifestStringSchema = z.string({ error: 'Informe um texto' });
+const manifestSingleLineSchema = manifestStringSchema.refine(
+  value => !/\p{Cc}/u.test(value),
+  'O texto não pode conter caracteres de controle',
+);
+const manifestTextSchema = manifestStringSchema.refine(
+  value => value.trim().length > 0 && !value.includes('\0'),
+  'Informe um texto não vazio e sem caracteres nulos',
+);
+
+const manifestObjectError: z.core.$ZodErrorMap = issue =>
+  issue.code === 'unrecognized_keys'
+    ? `Campos desconhecidos (${issue.keys.map(key => JSON.stringify(key)).join(', ')})`
+    : 'Informe um objeto JSON';
+
+function isManifestBranchName(value: string): boolean {
+  return (
+    value !== 'HEAD' &&
+    GitBranchNameSchema.safeParse(value).success &&
+    value.split('/').every(segment => !segment.startsWith('.') && !segment.endsWith('.lock'))
+  );
+}
+
+function isRepositoryRelativePath(value: string): boolean {
+  return (
+    !value.startsWith('/') &&
+    !/^[a-z]:/i.test(value) &&
+    !value.includes('\\') &&
+    !value.split('/').includes('..')
+  );
+}
+
+const manifestProtectedPathSchema = manifestSingleLineSchema
+  .trim()
+  .min(1, 'Informe um caminho protegido')
+  .refine(isRepositoryRelativePath, 'Use um caminho relativo com / e sem segmentos ".."');
+
+const manifestCommandArgumentSchema = manifestSingleLineSchema.refine(
+  value => !/(?:^|[/\\=:\s"']|^-[a-z]+)\.\.(?:[/\\:\s"']|$)/i.test(value),
+  'O argumento não pode conter segmentos ".."',
+);
+const manifestExecutableSchema = z
+  .string({ error: 'Informe o executável em texto' })
+  .pipe(manifestSingleLineSchema)
+  .refine(
+    value =>
+      value.length > 0 &&
+      value !== '.' &&
+      !value.endsWith('/') &&
+      !value.startsWith('-') &&
+      !/\s/.test(value) &&
+      isRepositoryRelativePath(value),
+    'Use o nome do executável ou um caminho relativo com / e sem segmentos ".."',
+  );
+const manifestCommandSchema = z
+  .tuple([manifestExecutableSchema], manifestCommandArgumentSchema, {
+    error: 'Informe uma lista com o executável seguido dos argumentos',
+  })
+  .nullable()
+  .default(null);
+
+const manifestCommandsSchema = z.strictObject(
+  {
+    typecheck: manifestCommandSchema,
+    lint: manifestCommandSchema,
+    test: manifestCommandSchema,
+    coverage: manifestCommandSchema,
+  },
+  { error: manifestObjectError },
+);
+
+export const FactoryRepositoryProfileSchema = z.strictObject(
+  {
+    baseBranch: manifestSingleLineSchema
+      .trim()
+      .refine(isManifestBranchName, 'Informe um nome de branch Git válido')
+      .nullable()
+      .default(null),
+    branchPattern: manifestSingleLineSchema
+      .trim()
+      .refine(value => {
+        const branchName = value.replaceAll('{slug}', 'tarefa');
+        return (
+          value.includes('{slug}') && !/[{}]/.test(branchName) && isManifestBranchName(branchName)
+        );
+      }, 'Informe um padrão de branch Git válido com o marcador {slug}')
+      .default('factory/{slug}'),
+    commands: manifestCommandsSchema.prefault({}),
+    protectedPaths: z
+      .array(manifestProtectedPathSchema, { error: 'Informe uma lista de caminhos protegidos' })
+      .default(() => []),
+    architectureRules: z
+      .array(manifestTextSchema, { error: 'Informe uma lista de regras de arquitetura' })
+      .default(() => []),
+    prTemplate: manifestTextSchema.nullable().default(null),
+  },
+  { error: manifestObjectError },
+);
+export type FactoryRepositoryProfile = z.infer<typeof FactoryRepositoryProfileSchema>;
+
 const gitCommitShaSchema = z
   .string()
   .trim()

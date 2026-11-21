@@ -74,6 +74,38 @@ Quando a execução concluir com um relatório válido, abra **Ver artefato** no
 
 Cole o prompt operacional definitivo em `FACTORY_DEVELOPMENT_SYSTEM_PROMPT` no arquivo [apps/server/src/prompts/factory-development.ts](apps/server/src/prompts/factory-development.ts).
 
+## Perfil de repositório da Factory
+
+O backend pode carregar um perfil de `.development-factory.json` na raiz do repositório alvo.
+O arquivo é opcional. Tanto a ausência do manifesto quanto a omissão de campos em um manifesto
+parcial usam os valores padrão abaixo.
+
+| Campo | Padrão | Formato |
+| --- | --- | --- |
+| `baseBranch` | `null` | Nome de branch Git. O padrão mantém a seleção automática da Factory pela branch atual ou, com `HEAD` destacado, por `main`, `master` ou `HEAD`, nessa ordem. |
+| `branchPattern` | `factory/{slug}` | Padrão de nome de branch Git com o marcador `{slug}` para a chave Jira ou o título normalizado da tarefa. |
+| `commands` | `null` por comando | Objeto com as chaves `typecheck`, `lint`, `test` e `coverage`. Cada comando é uma lista com o executável seguido dos argumentos. |
+| `protectedPaths` | `[]` | Lista de caminhos ou globs adicionais relativos à raiz do repositório. |
+| `architectureRules` | `[]` | Lista de regras de arquitetura em texto. |
+| `prTemplate` | `null` | Conteúdo Markdown do template de PR. |
+
+Este exemplo define a branch base, os comandos de tipagem e teste e um caminho protegido.
+
+```json
+{
+  "baseBranch": "main",
+  "commands": {
+    "typecheck": ["npm", "run", "typecheck"],
+    "test": ["npm", "test"]
+  },
+  "protectedPaths": ["infra/**"]
+}
+```
+
+Use um arquivo regular em UTF-8 de até 256 KiB. Use `/` nos caminhos protegidos e nos caminhos
+relativos de executáveis, como `./scripts/test`. O esquema rejeita caracteres de controle e
+segmentos `..` em caminhos protegidos e comandos, além de campos desconhecidos no manifesto.
+
 ## Verificações
 
 ```bash
