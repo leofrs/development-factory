@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  CancelFactoryFlowRequestSchema,
   CreateFactoryFlowRequestSchema,
   FACTORY_FLOW_CONTRACT_VERSION,
   FACTORY_FLOW_TRANSITIONS,
@@ -14,8 +15,11 @@ import {
   FactoryFlowSchema,
   FactoryFlowStageSchema,
   FactoryTaskInputSchema,
+  FactoryWorktreeRetentionPolicySchema,
   ListFactoryFlowsFilterSchema,
   RegisterFactoryFlowArtifactRequestSchema,
+  RollbackFactoryFlowCheckpointRequestSchema,
+  RollbackFactoryFlowCheckpointResponseSchema,
   canAdvanceFactoryStage,
   canReturnFactoryStage,
   canTransitionFactoryFlow,
@@ -485,4 +489,34 @@ test('FactoryFlowDetailsSchema e FactoryFlowCheckpointSchema validam metadados d
     }).success,
     false,
   );
+
+  assert.equal(FactoryWorktreeRetentionPolicySchema.safeParse('cleanup_on_finish').success, true);
+  assert.equal(FactoryWorktreeRetentionPolicySchema.safeParse('keep_all').success, true);
+  assert.equal(FactoryWorktreeRetentionPolicySchema.safeParse('cleanup_always').success, true);
+  assert.equal(FactoryWorktreeRetentionPolicySchema.safeParse('invalid_policy').success, false);
+
+  assert.equal(
+    CancelFactoryFlowRequestSchema.safeParse({ reason: 'Abortar', keepWorktree: true }).success,
+    true,
+  );
+  assert.equal(RollbackFactoryFlowCheckpointRequestSchema.safeParse({}).success, true);
+  assert.equal(
+    RollbackFactoryFlowCheckpointRequestSchema.safeParse({
+      checkpointId,
+      reason: 'Reverter regressão',
+    }).success,
+    true,
+  );
+  assert.equal(
+    RollbackFactoryFlowCheckpointRequestSchema.safeParse({ commitSha: 'not-a-sha' }).success,
+    false,
+  );
+
+  const rollbackResponse = RollbackFactoryFlowCheckpointResponseSchema.safeParse({
+    contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+    flow: flowWithWorktree,
+    checkpoint,
+    restoredCommitSha: checkpoint.commitSha,
+  });
+  assert.equal(rollbackResponse.success, true);
 });

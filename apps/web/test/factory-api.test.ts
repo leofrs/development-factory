@@ -14,6 +14,7 @@ import {
   fetchFactoryFlowDetails,
   fetchFactoryFlows,
   returnFactoryFlowStage,
+  rollbackFactoryFlowCheckpoint,
 } from '../src/api/factory-flows';
 import { parseAppEventMessage } from '../src/api/sessions';
 import {
@@ -243,6 +244,47 @@ test('cliente HTTP factory-flows cria, lista, detalha e cancela fluxos com valid
       );
     }
 
+    if (url.endsWith(`/api/factory/flows/${flow.id}/rollback`) && method === 'POST') {
+      const checkpointId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+      const commitSha = 'a1b2c3d4e5f6789012345678901234567890abcd';
+      return new Response(
+        JSON.stringify({
+          contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+          flow: {
+            ...flow,
+            state: 'waiting_action',
+            currentStage: 'development',
+            currentSessionId: null,
+            updatedAt: '2026-11-19T12:01:00.000Z',
+            transitions: [
+              ...flow.transitions,
+              {
+                from: 'running',
+                to: 'waiting_action',
+                stage: 'development',
+                at: '2026-11-19T12:01:00.000Z',
+                reason: 'Rollback concluído',
+              },
+            ],
+          },
+          checkpoint: {
+            contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+            id: checkpointId,
+            flowId: flow.id,
+            stage: 'development',
+            iteration: 1,
+            commitSha,
+            branchName: 'factory/fluxo-1',
+            sessionId: null,
+            message: 'Checkpoint 1',
+            createdAt: '2026-11-19T12:00:30.000Z',
+          },
+          restoredCommitSha: commitSha,
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
+
     return new Response(
       JSON.stringify({
         contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
@@ -279,6 +321,10 @@ test('cliente HTTP factory-flows cria, lista, detalha e cancela fluxos com valid
   });
   assert.equal(returned.flow.currentStage, 'development');
 
+  const rolledBack = await rollbackFactoryFlowCheckpoint(flow.id, {});
+  assert.equal(rolledBack.restoredCommitSha, 'a1b2c3d4e5f6789012345678901234567890abcd');
+  assert.equal(rolledBack.checkpoint.stage, 'development');
+
   await assert.rejects(
     () => fetchFactoryFlowDetails('99999999-9999-4999-8999-999999999999'),
     (error: unknown) =>
@@ -287,5 +333,5 @@ test('cliente HTTP factory-flows cria, lista, detalha e cancela fluxos com valid
       error.statusCode === 404,
   );
 
-  assert.equal(requests.length, 6);
+  assert.equal(requests.length, 7);
 });

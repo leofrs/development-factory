@@ -10,10 +10,13 @@ import {
   RerunFactoryStageRequestSchema,
   ReturnFactoryStageRequestSchema,
   ReviewDestinationSchema,
+  RollbackFactoryFlowCheckpointRequestSchema,
+  RollbackFactoryFlowCheckpointResponseSchema,
   isFinalFactoryFlowState,
   type AppEvent,
   type FactoryFlowApiErrorCode,
   type FactoryFlowApiErrorResponse,
+  type FactoryWorktreeRetentionPolicy,
   type ReviewApiErrorResponse,
 } from '@development-factory/shared';
 import { defaultReviewReportDirectory } from './artifacts.js';
@@ -717,6 +720,51 @@ async function handleFactoryFlowApiRequest(
       return;
     }
 
+    const rollbackMatch = /^\/api\/factory\/flows\/([^/]+)\/rollback$/.exec(url.pathname);
+    if (req.method === 'POST' && rollbackMatch?.[1] !== undefined) {
+      const flowId = decodeRouteParam(rollbackMatch[1]);
+      if (flowId === null) {
+        sendFactoryFlowApiError(res, 400, {
+          code: 'FACTORY_FLOW_INVALID_INPUT',
+          message: 'Identificador de fluxo inválido.',
+        });
+        return;
+      }
+      const rawBody = await readOptionalJsonBody(req);
+      const parsedBody = RollbackFactoryFlowCheckpointRequestSchema.safeParse(rawBody);
+      if (!parsedBody.success) {
+        sendFactoryFlowApiError(res, 400, {
+          code: 'FACTORY_FLOW_INVALID_INPUT',
+          message: 'Os dados para rollback do checkpoint são inválidos.',
+          details: parsedBody.error.issues.map(issue => issue.message),
+        });
+        return;
+      }
+      const currentDetails = factoryFlowService.getFlow(flowId);
+      if (
+        currentDetails.flow.currentSessionId &&
+        sessionManager.getSession(currentDetails.flow.currentSessionId)?.status === 'running'
+      ) {
+        sendFactoryFlowApiError(res, 409, {
+          code: 'FACTORY_FLOW_CONFLICT',
+          message: 'Encerre a sessão em execução antes de reverter o worktree.',
+        });
+        return;
+      }
+      const rolledBack = await factoryFlowService.rollbackToCheckpoint(flowId, {
+        ...parsedBody.data,
+        expectedUpdatedAt: parsedBody.data.expectedUpdatedAt ?? currentDetails.flow.updatedAt,
+      });
+      sessionManager.emitAppEvent({
+        type: 'factory_flow.updated',
+        flow: rolledBack.flow,
+      });
+      res
+        .writeHead(200)
+        .end(JSON.stringify(RollbackFactoryFlowCheckpointResponseSchema.parse(rolledBack)));
+      return;
+    }
+
     sendFactoryFlowApiError(res, 404, {
       code: 'FACTORY_FLOW_NOT_FOUND',
       message: 'Rota de fluxo da Factory não encontrada.',
@@ -752,11 +800,19 @@ async function handleFactoryFlowApiRequest(
   }
 }
 
-export function createReviewServer(options?: ReviewRepositoryOptions) {
+export interface CreateReviewServerOptions extends ReviewRepositoryOptions {
+  readonly worktreeRetentionPolicy?: FactoryWorktreeRetentionPolicy;
+}
+
+export function createReviewServer(options?: CreateReviewServerOptions) {
   const reviewRepository = SqliteReviewRepository.open(options);
   const factoryFlowRepository = SqliteFactoryFlowRepository.open(options);
   const reviewService = new ReviewService(reviewRepository);
-  const factoryFlowService = new FactoryFlowService(factoryFlowRepository);
+  const factoryFlowService = new FactoryFlowService(factoryFlowRepository, {
+    ...(options?.worktreeRetentionPolicy
+      ? { worktreeRetentionPolicy: options.worktreeRetentionPolicy }
+      : {}),
+  });
   const sessionManager = new SessionManager(reviewService, { factoryFlowService });
   const sseClients = new Set<() => void>();
   const server = createServer(async (req, res) => {

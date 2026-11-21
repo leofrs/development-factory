@@ -18,12 +18,15 @@ import {
   RegisterFactoryFlowArtifactRequestSchema,
   RegisterFactoryFlowCheckpointRequestSchema,
   ReturnFactoryStageRequestSchema,
+  RollbackFactoryFlowCheckpointRequestSchema,
   TransitionFactoryFlowRequestSchema,
   UpdateFactoryFlowWorktreeRequestSchema,
+  FactoryWorktreeRetentionPolicySchema,
   canReturnFactoryStage,
   getNextFactoryStage,
   getReadyFactoryStageArtifact,
   isFinalFactoryFlowState,
+  transitionFactoryFlow,
   type CreateFactoryFlowResponse,
   type FactoryFlow,
   type FactoryFlowApiErrorCode,
@@ -32,10 +35,21 @@ import {
   type FactoryFlowDetails,
   type FactoryFlowListResponse,
   type FactoryFlowStage,
+  type FactoryFlowState,
+  type FactoryFlowTransitionCommand,
   type FactoryStageName,
   type FactoryTaskInput,
+  type FactoryWorktreeRetentionPolicy,
+  type RollbackFactoryFlowCheckpointResponse,
   type TransitionFactoryFlowResponse,
 } from '@development-factory/shared';
+import {
+  FactoryWorktreeError,
+  cleanupFactoryWorktree,
+  createFactoryWorktreeCheckpoint,
+  getFactoryWorktreeHeadSha,
+  rollbackFactoryWorktreeToCheckpoint,
+} from './factory-worktree.js';
 import { maxHistoryBytes } from './history-reader.js';
 import {
   ReviewStorageError,
@@ -97,6 +111,7 @@ function isHandoffTargetStage(stage: FactoryStageName): stage is HandoffTargetSt
 export interface FactoryFlowServiceOptions {
   readonly now?: () => string;
   readonly generateId?: () => string;
+  readonly worktreeRetentionPolicy?: FactoryWorktreeRetentionPolicy;
 }
 
 export interface CreateFactoryFlowCommandOptions {
@@ -113,6 +128,22 @@ export interface CancelFactoryFlowOptions {
   readonly reason?: string;
   readonly at?: string;
   readonly expectedUpdatedAt?: string;
+  readonly keepWorktree?: boolean;
+}
+
+export interface TransitionFactoryFlowOptions extends SaveFactoryFlowTransitionOptions {
+  readonly keepWorktree?: boolean;
+}
+
+export interface CreateWorktreeCheckpointOptions {
+  readonly stage: FactoryStageName;
+  readonly iteration?: number;
+  readonly sessionId?: string | null;
+  readonly message?: string;
+}
+
+export interface CleanupFlowWorktreeOptions {
+  readonly keepWorktree?: boolean;
 }
 
 export interface UpdateStagePathsInput {
@@ -213,6 +244,23 @@ function mapUnexpectedError(error: unknown, conflictCode: FactoryFlowApiErrorCod
         );
     }
   }
+  if (error instanceof FactoryWorktreeError) {
+    const statusCode =
+      error.code === 'WORKTREE_CHECKPOINT_FAILED' || error.code === 'WORKTREE_CLEANUP_FAILED'
+        ? 500
+        : error.code === 'WORKTREE_ROLLBACK_FAILED' || error.code === 'WORKTREE_INVALID'
+          ? 409
+          : 400;
+    const code: FactoryFlowApiErrorCode =
+      statusCode === 400
+        ? 'FACTORY_FLOW_INVALID_INPUT'
+        : statusCode === 409
+          ? 'FACTORY_FLOW_CONFLICT'
+          : 'FACTORY_FLOW_INTERNAL_ERROR';
+    return new FactoryFlowServiceError(code, error.message, statusCode, undefined, {
+      cause: error,
+    });
+  }
   return new FactoryFlowServiceError(
     'FACTORY_FLOW_INTERNAL_ERROR',
     'Erro interno inesperado ao processar o fluxo da Factory.',
@@ -222,12 +270,126 @@ function mapUnexpectedError(error: unknown, conflictCode: FactoryFlowApiErrorCod
   );
 }
 
+function resolveRetentionPolicy(
+  explicit?: FactoryWorktreeRetentionPolicy,
+): FactoryWorktreeRetentionPolicy {
+  if (explicit !== undefined) {
+    return explicit;
+  }
+  const envPolicy = process.env.FACTORY_WORKTREE_RETENTION?.trim();
+  if (envPolicy) {
+    const parsed = FactoryWorktreeRetentionPolicySchema.safeParse(envPolicy);
+    if (parsed.success) {
+      return parsed.data;
+    }
+  }
+  return 'cleanup_on_finish';
+}
+
+function selectRollbackTargetCheckpoint(
+  checkpoints: readonly FactoryFlowCheckpoint[],
+  headState: { readonly headSha: string; readonly dirty: boolean },
+  criteria: { readonly checkpointId?: string; readonly commitSha?: string },
+): FactoryFlowCheckpoint {
+  if (criteria.checkpointId !== undefined) {
+    const match = checkpoints.find(item => item.id === criteria.checkpointId);
+    if (!match) {
+      throw new FactoryFlowServiceError(
+        'FACTORY_FLOW_NOT_FOUND',
+        `Checkpoint ${criteria.checkpointId} não encontrado neste fluxo.`,
+        404,
+      );
+    }
+    return match;
+  }
+
+  if (criteria.commitSha !== undefined) {
+    const needle = criteria.commitSha.toLowerCase();
+    const exactMatches = checkpoints.filter(item => item.commitSha.toLowerCase() === needle);
+    if (exactMatches.length > 0) {
+      const latestExact = exactMatches[exactMatches.length - 1];
+      if (latestExact) {
+        return latestExact;
+      }
+    }
+
+    const prefixMatches = checkpoints.filter(item =>
+      item.commitSha.toLowerCase().startsWith(needle),
+    );
+    const distinctShas = new Set(prefixMatches.map(item => item.commitSha.toLowerCase()));
+    if (distinctShas.size > 1) {
+      throw new FactoryFlowServiceError(
+        'FACTORY_FLOW_INVALID_INPUT',
+        `O prefixo de commit "${criteria.commitSha}" é ambíguo entre múltiplos checkpoints deste fluxo.`,
+        400,
+      );
+    }
+    const latestPrefix = prefixMatches[prefixMatches.length - 1];
+    if (!latestPrefix) {
+      throw new FactoryFlowServiceError(
+        'FACTORY_FLOW_NOT_FOUND',
+        `Checkpoint com commit "${criteria.commitSha}" não encontrado neste fluxo.`,
+        404,
+      );
+    }
+    return latestPrefix;
+  }
+
+  if (checkpoints.length === 0) {
+    throw new FactoryFlowServiceError(
+      'FACTORY_FLOW_CONFLICT',
+      'Não há checkpoints registrados neste fluxo para realizar rollback.',
+      409,
+    );
+  }
+
+  const latestCheckpoint = checkpoints[checkpoints.length - 1];
+  if (!latestCheckpoint) {
+    throw new FactoryFlowServiceError(
+      'FACTORY_FLOW_CONFLICT',
+      'Não há checkpoints registrados neste fluxo para realizar rollback.',
+      409,
+    );
+  }
+
+  if (headState.dirty) {
+    return latestCheckpoint;
+  }
+
+  const currentSha = headState.headSha.toLowerCase();
+  let matchingIndex = -1;
+  for (let index = checkpoints.length - 1; index >= 0; index -= 1) {
+    if (checkpoints[index]?.commitSha.toLowerCase() === currentSha) {
+      matchingIndex = index;
+      break;
+    }
+  }
+
+  if (matchingIndex === -1) {
+    return latestCheckpoint;
+  }
+
+  for (let index = matchingIndex - 1; index >= 0; index -= 1) {
+    const candidate = checkpoints[index];
+    if (candidate && candidate.commitSha.toLowerCase() !== currentSha) {
+      return candidate;
+    }
+  }
+
+  throw new FactoryFlowServiceError(
+    'FACTORY_FLOW_CONFLICT',
+    'O worktree já está no checkpoint inicial; não há checkpoint anterior para reverter.',
+    409,
+  );
+}
+
 /**
  * Serviço de domínio independente de transporte (HTTP/WebSocket) para orquestração de fluxos da Factory.
  */
 export class FactoryFlowService {
   private readonly now: () => string;
   private readonly generateId: () => string;
+  private readonly worktreeRetentionPolicy: FactoryWorktreeRetentionPolicy;
 
   constructor(
     private readonly repository: SqliteFactoryFlowRepository,
@@ -235,6 +397,24 @@ export class FactoryFlowService {
   ) {
     this.now = options.now ?? (() => new Date().toISOString());
     this.generateId = options.generateId ?? randomUUID;
+    this.worktreeRetentionPolicy = resolveRetentionPolicy(options.worktreeRetentionPolicy);
+  }
+
+  shouldCleanupWorktreeOnState(
+    state: FactoryFlowState,
+    keepWorktreeOverride?: boolean,
+  ): boolean {
+    if (keepWorktreeOverride) {
+      return false;
+    }
+    switch (this.worktreeRetentionPolicy) {
+      case 'keep_all':
+        return false;
+      case 'cleanup_always':
+        return state === 'completed' || state === 'cancelled' || state === 'failed';
+      case 'cleanup_on_finish':
+        return state === 'completed' || state === 'cancelled';
+    }
   }
 
   async createFlow(
@@ -408,7 +588,7 @@ export class FactoryFlowService {
   async transitionFlow(
     flowIdInput: string,
     commandInput: unknown,
-    options: SaveFactoryFlowTransitionOptions = {},
+    options: TransitionFactoryFlowOptions = {},
   ): Promise<TransitionFactoryFlowResponse> {
     const flowId = this.parseFlowId(flowIdInput);
 
@@ -432,10 +612,29 @@ export class FactoryFlowService {
     };
 
     try {
-      const result = await this.repository.withWriteLock(() => {
-        const currentStage = this.repository.getFlowById(flowId)?.currentStage;
+      const result = await this.repository.withWriteLock(async () => {
+        const currentFlow = this.repository.getFlowById(flowId);
+        if (!currentFlow) {
+          throw new FactoryFlowServiceError(
+            'FACTORY_FLOW_NOT_FOUND',
+            `Fluxo ${flowId} não encontrado.`,
+            404,
+          );
+        }
+
         if (
-          currentStage &&
+          saveOptions.expectedUpdatedAt !== undefined &&
+          currentFlow.updatedAt !== saveOptions.expectedUpdatedAt
+        ) {
+          throw new FactoryFlowServiceError(
+            'FACTORY_FLOW_CONFLICT',
+            `O fluxo ${flowId} foi alterado por outra operação concorrente.`,
+            409,
+          );
+        }
+
+        const currentStage = currentFlow.currentStage;
+        if (
           command.stage &&
           command.stage !== currentStage &&
           (isHandoffTargetStage(command.stage) || isHandoffTargetStage(currentStage))
@@ -446,7 +645,28 @@ export class FactoryFlowService {
             409,
           );
         }
-        return this.repository.saveFlowTransition(flowId, command, saveOptions);
+
+        // Valida a transição de domínio antes de remover o worktree externo.
+        const preview = transitionFactoryFlow(currentFlow, command);
+        let effectiveCommand: FactoryFlowTransitionCommand = command;
+        if (
+          currentFlow.worktreePath !== null &&
+          this.shouldCleanupWorktreeOnState(preview.state, options.keepWorktree)
+        ) {
+          try {
+            await cleanupFactoryWorktree({
+              repoPath: currentFlow.target.repoPath,
+              worktreePath: currentFlow.worktreePath,
+              branchName: currentFlow.branchName,
+              baseBranch: currentFlow.baseBranch,
+            });
+            effectiveCommand = { ...command, worktreePath: null };
+          } catch {
+            // Mantém a transição de estado mesmo que a limpeza externa do worktree falhe.
+          }
+        }
+
+        return this.repository.saveFlowTransition(flowId, effectiveCommand, saveOptions);
       });
 
       return {
@@ -779,7 +999,10 @@ export class FactoryFlowService {
         reason: options.reason ?? 'Fluxo cancelado pelo usuário',
         expectedUpdatedAt: options.expectedUpdatedAt,
       },
-      { expectedUpdatedAt: options.expectedUpdatedAt },
+      {
+        expectedUpdatedAt: options.expectedUpdatedAt,
+        keepWorktree: options.keepWorktree,
+      },
     );
   }
 
@@ -900,6 +1123,237 @@ export class FactoryFlowService {
         });
 
         return this.repository.saveCheckpoint(checkpoint);
+      });
+    } catch (error) {
+      throw mapUnexpectedError(error);
+    }
+  }
+
+  /**
+   * Gera um checkpoint Git no worktree do fluxo e registra o SHA resultante no SQLite.
+   * Retorna `null` caso o fluxo não possua worktree isolado associado.
+   */
+  async createWorktreeCheckpoint(
+    flowIdInput: string,
+    options: CreateWorktreeCheckpointOptions,
+  ): Promise<FactoryFlowCheckpoint | null> {
+    const flowId = this.parseFlowId(flowIdInput);
+    const parsedStage = FactoryStageNameSchema.safeParse(options.stage);
+    if (!parsedStage.success) {
+      throw new FactoryFlowServiceError(
+        'FACTORY_FLOW_INVALID_INPUT',
+        'Nome de etapa inválido para checkpoint.',
+        400,
+        formatZodIssues(parsedStage.error),
+      );
+    }
+
+    try {
+      return await this.repository.withWriteLock(async () => {
+        const flow = this.repository.getFlowById(flowId);
+        if (!flow) {
+          throw new FactoryFlowServiceError(
+            'FACTORY_FLOW_NOT_FOUND',
+            `Fluxo ${flowId} não encontrado.`,
+            404,
+          );
+        }
+
+        if (flow.worktreePath === null) {
+          return null;
+        }
+
+        const iteration = options.iteration ?? flow.iteration;
+        const gitCheckpoint = await createFactoryWorktreeCheckpoint({
+          repoPath: flow.target.repoPath,
+          worktreePath: flow.worktreePath,
+          stage: parsedStage.data,
+          iteration,
+          message: options.message,
+        });
+
+        const checkpoint = FactoryFlowCheckpointSchema.parse({
+          contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+          id: this.generateId(),
+          flowId,
+          stage: parsedStage.data,
+          iteration,
+          commitSha: gitCheckpoint.commitSha,
+          branchName: gitCheckpoint.branchName ?? flow.branchName,
+          sessionId: options.sessionId ?? null,
+          message: gitCheckpoint.message,
+          createdAt: this.now(),
+        });
+
+        return this.repository.saveCheckpoint(checkpoint);
+      });
+    } catch (error) {
+      throw mapUnexpectedError(error);
+    }
+  }
+
+  /**
+   * Reverte deterministicamente o worktree do fluxo para um checkpoint anterior registrado no SQLite.
+   */
+  async rollbackToCheckpoint(
+    flowIdInput: string,
+    requestInput: unknown = {},
+  ): Promise<RollbackFactoryFlowCheckpointResponse> {
+    const flowId = this.parseFlowId(flowIdInput);
+    const parsed = RollbackFactoryFlowCheckpointRequestSchema.safeParse(requestInput);
+    if (!parsed.success) {
+      throw new FactoryFlowServiceError(
+        'FACTORY_FLOW_INVALID_INPUT',
+        'Os dados para rollback do checkpoint são inválidos.',
+        400,
+        formatZodIssues(parsed.error),
+      );
+    }
+
+    try {
+      return await this.repository.withWriteLock(async () => {
+        const flow = this.repository.getFlowById(flowId);
+        if (!flow) {
+          throw new FactoryFlowServiceError(
+            'FACTORY_FLOW_NOT_FOUND',
+            `Fluxo ${flowId} não encontrado.`,
+            404,
+          );
+        }
+
+        if (
+          parsed.data.expectedUpdatedAt !== undefined &&
+          flow.updatedAt !== parsed.data.expectedUpdatedAt
+        ) {
+          throw new FactoryFlowServiceError(
+            'FACTORY_FLOW_CONFLICT',
+            `O fluxo ${flowId} foi alterado por outra operação concorrente.`,
+            409,
+          );
+        }
+
+        if (isFinalFactoryFlowState(flow.state)) {
+          throw new FactoryFlowServiceError(
+            'FACTORY_FLOW_INVALID_TRANSITION',
+            `Não é possível reverter o worktree de um fluxo no estado final ${flow.state}.`,
+            409,
+          );
+        }
+
+        if (flow.state === 'running' || flow.currentSessionId !== null) {
+          throw new FactoryFlowServiceError(
+            'FACTORY_FLOW_CONFLICT',
+            'Encerre a sessão em execução antes de reverter o worktree para um checkpoint anterior.',
+            409,
+          );
+        }
+
+        if (flow.worktreePath === null) {
+          throw new FactoryFlowServiceError(
+            'FACTORY_FLOW_CONFLICT',
+            'Este fluxo não possui um worktree isolado ativo para rollback.',
+            409,
+          );
+        }
+
+        const checkpoints = this.repository.listCheckpointsByFlowId(flowId);
+        const headState = await getFactoryWorktreeHeadSha({
+          repoPath: flow.target.repoPath,
+          worktreePath: flow.worktreePath,
+        });
+
+        const targetCheckpoint = selectRollbackTargetCheckpoint(checkpoints, headState, {
+          checkpointId: parsed.data.checkpointId,
+          commitSha: parsed.data.commitSha,
+        });
+
+        const rolledBack = await rollbackFactoryWorktreeToCheckpoint({
+          repoPath: flow.target.repoPath,
+          worktreePath: flow.worktreePath,
+          commitSha: targetCheckpoint.commitSha,
+        });
+
+        const at = this.now();
+        const auditReason =
+          parsed.data.reason ??
+          `Rollback do worktree para checkpoint ${targetCheckpoint.commitSha.slice(0, 7)} (${targetCheckpoint.stage}, iteração ${targetCheckpoint.iteration})`;
+
+        let updatedFlow: FactoryFlow;
+        if (flow.state === 'waiting_action') {
+          this.repository.saveFlowTransition(flowId, {
+            to: 'running',
+            stage: flow.currentStage,
+            at,
+            reason: `Iniciando rollback para checkpoint ${targetCheckpoint.commitSha.slice(0, 7)}`,
+            currentSessionId: null,
+          });
+          updatedFlow = this.repository.saveFlowTransition(flowId, {
+            to: 'waiting_action',
+            stage: flow.currentStage,
+            at,
+            reason: auditReason,
+            currentSessionId: null,
+          }).flow;
+        } else {
+          updatedFlow = this.repository.saveFlowTransition(flowId, {
+            to: 'waiting_action',
+            stage: flow.currentStage,
+            at,
+            reason: auditReason,
+            currentSessionId: null,
+          }).flow;
+        }
+
+        return {
+          contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+          flow: updatedFlow,
+          checkpoint: targetCheckpoint,
+          restoredCommitSha: rolledBack.commitSha,
+        };
+      });
+    } catch (error) {
+      throw mapUnexpectedError(error);
+    }
+  }
+
+  /**
+   * Remove com segurança o diretório externo do worktree quando permitido pela política de retenção,
+   * preservando `branchName`, `baseBranch` e checkpoints históricos no SQLite.
+   */
+  async cleanupFlowWorktree(
+    flowIdInput: string,
+    options: CleanupFlowWorktreeOptions = {},
+  ): Promise<FactoryFlow> {
+    const flowId = this.parseFlowId(flowIdInput);
+
+    try {
+      return await this.repository.withWriteLock(async () => {
+        const flow = this.repository.getFlowById(flowId);
+        if (!flow) {
+          throw new FactoryFlowServiceError(
+            'FACTORY_FLOW_NOT_FOUND',
+            `Fluxo ${flowId} não encontrado.`,
+            404,
+          );
+        }
+
+        if (
+          flow.worktreePath === null ||
+          !this.shouldCleanupWorktreeOnState(flow.state, options.keepWorktree)
+        ) {
+          return flow;
+        }
+
+        await cleanupFactoryWorktree({
+          repoPath: flow.target.repoPath,
+          worktreePath: flow.worktreePath,
+          branchName: flow.branchName,
+          baseBranch: flow.baseBranch,
+        });
+
+        return this.repository.updateFlowWorktree(flowId, {
+          worktreePath: null,
+        });
       });
     } catch (error) {
       throw mapUnexpectedError(error);

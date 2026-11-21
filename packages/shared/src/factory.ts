@@ -341,6 +341,13 @@ export const FactoryFlowWorktreeMetadataSchema = z.strictObject({
 });
 export type FactoryFlowWorktreeMetadata = z.infer<typeof FactoryFlowWorktreeMetadataSchema>;
 
+export const FactoryWorktreeRetentionPolicySchema = z.enum([
+  'cleanup_on_finish',
+  'cleanup_always',
+  'keep_all',
+]);
+export type FactoryWorktreeRetentionPolicy = z.infer<typeof FactoryWorktreeRetentionPolicySchema>;
+
 export const FactoryFlowTransitionSchema = z
   .strictObject({
     from: FactoryFlowStateSchema,
@@ -730,6 +737,7 @@ export type RerunFactoryStageRequest = z.infer<typeof RerunFactoryStageRequestSc
 export const CancelFactoryFlowRequestSchema = z.strictObject({
   reason: text.optional(),
   expectedUpdatedAt: timestamp.optional(),
+  keepWorktree: z.boolean().optional(),
 });
 export type CancelFactoryFlowRequest = z.infer<typeof CancelFactoryFlowRequestSchema>;
 
@@ -764,6 +772,26 @@ export const RegisterFactoryFlowCheckpointRequestSchema = z.strictObject({
 });
 export type RegisterFactoryFlowCheckpointRequest = z.infer<
   typeof RegisterFactoryFlowCheckpointRequestSchema
+>;
+
+export const RollbackFactoryFlowCheckpointRequestSchema = z.strictObject({
+  checkpointId: id.optional(),
+  commitSha: gitCommitShaSchema.optional(),
+  reason: text.optional(),
+  expectedUpdatedAt: timestamp.optional(),
+});
+export type RollbackFactoryFlowCheckpointRequest = z.infer<
+  typeof RollbackFactoryFlowCheckpointRequestSchema
+>;
+
+export const RollbackFactoryFlowCheckpointResponseSchema = z.strictObject({
+  contractVersion: version,
+  flow: FactoryFlowSchema,
+  checkpoint: FactoryFlowCheckpointSchema,
+  restoredCommitSha: gitCommitShaSchema,
+});
+export type RollbackFactoryFlowCheckpointResponse = z.infer<
+  typeof RollbackFactoryFlowCheckpointResponseSchema
 >;
 
 export const FactoryFlowApiErrorCodeSchema = z.enum([

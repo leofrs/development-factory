@@ -32,6 +32,7 @@ import { buildReportFileToolPermissions } from './factory-stage-runners.js';
 import { buildTestsRunnerArgs, readFactoryTestsInputs } from './factory-tests.js';
 import {
   FactoryWorktreeError,
+  getFactoryWorktreeHeadSha,
   provisionFactoryWorktree,
   verifyExistingFactoryWorktree,
 } from './factory-worktree.js';
@@ -697,6 +698,9 @@ export class SessionManager {
           stage,
           input.baseBranch,
         );
+        if (isRestrictedRunnerStage(stage) && RESTRICTED_RUNNER_STAGE_CONFIG[stage].mutatesRepo) {
+          flowDetails = await this.#ensurePreExecutionWorktreeCheckpoint(flowDetails, stage);
+        }
         return await this.#startFactoryRunner(
           { ...input, value: flowDetails.flow.target.value },
           stage,
@@ -761,6 +765,92 @@ export class SessionManager {
         throw new SessionManagerError('SESSION_CREATION_FAILED', error.message, 500);
       }
       throw error;
+    }
+  }
+
+  async #ensurePreExecutionWorktreeCheckpoint(
+    flowDetails: FactoryFlowDetails,
+    stage: RestrictedRunnerStage,
+  ): Promise<FactoryFlowDetails> {
+    if (!this.#factoryFlowService || flowDetails.flow.worktreePath === null) {
+      return flowDetails;
+    }
+
+    const flowId = flowDetails.flow.id;
+    try {
+      const headState = await getFactoryWorktreeHeadSha({
+        repoPath: flowDetails.flow.target.repoPath,
+        worktreePath: flowDetails.flow.worktreePath,
+      });
+
+      if (flowDetails.checkpoints.length === 0) {
+        await this.#factoryFlowService.createWorktreeCheckpoint(flowId, {
+          stage,
+          iteration: 0,
+          message: `Baseline inicial antes de ${RESTRICTED_RUNNER_STAGE_CONFIG[stage].label}`,
+        });
+        return this.#factoryFlowService.getFlow(flowId);
+      }
+
+      if (headState.dirty) {
+        await this.#factoryFlowService.createWorktreeCheckpoint(flowId, {
+          stage,
+          iteration: flowDetails.flow.iteration,
+          message: `Checkpoint de segurança antes de iniciar ${RESTRICTED_RUNNER_STAGE_CONFIG[stage].label} (iteração ${flowDetails.flow.iteration})`,
+        });
+        return this.#factoryFlowService.getFlow(flowId);
+      }
+
+      return flowDetails;
+    } catch (error) {
+      if (error instanceof FactoryWorktreeError) {
+        throw new SessionManagerError('FACTORY_STAGE_CONFLICT', error.message, 409);
+      }
+      if (error instanceof FactoryFlowServiceError) {
+        throw new SessionManagerError('FACTORY_STAGE_CONFLICT', error.message, error.statusCode);
+      }
+      throw error;
+    }
+  }
+
+  async #createStageCheckpointOrPause(
+    session: ManagedSession,
+    flowId: string,
+    stage: 'development' | 'tests',
+    iteration: number,
+  ): Promise<boolean> {
+    if (!this.#factoryFlowService) {
+      return true;
+    }
+    const normalizedIteration = iteration > 0 ? iteration : 1;
+    try {
+      await this.#factoryFlowService.createWorktreeCheckpoint(flowId, {
+        stage,
+        iteration: normalizedIteration,
+        sessionId: session.sessionId,
+        message: `Checkpoint automático após ${RESTRICTED_RUNNER_STAGE_CONFIG[stage].label} (iteração ${normalizedIteration})`,
+      });
+      return true;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : 'Falha desconhecida';
+      const paused = await this.#factoryFlowService.transitionFlow(flowId, {
+        to: 'waiting_action',
+        stage,
+        reason: `Falha ao gravar checkpoint após ${RESTRICTED_RUNNER_STAGE_CONFIG[stage].label}: ${detail}`,
+        currentSessionId: null,
+        loopPausedReason: `Não foi possível criar o checkpoint Git do worktree após ${RESTRICTED_RUNNER_STAGE_CONFIG[stage].label}: ${detail}`,
+      });
+      this.#emitEvent({
+        type: 'factory_flow.updated',
+        flow: paused.flow,
+      });
+      broadcast(session, {
+        type: 'factory_flow',
+        flowId,
+        stage,
+        state: paused.flow.state,
+      });
+      return false;
     }
   }
 
@@ -1455,6 +1545,15 @@ export class SessionManager {
         }
 
         if (stage === 'development') {
+          const checkpointOk = await this.#createStageCheckpointOrPause(
+            session,
+            flowId,
+            'development',
+            currentFlow.iteration,
+          );
+          if (!checkpointOk) {
+            return;
+          }
           const paused = await this.#factoryFlowService.transitionFlow(flowId, {
             to: 'waiting_action',
             stage,
@@ -1472,6 +1571,15 @@ export class SessionManager {
         }
 
         if (stage === 'tests') {
+          const checkpointOk = await this.#createStageCheckpointOrPause(
+            session,
+            flowId,
+            'tests',
+            currentFlow.iteration,
+          );
+          if (!checkpointOk) {
+            return;
+          }
           const paused = await this.#factoryFlowService.transitionFlow(flowId, {
             to: 'waiting_action',
             stage,

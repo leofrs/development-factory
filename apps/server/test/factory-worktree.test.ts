@@ -19,7 +19,11 @@ import { defaultFactoryWorktreesDirectory } from '../src/artifacts.js';
 import {
   FactoryWorktreeError,
   buildFactoryBranchSlug,
+  cleanupFactoryWorktree,
+  createFactoryWorktreeCheckpoint,
+  getFactoryWorktreeHeadSha,
   provisionFactoryWorktree,
+  rollbackFactoryWorktreeToCheckpoint,
   verifyExistingFactoryWorktree,
 } from '../src/factory-worktree.js';
 
@@ -287,6 +291,186 @@ test('verifyExistingFactoryWorktree rejeita worktree ausente ou symlink fora da 
           worktreePath: provisioned.worktreePath,
         }),
       error => error instanceof FactoryWorktreeError && error.code === 'WORKTREE_INVALID',
+    );
+  } finally {
+    env.restore();
+  }
+});
+
+test('createFactoryWorktreeCheckpoint cria commits de checkpoint, rollback restaura deterministicamente e cleanup preserva commits enviados ao remoto', async () => {
+  const env = createTempEnv('df-worktree-checkpoint-rollback-');
+  try {
+    const bareRemoteDir = join(env.rootDir, 'remote.git');
+    mkdirSync(bareRemoteDir);
+    execFileSync('git', ['init', '--bare', '-b', 'main'], { cwd: bareRemoteDir });
+
+    initGitRepoWithCommits(env.repoDir);
+    execFileSync('git', ['remote', 'add', 'origin', bareRemoteDir], { cwd: env.repoDir });
+    execFileSync('git', ['push', '-u', 'origin', 'main'], { cwd: env.repoDir });
+
+    const flowId = randomUUID();
+    const provisioned = await provisionFactoryWorktree({
+      repoPath: env.repoDir,
+      flowId,
+      target: { inputType: 'jira_key', value: 'PROD-888' },
+      baseBranch: 'main',
+    });
+
+    // Baseline limpo não cria commit vazio redundante.
+    const baseline = await createFactoryWorktreeCheckpoint({
+      repoPath: env.repoDir,
+      worktreePath: provisioned.worktreePath,
+      stage: 'development',
+      iteration: 0,
+      message: 'Baseline inicial',
+    });
+    assert.equal(baseline.createdCommit, false);
+    assert.equal(baseline.branchName, 'factory/prod-888');
+
+    // Iteração 1: altera arquivo rastreado e cria arquivo novo.
+    writeFileSync(join(provisioned.worktreePath, 'app.ts'), 'export const version = 2;\n');
+    writeFileSync(join(provisioned.worktreePath, 'feature.ts'), 'export const feature = "v1";\n');
+    const cp1 = await createFactoryWorktreeCheckpoint({
+      repoPath: env.repoDir,
+      worktreePath: provisioned.worktreePath,
+      stage: 'development',
+      iteration: 1,
+    });
+    assert.equal(cp1.createdCommit, true);
+    assert.notEqual(cp1.commitSha, baseline.commitSha);
+    assert.equal(
+      execFileSync('git', ['status', '--porcelain'], { cwd: provisioned.worktreePath, encoding: 'utf8' }),
+      '',
+    );
+
+    // Simula push da branch dedicada para o remoto antes da próxima iteração/limpeza.
+    execFileSync('git', ['push', '-u', 'origin', provisioned.branchName], {
+      cwd: provisioned.worktreePath,
+    });
+
+    // Iteração 2: introduz regressão + diretório/arquivo untracked + arquivo staged.
+    writeFileSync(join(provisioned.worktreePath, 'app.ts'), 'export const version = 999;\n');
+    mkdirSync(join(provisioned.worktreePath, 'temp-regression'));
+    writeFileSync(join(provisioned.worktreePath, 'temp-regression', 'junk.ts'), 'broken();\n');
+    const cp2 = await createFactoryWorktreeCheckpoint({
+      repoPath: env.repoDir,
+      worktreePath: provisioned.worktreePath,
+      stage: 'development',
+      iteration: 2,
+    });
+    assert.equal(cp2.createdCommit, true);
+
+    // Adiciona sujeira adicional não commitada após cp2.
+    writeFileSync(join(provisioned.worktreePath, 'uncommitted-junk.ts'), 'dirty();\n');
+    const headBeforeRollback = await getFactoryWorktreeHeadSha({
+      repoPath: env.repoDir,
+      worktreePath: provisioned.worktreePath,
+    });
+    assert.equal(headBeforeRollback.dirty, true);
+    assert.equal(headBeforeRollback.headSha, cp2.commitSha);
+
+    // Rollback determinístico para cp1 restaura arquivos e remove sujeira/commits posteriores.
+    const rolledBack = await rollbackFactoryWorktreeToCheckpoint({
+      repoPath: env.repoDir,
+      worktreePath: provisioned.worktreePath,
+      commitSha: cp1.commitSha,
+    });
+    assert.equal(rolledBack.commitSha, cp1.commitSha);
+    assert.equal(
+      readFileSync(join(provisioned.worktreePath, 'app.ts'), 'utf8'),
+      'export const version = 2;\n',
+    );
+    assert.equal(
+      readFileSync(join(provisioned.worktreePath, 'feature.ts'), 'utf8'),
+      'export const feature = "v1";\n',
+    );
+    assert.equal(existsSync(join(provisioned.worktreePath, 'temp-regression')), false);
+    assert.equal(existsSync(join(provisioned.worktreePath, 'uncommitted-junk.ts')), false);
+    assert.equal(
+      execFileSync('git', ['status', '--porcelain'], { cwd: provisioned.worktreePath, encoding: 'utf8' }),
+      '',
+    );
+
+    // SHA inexistente falha de forma limpa.
+    await assert.rejects(
+      () =>
+        rollbackFactoryWorktreeToCheckpoint({
+          repoPath: env.repoDir,
+          worktreePath: provisioned.worktreePath,
+          commitSha: 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
+        }),
+      error => error instanceof FactoryWorktreeError && error.code === 'WORKTREE_ROLLBACK_FAILED',
+    );
+
+    // Cleanup remove o diretório externo e faz prune sem apagar commits já enviados ao remoto.
+    const cleaned = await cleanupFactoryWorktree({
+      repoPath: env.repoDir,
+      worktreePath: provisioned.worktreePath,
+      branchName: provisioned.branchName,
+      baseBranch: provisioned.baseBranch,
+    });
+    assert.equal(cleaned.removedDirectory, true);
+    assert.equal(cleaned.prunedReferences, true);
+    assert.equal(cleaned.deletedLocalBranch, false);
+    assert.equal(existsSync(provisioned.worktreePath), false);
+
+    const worktreeList = execFileSync('git', ['worktree', 'list', '--porcelain'], {
+      cwd: env.repoDir,
+      encoding: 'utf8',
+    });
+    assert.equal(worktreeList.includes(provisioned.worktreePath), false);
+
+    // Commits já enviados ao remoto permanecem intactos no repositório remoto.
+    const remoteHead = execFileSync(
+      'git',
+      ['ls-remote', '--heads', 'origin', provisioned.branchName],
+      { cwd: env.repoDir, encoding: 'utf8' },
+    ).trim();
+    assert.ok(remoteHead.startsWith(cp1.commitSha));
+  } finally {
+    env.restore();
+  }
+});
+
+test('cleanupFactoryWorktree remove branch local vazia quando fluxo é cancelado sem commits e rejeita symlinks', async () => {
+  const env = createTempEnv('df-worktree-cleanup-empty-');
+  try {
+    initGitRepoWithCommits(env.repoDir);
+    const flowId = randomUUID();
+    const provisioned = await provisionFactoryWorktree({
+      repoPath: env.repoDir,
+      flowId,
+      target: { inputType: 'jira_key', value: 'PROD-321' },
+      baseBranch: 'main',
+    });
+
+    const symlinkPath = join(defaultFactoryWorktreesDirectory(), randomUUID());
+    symlinkSync(env.repoDir, symlinkPath);
+    await assert.rejects(
+      () =>
+        cleanupFactoryWorktree({
+          repoPath: env.repoDir,
+          worktreePath: symlinkPath,
+        }),
+      error => error instanceof FactoryWorktreeError && error.code === 'WORKTREE_INVALID',
+    );
+
+    const cleaned = await cleanupFactoryWorktree({
+      repoPath: env.repoDir,
+      worktreePath: provisioned.worktreePath,
+      branchName: provisioned.branchName,
+      baseBranch: provisioned.baseBranch,
+    });
+    assert.equal(cleaned.removedDirectory, true);
+    assert.equal(cleaned.prunedReferences, true);
+    assert.equal(cleaned.deletedLocalBranch, true);
+    assert.equal(existsSync(provisioned.worktreePath), false);
+    assert.equal(
+      execFileSync('git', ['branch', '--list', provisioned.branchName], {
+        cwd: env.repoDir,
+        encoding: 'utf8',
+      }).trim(),
+      '',
     );
   } finally {
     env.restore();

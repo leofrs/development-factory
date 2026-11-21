@@ -15,6 +15,7 @@ import {
   FactoryFlowApiErrorResponseSchema,
   FactoryFlowDetailsSchema,
   FactoryFlowListResponseSchema,
+  RollbackFactoryFlowCheckpointResponseSchema,
   ServerMessageSchema,
   TransitionFactoryFlowResponseSchema,
   type AppEvent,
@@ -1058,6 +1059,10 @@ test(
     );
     assert.equal(completedPrDetails.flow.currentStage, 'pr');
     assert.equal(completedPrDetails.flow.state, 'completed');
+    assert.equal(completedPrDetails.worktreePath, null);
+    assert.ok(completedPrDetails.branchName);
+    assert.ok(completedPrDetails.checkpoints.length >= 4);
+    assert.equal(existsSync(detailsOne.worktreePath), false);
 
     const extraAdvanceRes = await postAction('advance', { startSession: false });
     assert.equal(extraAdvanceRes.status, 409);
@@ -1496,3 +1501,445 @@ test('POST /api/factory/flows falha de forma limpa quando baseBranch não existe
   assert.equal(listed.flows[0]?.state, 'failed');
   assert.equal(listed.flows[0]?.worktreePath, null);
 });
+
+test(
+  'checkpoints automáticos entre blocos/iterações, rollback determinístico via API e limpeza segura ao concluir preservando remoto',
+  { timeout: 30000 },
+  async context => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'df-factory-checkpoints-rollback-'));
+    const binDir = join(rootDir, 'bin');
+    const repoDir = join(rootDir, 'repo');
+    const bareRemoteDir = join(rootDir, 'remote.git');
+    const xdgDataHome = join(rootDir, 'xdg-data');
+    const dbPath = join(rootDir, 'reviews.db');
+    mkdirSync(binDir);
+    mkdirSync(repoDir);
+    mkdirSync(bareRemoteDir);
+    mkdirSync(xdgDataHome);
+
+    execFileSync('git', ['init', '--bare', '-b', 'main'], { cwd: bareRemoteDir });
+    initGitRepo(repoDir, 'main');
+    execFileSync('git', ['remote', 'add', 'origin', bareRemoteDir], { cwd: repoDir });
+    execFileSync('git', ['push', '-u', 'origin', 'main'], { cwd: repoDir });
+
+    const claudeTarget = join(binDir, 'claude');
+    copyFileSync(new URL('./fixtures/claude.ts', import.meta.url), claudeTarget);
+    chmodSync(claudeTarget, 0o755);
+
+    const previousPath = process.env.PATH;
+    const previousXdg = process.env.XDG_DATA_HOME;
+    process.env.PATH = `${binDir}:${previousPath ?? ''}`;
+    process.env.XDG_DATA_HOME = xdgDataHome;
+
+    const { server, sessionManager, shutdown } = createReviewServer({ dbPath });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+
+    const address = server.address();
+    assert(address && typeof address !== 'string');
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+
+    context.after(async () => {
+      await shutdown();
+      process.env.PATH = previousPath;
+      if (previousXdg === undefined) {
+        delete process.env.XDG_DATA_HOME;
+      } else {
+        process.env.XDG_DATA_HOME = previousXdg;
+      }
+      rmSync(rootDir, { recursive: true, force: true });
+    });
+
+    const createRes = await fetch(`${baseUrl}/api/factory/flows`, {
+      method: 'POST',
+      headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        task: { inputType: 'jira_key', value: 'PROD-900', repoPath: repoDir },
+        baseBranch: 'main',
+        startSession: true,
+        cols: 100,
+        rows: 30,
+      }),
+    });
+    assert.equal(createRes.status, 201);
+    const created = (await createRes.json()) as {
+      flow: { id: string; worktreePath: string; branchName: string };
+      session: BackgroundSessionSummary;
+    };
+    const flowId = created.flow.id;
+    const worktreePath = created.flow.worktreePath;
+    const branchName = created.flow.branchName;
+    assert.ok(worktreePath && branchName);
+
+    const getDetails = async () => {
+      const response = await fetch(`${baseUrl}/api/factory/flows/${flowId}`, {
+        headers: { Origin: ALLOWED_ORIGIN },
+      });
+      assert.equal(response.status, 200);
+      return FactoryFlowDetailsSchema.parse(await response.json());
+    };
+
+    const waitForStageSession = async (stage: string, seen: Set<string>) => {
+      let match: BackgroundSessionSummary | undefined;
+      await waitFor(() => {
+        match = sessionManager
+          .listSessions()
+          .find(
+            s =>
+              s.flowId === flowId &&
+              s.stage === stage &&
+              s.status === 'running' &&
+              !seen.has(s.sessionId),
+          );
+        return Boolean(match);
+      });
+      assert.ok(match);
+      seen.add(match.sessionId);
+      await waitFor(() =>
+        /READY:[^\n]*\n/.test(sessionManager.getSession(match!.sessionId)?.buffer.replay() ?? ''),
+      );
+      return match;
+    };
+
+    const seen = new Set<string>([created.session.sessionId]);
+    await waitFor(() =>
+      /READY:[^\n]*\n/.test(sessionManager.getSession(created.session.sessionId)?.buffer.replay() ?? ''),
+    );
+    assert.ok(created.session.reportPath);
+    writeFileSync(created.session.reportPath, '# Especificação\n\nEscopo ok.\n');
+    sessionManager.writeInput(created.session.sessionId, 'EXIT0');
+
+    const planSession = await waitForStageSession('planning', seen);
+    assert.ok(planSession.reportPath);
+    writeFileSync(planSession.reportPath, '# Plano\n\n1. Implementar feature.\n');
+    sessionManager.writeInput(planSession.sessionId, 'EXIT0');
+    await waitFor(() => sessionManager.getSession(planSession.sessionId)?.status === 'exited');
+
+    const approveRes = await fetch(`${baseUrl}/api/factory/flows/${flowId}/advance`, {
+      method: 'POST',
+      headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ startSession: true }),
+    });
+    assert.equal(approveRes.status, 200);
+
+    // Development Iteração 1: cria arquivo de produção no worktree.
+    const dev1 = await waitForStageSession('development', seen);
+    assert.ok(dev1.reportPath);
+    // Rollback enquanto sessão está em execução deve ser bloqueado com 409.
+    const rollbackWhileRunning = await fetch(`${baseUrl}/api/factory/flows/${flowId}/rollback`, {
+      method: 'POST',
+      headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    assert.equal(rollbackWhileRunning.status, 409);
+
+    mkdirSync(join(worktreePath, 'src'), { recursive: true });
+    writeFileSync(join(worktreePath, 'src', 'feature.ts'), 'export const step = "iter1";\n');
+    writeFileSync(
+      dev1.reportPath,
+      [
+        '# Relatório de Implementação',
+        '## Arquivos alterados',
+        '- src/feature.ts',
+        '## Resumo das mudanças',
+        'Implementação iter 1.',
+        '## Status dos passos do plano',
+        '| Passo | Status | Obs |',
+        '| --- | --- | --- |',
+        '| 1 | Concluído | Iter 1 |',
+      ].join('\n'),
+    );
+    sessionManager.writeInput(dev1.sessionId, 'EXIT0');
+
+    // Tests Iteração 1: adiciona arquivo de teste no worktree.
+    const tests1 = await waitForStageSession('tests', seen);
+    assert.ok(tests1.reportPath);
+    mkdirSync(join(worktreePath, 'test'), { recursive: true });
+    writeFileSync(join(worktreePath, 'test', 'feature.test.ts'), 'export const testOk = true;\n');
+    writeFileSync(
+      tests1.reportPath,
+      [
+        '# Relatório de Testes',
+        '## Arquivos de teste alterados',
+        '- test/feature.test.ts',
+        '## Comandos executados',
+        '- npm test',
+        '## Resultados e cobertura',
+        'FAIL na validação iter 1.',
+      ].join('\n'),
+    );
+    sessionManager.writeInput(tests1.sessionId, 'EXIT0');
+
+    // Review Iteração 1: verifica checkpoints gravados até aqui e reprova para abrir Iteração 2.
+    const review1 = await waitForStageSession('review', seen);
+    assert.ok(review1.reportPath);
+    const detailsBeforeIter2 = await getDetails();
+    assert.equal(detailsBeforeIter2.checkpoints.length, 3);
+    assert.equal(detailsBeforeIter2.checkpoints[0]?.iteration, 0);
+    assert.equal(detailsBeforeIter2.checkpoints[1]?.stage, 'development');
+    assert.equal(detailsBeforeIter2.checkpoints[1]?.iteration, 1);
+    assert.equal(detailsBeforeIter2.checkpoints[2]?.stage, 'tests');
+    assert.equal(detailsBeforeIter2.checkpoints[2]?.iteration, 1);
+    const cpDev1 = detailsBeforeIter2.checkpoints[1]!;
+    const cpTests1 = detailsBeforeIter2.checkpoints[2]!;
+    assert.notEqual(cpDev1.commitSha, cpTests1.commitSha);
+
+    // Simula push da branch dedicada para o remoto antes de prosseguir.
+    execFileSync('git', ['push', '-u', 'origin', branchName], { cwd: worktreePath });
+
+    writeFileSync(
+      review1.reportPath,
+      [
+        '# Relatório de Code Review',
+        '## Resumo Executivo',
+        'Necessita ajuste.',
+        '## Pontos Encontrados',
+        '- [BLOQUEANTE] src/feature.ts:1 ajustar retorno.',
+        '## Parecer Final',
+        'Veredito: REPROVADO / REQUER AJUSTES',
+      ].join('\n'),
+    );
+    sessionManager.writeInput(review1.sessionId, 'EXIT0');
+
+    // Development Iteração 2: introduz regressão + arquivo extra e sai com relatório incompleto para pausar em waiting_action.
+    const dev2 = await waitForStageSession('development', seen);
+    assert.ok(dev2.reportPath);
+    writeFileSync(join(worktreePath, 'src', 'feature.ts'), 'export const step = "regression-iter2";\n');
+    writeFileSync(join(worktreePath, 'src', 'broken-extra.ts'), 'throw new Error("broken");\n');
+    writeFileSync(dev2.reportPath, '# Relatório de Implementação\n\nIncompleto.\n');
+    sessionManager.writeInput(dev2.sessionId, 'EXIT0');
+    await waitFor(() => sessionManager.getSession(dev2.sessionId)?.status === 'exited');
+
+    const pausedWithRegression = await waitForFlowDetails(
+      getDetails,
+      d => d.flow.state === 'waiting_action' && d.flow.currentSessionId === null,
+    );
+    assert.equal(pausedWithRegression.flow.iteration, 2);
+
+    // Rollback automático (sem informar checkpointId) restaura o último checkpoint válido (cpTests1).
+    const rollbackLatestRes = await fetch(`${baseUrl}/api/factory/flows/${flowId}/rollback`, {
+      method: 'POST',
+      headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason: 'Descartar regressão da iteração 2' }),
+    });
+    assert.equal(rollbackLatestRes.status, 200);
+    const rolledBackToTests1 = RollbackFactoryFlowCheckpointResponseSchema.parse(
+      await rollbackLatestRes.json(),
+    );
+    assert.equal(rolledBackToTests1.checkpoint.id, cpTests1.id);
+    assert.equal(rolledBackToTests1.restoredCommitSha, cpTests1.commitSha);
+    assert.equal(
+      readFileSync(join(worktreePath, 'src', 'feature.ts'), 'utf8'),
+      'export const step = "iter1";\n',
+    );
+    assert.equal(existsSync(join(worktreePath, 'src', 'broken-extra.ts')), false);
+    assert.equal(existsSync(join(worktreePath, 'test', 'feature.test.ts')), true);
+
+    // Rollback explícito para o checkpoint anterior (cpDev1) remove inclusive test/feature.test.ts.
+    const rollbackExplicitRes = await fetch(`${baseUrl}/api/factory/flows/${flowId}/rollback`, {
+      method: 'POST',
+      headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ checkpointId: cpDev1.id }),
+    });
+    assert.equal(rollbackExplicitRes.status, 200);
+    const rolledBackToDev1 = RollbackFactoryFlowCheckpointResponseSchema.parse(
+      await rollbackExplicitRes.json(),
+    );
+    assert.equal(rolledBackToDev1.restoredCommitSha, cpDev1.commitSha);
+    assert.equal(existsSync(join(worktreePath, 'test', 'feature.test.ts')), false);
+
+    // Conclui o fluxo via desenvolvimento -> testes -> review -> PR e valida limpeza do worktree preservando o remoto.
+    const rerunDevRes = await fetch(`${baseUrl}/api/factory/flows/${flowId}/rerun`, {
+      method: 'POST',
+      headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stage: 'development' }),
+    });
+    assert.equal(rerunDevRes.status, 200);
+    const dev2Rerun = await waitForStageSession('development', seen);
+    assert.ok(dev2Rerun.reportPath);
+    writeFileSync(join(worktreePath, 'src', 'feature.ts'), 'export const step = "final-clean";\n');
+    writeFileSync(
+      dev2Rerun.reportPath,
+      [
+        '# Relatório de Implementação',
+        '## Arquivos alterados',
+        '- src/feature.ts',
+        '## Resumo das mudanças',
+        'Implementação final.',
+        '## Status dos passos do plano',
+        '| Passo | Status | Obs |',
+        '| --- | --- | --- |',
+        '| 1 | Concluído | Final |',
+      ].join('\n'),
+    );
+    sessionManager.writeInput(dev2Rerun.sessionId, 'EXIT0');
+
+    const tests2 = await waitForStageSession('tests', seen);
+    assert.ok(tests2.reportPath);
+    writeFileSync(
+      tests2.reportPath,
+      [
+        '# Relatório de Testes',
+        '## Arquivos de teste alterados',
+        '- test/feature.test.ts',
+        '## Comandos executados',
+        '- npm test',
+        '## Resultados e cobertura',
+        'PASS 100%.',
+      ].join('\n'),
+    );
+    sessionManager.writeInput(tests2.sessionId, 'EXIT0');
+
+    const review2 = await waitForStageSession('review', seen);
+    assert.ok(review2.reportPath);
+    writeFileSync(
+      review2.reportPath,
+      [
+        '# Relatório de Code Review',
+        '## Resumo Executivo',
+        'Tudo certo.',
+        '## Pontos Encontrados',
+        'Nenhum.',
+        '## Parecer Final',
+        'Veredito: APROVADO PARA PR',
+      ].join('\n'),
+    );
+    sessionManager.writeInput(review2.sessionId, 'EXIT0');
+
+    await waitForFlowDetails(
+      getDetails,
+      d => d.flow.currentStage === 'pr' && d.flow.state === 'waiting_action',
+    );
+
+    const startPrRes = await fetch(`${baseUrl}/api/factory/flows/${flowId}/start`, {
+      method: 'POST',
+      headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stage: 'pr' }),
+    });
+    assert.equal(startPrRes.status, 200);
+    const prSession = await waitForStageSession('pr', seen);
+    assert.ok(prSession.reportPath);
+    writeFileSync(
+      prSession.reportPath,
+      [
+        '# Resumo do Pull Request',
+        '## Resumo das Alterações',
+        'Feature concluída.',
+        '## Validação e Evidências',
+        'Testes e Review aprovados.',
+        '## Dados do Pull Request',
+        `Branch ${branchName} -> main.`,
+      ].join('\n'),
+    );
+    sessionManager.writeInput(prSession.sessionId, 'EXIT0');
+
+    const completed = await waitForFlowDetails(getDetails, d => d.flow.state === 'completed');
+    assert.equal(completed.worktreePath, null);
+    assert.equal(completed.branchName, branchName);
+    assert.equal(existsSync(worktreePath), false);
+    assert.equal(
+      execFileSync('git', ['worktree', 'list', '--porcelain'], { cwd: repoDir, encoding: 'utf8' })
+        .includes(worktreePath),
+      false,
+    );
+
+    // Commits já enviados ao remoto permanecem intactos após a remoção do worktree.
+    const remoteBranch = execFileSync(
+      'git',
+      ['ls-remote', '--heads', 'origin', branchName],
+      { cwd: repoDir, encoding: 'utf8' },
+    ).trim();
+    assert.ok(remoteBranch.startsWith(cpTests1.commitSha));
+    assert.equal(execFileSync('git', ['status', '--porcelain'], { cwd: repoDir, encoding: 'utf8' }), '');
+  },
+);
+
+test(
+  'política de retenção controla remoção de worktree ao cancelar fluxo (cleanup_on_finish vs keep_all)',
+  { timeout: 30000 },
+  async context => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'df-factory-retention-policy-'));
+    const binDir = join(rootDir, 'bin');
+    const repoDir = join(rootDir, 'repo');
+    const xdgDataHome = join(rootDir, 'xdg-data');
+    const dbCleanup = join(rootDir, 'cleanup.db');
+    const dbKeep = join(rootDir, 'keep.db');
+    mkdirSync(binDir);
+    mkdirSync(repoDir);
+    mkdirSync(xdgDataHome);
+    initGitRepo(repoDir, 'main');
+
+    const claudeTarget = join(binDir, 'claude');
+    copyFileSync(new URL('./fixtures/claude.ts', import.meta.url), claudeTarget);
+    chmodSync(claudeTarget, 0o755);
+
+    const previousPath = process.env.PATH;
+    const previousXdg = process.env.XDG_DATA_HOME;
+    process.env.PATH = `${binDir}:${previousPath ?? ''}`;
+    process.env.XDG_DATA_HOME = xdgDataHome;
+
+    const cleanupServer = createReviewServer({
+      dbPath: dbCleanup,
+      worktreeRetentionPolicy: 'cleanup_on_finish',
+    });
+    const keepServer = createReviewServer({
+      dbPath: dbKeep,
+      worktreeRetentionPolicy: 'keep_all',
+    });
+    cleanupServer.server.listen(0, '127.0.0.1');
+    keepServer.server.listen(0, '127.0.0.1');
+    await Promise.all([once(cleanupServer.server, 'listening'), once(keepServer.server, 'listening')]);
+
+    const cleanupAddr = cleanupServer.server.address();
+    const keepAddr = keepServer.server.address();
+    assert(cleanupAddr && typeof cleanupAddr !== 'string');
+    assert(keepAddr && typeof keepAddr !== 'string');
+
+    context.after(async () => {
+      await Promise.all([cleanupServer.shutdown(), keepServer.shutdown()]);
+      process.env.PATH = previousPath;
+      if (previousXdg === undefined) {
+        delete process.env.XDG_DATA_HOME;
+      } else {
+        process.env.XDG_DATA_HOME = previousXdg;
+      }
+      rmSync(rootDir, { recursive: true, force: true });
+    });
+
+    const startAndCancel = async (port: number, key: string) => {
+      const baseUrl = `http://127.0.0.1:${port}`;
+      const res = await fetch(`${baseUrl}/api/factory/flows`, {
+        method: 'POST',
+        headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          task: { inputType: 'jira_key', value: key, repoPath: repoDir },
+          startSession: true,
+          cols: 80,
+          rows: 24,
+        }),
+      });
+      assert.equal(res.status, 201);
+      const body = (await res.json()) as { flow: { id: string; worktreePath: string } };
+      assert.ok(existsSync(body.flow.worktreePath));
+
+      const cancelRes = await fetch(`${baseUrl}/api/factory/flows/${body.flow.id}/cancel`, {
+        method: 'POST',
+        headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: 'Cancelamento para validar retenção' }),
+      });
+      assert.equal(cancelRes.status, 200);
+      const cancelled = TransitionFactoryFlowResponseSchema.parse(await cancelRes.json());
+      return { originalWorktreePath: body.flow.worktreePath, flow: cancelled.flow };
+    };
+
+    const cleaned = await startAndCancel(cleanupAddr.port, 'PROD-601');
+    assert.equal(cleaned.flow.state, 'cancelled');
+    assert.equal(cleaned.flow.worktreePath, null);
+    assert.equal(existsSync(cleaned.originalWorktreePath), false);
+
+    const kept = await startAndCancel(keepAddr.port, 'PROD-602');
+    assert.equal(kept.flow.state, 'cancelled');
+    assert.equal(kept.flow.worktreePath, kept.originalWorktreePath);
+    assert.equal(existsSync(kept.originalWorktreePath), true);
+  },
+);

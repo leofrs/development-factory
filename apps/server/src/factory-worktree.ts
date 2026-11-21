@@ -1,10 +1,12 @@
 import { execFile } from 'node:child_process';
-import { chmodSync, lstatSync, realpathSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, realpathSync, rmSync } from 'node:fs';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
-import type { FactoryFlowTarget } from '@development-factory/shared';
+import type { FactoryFlowTarget, FactoryStageName } from '@development-factory/shared';
 import {
   FactoryArtifactDestinationError,
   assertExternalManagedWorktree,
+  defaultFactoryWorktreesDirectory,
   resolveFactoryWorktreePath,
 } from './artifacts.js';
 
@@ -18,7 +20,10 @@ export type FactoryWorktreeErrorCode =
   | 'BASE_BRANCH_NOT_FOUND'
   | 'EMPTY_REPOSITORY'
   | 'WORKTREE_PROVISION_FAILED'
-  | 'WORKTREE_INVALID';
+  | 'WORKTREE_INVALID'
+  | 'WORKTREE_CHECKPOINT_FAILED'
+  | 'WORKTREE_ROLLBACK_FAILED'
+  | 'WORKTREE_CLEANUP_FAILED';
 
 /** Erro operacional no provisionamento ou validação do `git worktree` isolado de um fluxo da Factory. */
 export class FactoryWorktreeError extends Error {
@@ -50,26 +55,84 @@ export interface VerifyFactoryWorktreeOptions {
   readonly worktreePath: string;
 }
 
-const repoWorktreeQueues = new Map<string, Promise<void>>();
+export interface CreateFactoryWorktreeCheckpointOptions {
+  readonly repoPath: string;
+  readonly worktreePath: string;
+  readonly stage: FactoryStageName;
+  readonly iteration: number;
+  readonly message?: string;
+}
 
-async function withRepoWorktreeLock<T>(repoRoot: string, task: () => Promise<T>): Promise<T> {
-  const previous = repoWorktreeQueues.get(repoRoot) ?? Promise.resolve();
+export interface CreatedFactoryWorktreeCheckpoint {
+  readonly commitSha: string;
+  readonly branchName: string | null;
+  readonly message: string;
+  readonly createdCommit: boolean;
+}
+
+export interface FactoryWorktreeHeadState {
+  readonly headSha: string;
+  readonly dirty: boolean;
+  readonly branchName: string | null;
+}
+
+export interface RollbackFactoryWorktreeOptions {
+  readonly repoPath: string;
+  readonly worktreePath: string;
+  readonly commitSha: string;
+}
+
+export interface RolledBackFactoryWorktree {
+  readonly commitSha: string;
+  readonly branchName: string | null;
+}
+
+export interface CleanupFactoryWorktreeOptions {
+  readonly repoPath: string;
+  readonly worktreePath: string;
+  readonly branchName?: string | null;
+  readonly baseBranch?: string | null;
+}
+
+export interface CleanedUpFactoryWorktree {
+  readonly removedDirectory: boolean;
+  readonly prunedReferences: boolean;
+  readonly deletedLocalBranch: boolean;
+}
+
+const repoWorktreeQueues = new Map<string, Promise<void>>();
+const worktreeOperationQueues = new Map<string, Promise<void>>();
+
+async function withQueuedLock<T>(
+  queues: Map<string, Promise<void>>,
+  key: string,
+  task: () => Promise<T>,
+): Promise<T> {
+  const previous = queues.get(key) ?? Promise.resolve();
   let releaseCurrent: () => void = () => undefined;
   const current = new Promise<void>(resolve => {
     releaseCurrent = resolve;
   });
   const tail = previous.catch(() => undefined).then(() => current);
-  repoWorktreeQueues.set(repoRoot, tail);
+  queues.set(key, tail);
 
   await previous.catch(() => undefined);
   try {
     return await task();
   } finally {
     releaseCurrent();
-    if (repoWorktreeQueues.get(repoRoot) === tail) {
-      repoWorktreeQueues.delete(repoRoot);
+    if (queues.get(key) === tail) {
+      queues.delete(key);
     }
   }
+}
+
+function withRepoWorktreeLock<T>(repoRoot: string, task: () => Promise<T>): Promise<T> {
+  return withQueuedLock(repoWorktreeQueues, repoRoot, task);
+}
+
+function withWorktreeLock<T>(worktreePath: string, task: () => Promise<T>): Promise<T> {
+  return withQueuedLock(worktreeOperationQueues, worktreePath, task);
 }
 
 async function runGit(repoPath: string, args: readonly string[]): Promise<string> {
@@ -389,4 +452,300 @@ export async function verifyExistingFactoryWorktree(
   }
 
   return resolvedWorktree;
+}
+
+async function resolveGitCommitAuthorArgs(worktreePath: string): Promise<string[]> {
+  const configuredName = await tryRunGit(worktreePath, ['config', 'user.name']);
+  const configuredEmail = await tryRunGit(worktreePath, ['config', 'user.email']);
+  const args: string[] = [];
+  if (!configuredName) {
+    args.push('-c', 'user.name=Development Factory');
+  }
+  if (!configuredEmail) {
+    args.push('-c', 'user.email=factory@development-factory.local');
+  }
+  return args;
+}
+
+function isWithinDirectory(parent: string, target: string): boolean {
+  const diff = relative(parent, target);
+  return diff !== '' && diff !== '..' && !diff.startsWith(`..${sep}`) && !isAbsolute(diff);
+}
+
+async function isBranchCheckedOutInAnyWorktree(
+  repoRoot: string,
+  branchName: string,
+): Promise<boolean> {
+  const porcelain = await tryRunGit(repoRoot, ['worktree', 'list', '--porcelain']);
+  if (!porcelain) {
+    return false;
+  }
+  const targetRef = `refs/heads/${branchName}`;
+  return porcelain
+    .split(/\r?\n/)
+    .some(line => line.trim() === `branch ${targetRef}`);
+}
+
+async function hasRemoteTrackingOrPublishedBranch(
+  repoRoot: string,
+  branchName: string,
+): Promise<boolean> {
+  const upstream = await tryRunGit(repoRoot, [
+    'for-each-ref',
+    '--format=%(upstream)',
+    `refs/heads/${branchName}`,
+  ]);
+  if (upstream && upstream.length > 0) {
+    return true;
+  }
+
+  const remoteRefs = await tryRunGit(repoRoot, [
+    'for-each-ref',
+    '--format=%(refname)',
+    `refs/remotes/*/${branchName}`,
+  ]);
+  return Boolean(remoteRefs && remoteRefs.length > 0);
+}
+
+/**
+ * Inspeciona o `HEAD` atual e se há alterações pendentes (staged, unstaged ou untracked) no worktree.
+ */
+export async function getFactoryWorktreeHeadSha(
+  options: VerifyFactoryWorktreeOptions,
+): Promise<FactoryWorktreeHeadState> {
+  const resolvedWorktree = await verifyExistingFactoryWorktree(options);
+  return withWorktreeLock(resolvedWorktree, async () => {
+    try {
+      const headSha = await verifyCommitRef(resolvedWorktree, 'HEAD');
+      const status = await runGit(resolvedWorktree, ['status', '--porcelain']);
+      const branchName = await tryRunGit(resolvedWorktree, ['branch', '--show-current']);
+      return {
+        headSha,
+        dirty: status.length > 0,
+        branchName: branchName || null,
+      };
+    } catch (error) {
+      if (error instanceof FactoryWorktreeError) {
+        throw error;
+      }
+      throw new FactoryWorktreeError(
+        'WORKTREE_INVALID',
+        'Não foi possível inspecionar o estado Git do worktree.',
+        { cause: error },
+      );
+    }
+  });
+}
+
+/**
+ * Cria um commit de checkpoint no worktree caso haja alterações pendentes (ou captura o `HEAD` atual
+ * quando limpo) e retorna o SHA resultante para persistência no SQLite.
+ */
+export async function createFactoryWorktreeCheckpoint(
+  options: CreateFactoryWorktreeCheckpointOptions,
+): Promise<CreatedFactoryWorktreeCheckpoint> {
+  const resolvedWorktree = await verifyExistingFactoryWorktree({
+    repoPath: options.repoPath,
+    worktreePath: options.worktreePath,
+  });
+
+  const commitMessage =
+    options.message?.trim() ||
+    `factory(checkpoint): ${options.stage} (iteração ${options.iteration})`;
+
+  return withWorktreeLock(resolvedWorktree, async () => {
+    try {
+      const statusBefore = await runGit(resolvedWorktree, ['status', '--porcelain']);
+      let createdCommit = false;
+
+      if (statusBefore.length > 0) {
+        await runGit(resolvedWorktree, ['add', '-A']);
+        const stagedStatus = await runGit(resolvedWorktree, ['status', '--porcelain']);
+        if (stagedStatus.length > 0) {
+          const authorArgs = await resolveGitCommitAuthorArgs(resolvedWorktree);
+          await runGit(resolvedWorktree, [
+            ...authorArgs,
+            'commit',
+            '--no-verify',
+            '-m',
+            commitMessage,
+          ]);
+          createdCommit = true;
+        }
+      }
+
+      const commitSha = await verifyCommitRef(resolvedWorktree, 'HEAD');
+      const branchName = await tryRunGit(resolvedWorktree, ['branch', '--show-current']);
+      return {
+        commitSha,
+        branchName: branchName || null,
+        message: commitMessage,
+        createdCommit,
+      };
+    } catch (error) {
+      if (error instanceof FactoryWorktreeError) {
+        throw error;
+      }
+      throw new FactoryWorktreeError(
+        'WORKTREE_CHECKPOINT_FAILED',
+        `Não foi possível criar o checkpoint Git do worktree na etapa ${options.stage}.`,
+        { cause: error },
+      );
+    }
+  });
+}
+
+/**
+ * Reverte deterministicamente o worktree para o commit SHA de um checkpoint anterior (`git reset --hard` + `git clean -fd`).
+ */
+export async function rollbackFactoryWorktreeToCheckpoint(
+  options: RollbackFactoryWorktreeOptions,
+): Promise<RolledBackFactoryWorktree> {
+  const resolvedWorktree = await verifyExistingFactoryWorktree({
+    repoPath: options.repoPath,
+    worktreePath: options.worktreePath,
+  });
+
+  return withWorktreeLock(resolvedWorktree, async () => {
+    let targetSha: string;
+    try {
+      targetSha = await verifyCommitRef(resolvedWorktree, options.commitSha);
+    } catch (error) {
+      throw new FactoryWorktreeError(
+        'WORKTREE_ROLLBACK_FAILED',
+        `O commit de checkpoint "${options.commitSha}" não foi encontrado ou é inválido neste worktree.`,
+        { cause: error },
+      );
+    }
+
+    try {
+      await runGit(resolvedWorktree, ['reset', '--hard', targetSha]);
+      await runGit(resolvedWorktree, ['clean', '-fd']);
+      const headSha = await verifyCommitRef(resolvedWorktree, 'HEAD');
+      const statusAfter = await runGit(resolvedWorktree, ['status', '--porcelain']);
+      if (headSha !== targetSha || statusAfter.length > 0) {
+        throw new Error('O estado resultante do worktree diverge do checkpoint solicitado.');
+      }
+      const branchName = await tryRunGit(resolvedWorktree, ['branch', '--show-current']);
+      return {
+        commitSha: headSha,
+        branchName: branchName || null,
+      };
+    } catch (error) {
+      if (error instanceof FactoryWorktreeError) {
+        throw error;
+      }
+      throw new FactoryWorktreeError(
+        'WORKTREE_ROLLBACK_FAILED',
+        `Não foi possível reverter o worktree para o checkpoint ${targetSha.slice(0, 7)}.`,
+        { cause: error },
+      );
+    }
+  });
+}
+
+/**
+ * Remove com segurança o diretório externo do worktree (`git worktree remove`) e faz prune das referências
+ * (`git worktree prune`) sem apagar commits ou referências enviadas ao remoto.
+ */
+export async function cleanupFactoryWorktree(
+  options: CleanupFactoryWorktreeOptions,
+): Promise<CleanedUpFactoryWorktree> {
+  const worktreesRootRaw = defaultFactoryWorktreesDirectory();
+  const worktreesRootEntry = lstatSync(worktreesRootRaw, { throwIfNoEntry: false });
+  const worktreesRoot =
+    worktreesRootEntry && !worktreesRootEntry.isSymbolicLink() && worktreesRootEntry.isDirectory()
+      ? realpathSync(worktreesRootRaw)
+      : resolve(worktreesRootRaw);
+
+  const entry = lstatSync(options.worktreePath, { throwIfNoEntry: false });
+  if (entry?.isSymbolicLink()) {
+    throw new FactoryWorktreeError(
+      'WORKTREE_INVALID',
+      'O caminho do worktree é um link simbólico e não pode ser removido.',
+    );
+  }
+
+  const candidatePath = entry ? realpathSync(options.worktreePath) : resolve(options.worktreePath);
+  if (!isWithinDirectory(worktreesRoot, candidatePath)) {
+    throw new FactoryWorktreeError(
+      'WORKTREE_INVALID',
+      'A limpeza só pode atuar em worktrees dentro do diretório gerenciado da Factory.',
+    );
+  }
+
+  if (!existsSync(options.repoPath)) {
+    let removedDirectory = false;
+    if (entry?.isDirectory()) {
+      cleanupOrphanWorktreeDirectory(candidatePath);
+      removedDirectory = true;
+    }
+    return {
+      removedDirectory,
+      prunedReferences: false,
+      deletedLocalBranch: false,
+    };
+  }
+
+  const repoRoot = await resolveValidGitRepoRoot(options.repoPath);
+
+  return withRepoWorktreeLock(repoRoot, async () => {
+    let removedDirectory = false;
+    const currentEntry = lstatSync(candidatePath, { throwIfNoEntry: false });
+    if (currentEntry?.isDirectory()) {
+      try {
+        await runGit(repoRoot, ['worktree', 'remove', '--force', candidatePath]);
+        removedDirectory = true;
+      } catch {
+        // Caso o diretório não esteja mais registrado em `.git/worktrees`, remove o órfão com segurança.
+        cleanupOrphanWorktreeDirectory(candidatePath);
+        removedDirectory = !existsSync(candidatePath);
+      }
+    }
+
+    await runGit(repoRoot, ['worktree', 'prune']);
+    const prunedReferences = true;
+
+    let deletedLocalBranch = false;
+    if (options.branchName) {
+      const localRef = `refs/heads/${options.branchName}`;
+      const existsLocally = await gitRefExists(repoRoot, localRef);
+      const checkedOut = existsLocally
+        ? await isBranchCheckedOutInAnyWorktree(repoRoot, options.branchName)
+        : true;
+      const publishedOrTracked = existsLocally
+        ? await hasRemoteTrackingOrPublishedBranch(repoRoot, options.branchName)
+        : true;
+
+      if (existsLocally && !checkedOut && !publishedOrTracked) {
+        let baseRef: string | null = null;
+        if (options.baseBranch) {
+          if (await gitRefExists(repoRoot, `refs/heads/${options.baseBranch}`)) {
+            baseRef = `refs/heads/${options.baseBranch}`;
+          } else if (await gitRefExists(repoRoot, `refs/remotes/origin/${options.baseBranch}`)) {
+            baseRef = `refs/remotes/origin/${options.baseBranch}`;
+          }
+        }
+        const aheadCount = baseRef
+          ? await tryRunGit(repoRoot, ['rev-list', '--count', `${baseRef}..${localRef}`])
+          : null;
+
+        // Só remove a branch local quando não possui nenhum commit próprio além da branch base.
+        if (aheadCount === '0') {
+          try {
+            await runGit(repoRoot, ['branch', '-d', options.branchName]);
+            deletedLocalBranch = true;
+          } catch {
+            deletedLocalBranch = false;
+          }
+        }
+      }
+    }
+
+    return {
+      removedDirectory,
+      prunedReferences,
+      deletedLocalBranch,
+    };
+  });
 }

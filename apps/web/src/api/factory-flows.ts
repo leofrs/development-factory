@@ -5,6 +5,7 @@ import {
   FactoryFlowListResponseSchema,
   FactoryFlowSchema,
   FactoryFlowStageSchema,
+  RollbackFactoryFlowCheckpointResponseSchema,
   TransitionFactoryFlowResponseSchema,
   type AdvanceFactoryStageRequest,
   type BackgroundSessionSummary,
@@ -16,6 +17,8 @@ import {
   type ListFactoryFlowsFilterInput,
   type RerunFactoryStageRequest,
   type ReturnFactoryStageRequest,
+  type RollbackFactoryFlowCheckpointRequest,
+  type RollbackFactoryFlowCheckpointResponse,
 } from '@development-factory/shared';
 
 const API_BASE_URL = 'http://127.0.0.1:3001';
@@ -458,5 +461,52 @@ export async function cancelFactoryFlow(
       throw error;
     }
     throw toFactoryFlowRequestError(error, 'Não foi possível cancelar o fluxo da Factory.');
+  }
+}
+
+/** Reverte o worktree de um fluxo da Factory para um checkpoint anterior registrado. */
+export async function rollbackFactoryFlowCheckpoint(
+  flowId: string,
+  request: RollbackFactoryFlowCheckpointRequest = {},
+  signal?: AbortSignal,
+): Promise<RollbackFactoryFlowCheckpointResponse> {
+  try {
+    const response = await fetch(
+      `${API_BASE_URL}/api/factory/flows/${encodeURIComponent(flowId)}/rollback`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(request),
+        cache: 'no-store',
+        signal,
+      },
+    );
+    const payload = await parseJsonResponse(response);
+    if (!response.ok) {
+      throw extractApiError(
+        payload,
+        response.status,
+        'Não foi possível reverter o worktree para o checkpoint anterior.',
+      );
+    }
+
+    const parsed = RollbackFactoryFlowCheckpointResponseSchema.safeParse(payload);
+    if (!parsed.success) {
+      throw new FactoryFlowApiError(
+        'Formato inesperado ao reverter o worktree do fluxo.',
+        'FACTORY_FLOW_INVALID_RESPONSE',
+        response.status,
+      );
+    }
+
+    return parsed.data;
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw error;
+    }
+    throw toFactoryFlowRequestError(
+      error,
+      'Não foi possível reverter o worktree para o checkpoint anterior.',
+    );
   }
 }
