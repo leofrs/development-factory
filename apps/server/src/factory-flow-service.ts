@@ -8,6 +8,7 @@ import {
   FACTORY_MAX_AUTO_ITERATIONS,
   FACTORY_STAGE_ORDER,
   FactoryFlowArtifactSchema,
+  FactoryFlowCheckpointSchema,
   FactoryFlowDomainError,
   FactoryFlowSchema,
   FactoryFlowStageSchema,
@@ -15,15 +16,19 @@ import {
   FactoryStageNameSchema,
   ListFactoryFlowsFilterSchema,
   RegisterFactoryFlowArtifactRequestSchema,
+  RegisterFactoryFlowCheckpointRequestSchema,
   ReturnFactoryStageRequestSchema,
   TransitionFactoryFlowRequestSchema,
+  UpdateFactoryFlowWorktreeRequestSchema,
   canReturnFactoryStage,
   getNextFactoryStage,
   getReadyFactoryStageArtifact,
   isFinalFactoryFlowState,
   type CreateFactoryFlowResponse,
+  type FactoryFlow,
   type FactoryFlowApiErrorCode,
   type FactoryFlowArtifact,
+  type FactoryFlowCheckpoint,
   type FactoryFlowDetails,
   type FactoryFlowListResponse,
   type FactoryFlowStage,
@@ -284,6 +289,9 @@ export class FactoryFlowService {
       maxIterations: FACTORY_MAX_AUTO_ITERATIONS,
       lastReviewVerdict: null,
       loopPausedReason: null,
+      worktreePath: null,
+      branchName: null,
+      baseBranch: null,
       createdAt,
       updatedAt: createdAt,
       finishedAt: null,
@@ -349,12 +357,17 @@ export class FactoryFlowService {
 
       const stages = this.repository.listStagesByFlowId(flow.id);
       const artifacts = this.repository.listArtifactsByFlowId(flow.id);
+      const checkpoints = this.repository.listCheckpointsByFlowId(flow.id);
 
       return {
         contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
         flow,
         stages,
         artifacts,
+        worktreePath: flow.worktreePath,
+        branchName: flow.branchName,
+        baseBranch: flow.baseBranch,
+        checkpoints,
       };
     } catch (error) {
       throw mapUnexpectedError(error);
@@ -807,6 +820,77 @@ export class FactoryFlowService {
         });
 
         return this.repository.saveArtifact(artifact, options);
+      });
+    } catch (error) {
+      throw mapUnexpectedError(error);
+    }
+  }
+
+  async updateWorktreeMetadata(flowIdInput: string, input: unknown): Promise<FactoryFlow> {
+    const flowId = this.parseFlowId(flowIdInput);
+    const parsed = UpdateFactoryFlowWorktreeRequestSchema.safeParse(input);
+    if (!parsed.success) {
+      throw new FactoryFlowServiceError(
+        'FACTORY_FLOW_INVALID_INPUT',
+        'Os metadados de worktree do fluxo são inválidos.',
+        400,
+        formatZodIssues(parsed.error),
+      );
+    }
+
+    try {
+      return await this.repository.withWriteLock(() =>
+        this.repository.updateFlowWorktree(flowId, {
+          worktreePath: parsed.data.worktreePath,
+          branchName: parsed.data.branchName,
+          baseBranch: parsed.data.baseBranch,
+        }),
+      );
+    } catch (error) {
+      throw mapUnexpectedError(error);
+    }
+  }
+
+  async registerCheckpoint(flowIdInput: string, input: unknown): Promise<FactoryFlowCheckpoint> {
+    const flowId = this.parseFlowId(flowIdInput);
+    const parsed = RegisterFactoryFlowCheckpointRequestSchema.safeParse(input);
+    if (!parsed.success) {
+      throw new FactoryFlowServiceError(
+        'FACTORY_FLOW_INVALID_INPUT',
+        'Os dados do checkpoint do fluxo são inválidos.',
+        400,
+        formatZodIssues(parsed.error),
+      );
+    }
+
+    const createdAt = parsed.data.at ?? this.now();
+
+    try {
+      return await this.repository.withWriteLock(() => {
+        const flow = this.repository.getFlowById(flowId);
+        if (!flow) {
+          throw new FactoryFlowServiceError(
+            'FACTORY_FLOW_NOT_FOUND',
+            `Fluxo ${flowId} não encontrado.`,
+            404,
+          );
+        }
+
+        const checkpoint = FactoryFlowCheckpointSchema.parse({
+          contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+          id: this.generateId(),
+          flowId,
+          stage: parsed.data.stage,
+          iteration: parsed.data.iteration ?? flow.iteration,
+          commitSha: parsed.data.commitSha,
+          branchName:
+            parsed.data.branchName !== undefined ? parsed.data.branchName : flow.branchName,
+          sessionId: parsed.data.sessionId ?? null,
+          message: parsed.data.message ?? null,
+          createdAt,
+        });
+
+        return this.repository.saveCheckpoint(checkpoint);
       });
     } catch (error) {
       throw mapUnexpectedError(error);

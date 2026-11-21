@@ -2,12 +2,14 @@ import { DatabaseSync } from 'node:sqlite';
 import {
   FACTORY_STAGE_ORDER,
   FactoryFlowArtifactSchema,
+  FactoryFlowCheckpointSchema,
   FactoryFlowSchema,
   FactoryFlowStageSchema,
   returnFactoryFlowStage,
   transitionFactoryFlow,
   type FactoryFlow,
   type FactoryFlowArtifact,
+  type FactoryFlowCheckpoint,
   type FactoryFlowError,
   type FactoryFlowStage,
   type FactoryFlowState,
@@ -63,6 +65,17 @@ export interface SaveFactoryArtifactOptions {
   readonly sessionPath?: string;
 }
 
+export interface UpdateFactoryFlowWorktreeInput {
+  readonly worktreePath?: string | null;
+  readonly branchName?: string | null;
+  readonly baseBranch?: string | null;
+}
+
+export interface ListFactoryCheckpointsFilter {
+  readonly stage?: FactoryStageName;
+  readonly iteration?: number;
+}
+
 interface FactoryFlowRow {
   id: string;
   contract_version: number;
@@ -77,6 +90,9 @@ interface FactoryFlowRow {
   max_iterations: number;
   last_review_verdict: string | null;
   loop_paused_reason: string | null;
+  worktree_path: string | null;
+  branch_name: string | null;
+  base_branch: string | null;
   created_at: string;
   updated_at: string;
   finished_at: string | null;
@@ -117,6 +133,19 @@ interface FactoryArtifactRow {
   error_json: string | null;
 }
 
+interface FactoryCheckpointRow {
+  id: string;
+  flow_id: string;
+  contract_version: number;
+  stage: string;
+  iteration: number;
+  commit_sha: string;
+  branch_name: string | null;
+  session_id: string | null;
+  message: string | null;
+  created_at: string;
+}
+
 const STAGE_ORDER_INDEX = new Map<FactoryStageName, number>(
   FACTORY_STAGE_ORDER.map((stage, index) => [stage, index]),
 );
@@ -151,6 +180,9 @@ function rowToFlow(row: FactoryFlowRow): FactoryFlow {
     maxIterations: row.max_iterations,
     lastReviewVerdict: row.last_review_verdict,
     loopPausedReason: row.loop_paused_reason,
+    worktreePath: row.worktree_path,
+    branchName: row.branch_name,
+    baseBranch: row.base_branch,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     finishedAt: row.finished_at,
@@ -215,6 +247,29 @@ function rowToArtifact(row: FactoryArtifactRow): FactoryFlowArtifact {
     throw new ReviewStorageError(
       'STORAGE_CORRUPTED_DATA',
       `O registro do artefato ${row.id} no banco local viola o contrato atual.`,
+    );
+  }
+  return parsed.data;
+}
+
+function rowToCheckpoint(row: FactoryCheckpointRow): FactoryFlowCheckpoint {
+  const parsed = FactoryFlowCheckpointSchema.safeParse({
+    contractVersion: row.contract_version,
+    id: row.id,
+    flowId: row.flow_id,
+    stage: row.stage,
+    iteration: row.iteration,
+    commitSha: row.commit_sha,
+    branchName: row.branch_name,
+    sessionId: row.session_id,
+    message: row.message,
+    createdAt: row.created_at,
+  });
+
+  if (!parsed.success) {
+    throw new ReviewStorageError(
+      'STORAGE_CORRUPTED_DATA',
+      `O registro do checkpoint ${row.id} no banco local viola o contrato atual.`,
     );
   }
   return parsed.data;
@@ -519,6 +574,9 @@ export class SqliteFactoryFlowRepository {
                max_iterations = ?,
                last_review_verdict = ?,
                loop_paused_reason = ?,
+               worktree_path = ?,
+               branch_name = ?,
+               base_branch = ?,
                updated_at = ?,
                finished_at = ?,
                transitions_json = ?,
@@ -533,6 +591,9 @@ export class SqliteFactoryFlowRepository {
           updated.maxIterations,
           updated.lastReviewVerdict,
           updated.loopPausedReason,
+          updated.worktreePath,
+          updated.branchName,
+          updated.baseBranch,
           updated.updatedAt,
           updated.finishedAt,
           JSON.stringify(updated.transitions),
@@ -576,6 +637,46 @@ export class SqliteFactoryFlowRepository {
       if (currentStage) {
         this.updateStage(flowId, current.currentStage, { sessionId, updatedAt });
       }
+
+      return next.data;
+    });
+  }
+
+  updateFlowWorktree(flowId: string, patch: UpdateFactoryFlowWorktreeInput): FactoryFlow {
+    return this.runInTransaction(() => {
+      const current = this.getFlowById(flowId);
+      if (!current) {
+        throw new ReviewStorageError('STORAGE_NOT_FOUND', `Fluxo ${flowId} não encontrado.`);
+      }
+
+      const next = FactoryFlowSchema.safeParse({
+        ...current,
+        worktreePath:
+          patch.worktreePath !== undefined ? patch.worktreePath : current.worktreePath,
+        branchName: patch.branchName !== undefined ? patch.branchName : current.branchName,
+        baseBranch: patch.baseBranch !== undefined ? patch.baseBranch : current.baseBranch,
+      });
+      if (!next.success) {
+        throw new ReviewStorageError(
+          'STORAGE_INVALID_INPUT',
+          `Os metadados de worktree do fluxo são inválidos: ${next.error.issues.map(issue => issue.message).join('; ')}`,
+        );
+      }
+
+      this.db
+        .prepare(
+          `UPDATE factory_flows
+           SET worktree_path = ?,
+               branch_name = ?,
+               base_branch = ?
+           WHERE id = ?`,
+        )
+        .run(
+          next.data.worktreePath,
+          next.data.branchName,
+          next.data.baseBranch,
+          flowId,
+        );
 
       return next.data;
     });
@@ -759,6 +860,93 @@ export class SqliteFactoryFlowRepository {
     return rows.map(rowToArtifact);
   }
 
+  saveCheckpoint(checkpointInput: FactoryFlowCheckpoint): FactoryFlowCheckpoint {
+    const parsed = FactoryFlowCheckpointSchema.safeParse(checkpointInput);
+    if (!parsed.success) {
+      throw new ReviewStorageError(
+        'STORAGE_INVALID_INPUT',
+        `Os dados do checkpoint são inválidos para persistência: ${parsed.error.issues.map(issue => issue.message).join('; ')}`,
+      );
+    }
+
+    return this.runInTransaction(() => {
+      const flow = this.getFlowById(parsed.data.flowId);
+      if (!flow) {
+        throw new ReviewStorageError(
+          'STORAGE_NOT_FOUND',
+          `Fluxo ${parsed.data.flowId} não encontrado para registrar checkpoint.`,
+        );
+      }
+
+      try {
+        this.db
+          .prepare(
+            `INSERT INTO factory_flow_checkpoints (
+              id,
+              flow_id,
+              contract_version,
+              stage,
+              iteration,
+              commit_sha,
+              branch_name,
+              session_id,
+              message,
+              created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            parsed.data.id,
+            parsed.data.flowId,
+            parsed.data.contractVersion,
+            parsed.data.stage,
+            parsed.data.iteration,
+            parsed.data.commitSha,
+            parsed.data.branchName,
+            parsed.data.sessionId,
+            parsed.data.message,
+            parsed.data.createdAt,
+          );
+      } catch (error) {
+        if (isConstraintError(error)) {
+          throw new ReviewStorageError(
+            'STORAGE_CONFLICT',
+            `Já existe um checkpoint com o identificador ${parsed.data.id}.`,
+            { cause: error },
+          );
+        }
+        throw error;
+      }
+
+      return parsed.data;
+    });
+  }
+
+  listCheckpointsByFlowId(
+    flowId: string,
+    filter: ListFactoryCheckpointsFilter = {},
+  ): FactoryFlowCheckpoint[] {
+    this.ensureOpen();
+    const clauses: string[] = ['flow_id = ?'];
+    const params: Array<string | number> = [flowId];
+
+    if (filter.stage !== undefined) {
+      clauses.push('stage = ?');
+      params.push(filter.stage);
+    }
+    if (filter.iteration !== undefined) {
+      clauses.push('iteration = ?');
+      params.push(filter.iteration);
+    }
+
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM factory_flow_checkpoints WHERE ${clauses.join(' AND ')} ORDER BY created_at ASC, rowid ASC`,
+      )
+      .all(...params) as unknown as FactoryCheckpointRow[];
+
+    return rows.map(rowToCheckpoint);
+  }
+
   getAppliedMigrations(): AppliedMigration[] {
     this.ensureOpen();
     return this.db
@@ -858,12 +1046,15 @@ export class SqliteFactoryFlowRepository {
           max_iterations,
           last_review_verdict,
           loop_paused_reason,
+          worktree_path,
+          branch_name,
+          base_branch,
           created_at,
           updated_at,
           finished_at,
           transitions_json,
           error_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         flow.id,
@@ -879,6 +1070,9 @@ export class SqliteFactoryFlowRepository {
         flow.maxIterations,
         flow.lastReviewVerdict,
         flow.loopPausedReason,
+        flow.worktreePath,
+        flow.branchName,
+        flow.baseBranch,
         flow.createdAt,
         flow.updatedAt,
         flow.finishedAt,

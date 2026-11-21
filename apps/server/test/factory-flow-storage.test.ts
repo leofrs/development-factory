@@ -3,15 +3,19 @@ import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import {
   FACTORY_FLOW_CONTRACT_VERSION,
   FACTORY_STAGE_ORDER,
+  FactoryFlowDetailsSchema,
 } from '@development-factory/shared';
 import { FactoryFlowService, FactoryFlowServiceError } from '../src/factory-flow-service.js';
 import {
   REVIEW_MIGRATIONS,
+  ReviewStorageError,
   SqliteFactoryFlowRepository,
+  runMigrations,
 } from '../src/storage/index.js';
 
 function createTempDbPath(): { dir: string; dbPath: string } {
@@ -36,7 +40,7 @@ test('SqliteFactoryFlowRepository aplica migrations e persiste múltiplos fluxos
     const applied = repo1.getAppliedMigrations();
     assert.equal(applied.length, REVIEW_MIGRATIONS.length);
     assert.ok(applied.some(migration => migration.name === 'add_factory_flows'));
-    assert.equal(applied.at(-1)?.name, 'add_factory_flow_loop_iterations');
+    assert.equal(applied.at(-1)?.name, 'add_factory_worktree_and_checkpoints');
 
     const service1 = new FactoryFlowService(repo1, { now: createClock() });
 
@@ -458,5 +462,282 @@ test('FactoryFlowService valida retorno de review para development/tests e reini
   } finally {
     repo.close();
     rmSync(artifactsDir, { recursive: true, force: true });
+  }
+});
+
+test('SqliteFactoryFlowRepository e FactoryFlowService persistem e leem worktreePath, branchName, baseBranch e checkpoints', async () => {
+  const { dir, dbPath } = createTempDbPath();
+
+  try {
+    const repo1 = SqliteFactoryFlowRepository.open({ dbPath });
+    const service1 = new FactoryFlowService(repo1, { now: createClock() });
+
+    const created = await service1.createFlow({
+      task: { inputType: 'jira_key', value: 'PROD-707', repoPath: '/tmp/repo-worktree' },
+    });
+    assert.equal(created.flow.worktreePath, null);
+    assert.equal(created.flow.branchName, null);
+    assert.equal(created.flow.baseBranch, null);
+
+    const worktreePath = '/tmp/df-worktrees/prod-707';
+    const branchName = 'factory/PROD-707';
+    const baseBranch = 'main';
+
+    const withWorktree = await service1.updateWorktreeMetadata(created.flow.id, {
+      worktreePath,
+      branchName,
+      baseBranch,
+    });
+    assert.equal(withWorktree.worktreePath, worktreePath);
+    assert.equal(withWorktree.branchName, branchName);
+    assert.equal(withWorktree.baseBranch, baseBranch);
+
+    const transitioned = await service1.transitionFlow(created.flow.id, {
+      to: 'running',
+      reason: 'Iniciando triagem isolada',
+    });
+    assert.equal(transitioned.flow.worktreePath, worktreePath);
+    assert.equal(transitioned.flow.branchName, branchName);
+    assert.equal(transitioned.flow.baseBranch, baseBranch);
+
+    const sessionId = randomUUID();
+    const cp1 = await service1.registerCheckpoint(created.flow.id, {
+      stage: 'development',
+      iteration: 1,
+      commitSha: '1111111222222233333334444444555555566666',
+      sessionId,
+      message: 'Checkpoint Bloco 03 ciclo 1',
+    });
+    const cp2 = await service1.registerCheckpoint(created.flow.id, {
+      stage: 'tests',
+      iteration: 1,
+      commitSha: 'aaaaaaa1111111bbbbbbb2222222ccccccc33333',
+      message: 'Checkpoint Bloco 04 ciclo 1',
+    });
+    const cp3 = await service1.registerCheckpoint(created.flow.id, {
+      stage: 'development',
+      iteration: 2,
+      commitSha: 'ddddddd4444444eeeeeee5555555fffffff66666',
+      branchName: 'factory/PROD-707-iter2',
+      message: 'Checkpoint Bloco 03 ciclo 2',
+    });
+
+    assert.equal(cp1.branchName, branchName);
+    assert.equal(cp2.branchName, branchName);
+    assert.equal(cp3.branchName, 'factory/PROD-707-iter2');
+
+    await assert.rejects(
+      () =>
+        service1.updateWorktreeMetadata(created.flow.id, {
+          branchName: 'invalid branch name',
+        }),
+      error =>
+        error instanceof FactoryFlowServiceError &&
+        error.code === 'FACTORY_FLOW_INVALID_INPUT' &&
+        error.statusCode === 400,
+    );
+
+    await assert.rejects(
+      () =>
+        service1.registerCheckpoint(created.flow.id, {
+          stage: 'development',
+          commitSha: 'xyz-not-sha',
+        }),
+      error =>
+        error instanceof FactoryFlowServiceError &&
+        error.code === 'FACTORY_FLOW_INVALID_INPUT' &&
+        error.statusCode === 400,
+    );
+
+    await assert.rejects(
+      () =>
+        service1.registerCheckpoint(randomUUID(), {
+          stage: 'development',
+          commitSha: '1234567',
+        }),
+      error =>
+        error instanceof FactoryFlowServiceError &&
+        error.code === 'FACTORY_FLOW_NOT_FOUND' &&
+        error.statusCode === 404,
+    );
+
+    assert.throws(
+      () => repo1.saveCheckpoint(cp1),
+      error => error instanceof ReviewStorageError && error.code === 'STORAGE_CONFLICT',
+    );
+
+    repo1.close();
+
+    const repo2 = SqliteFactoryFlowRepository.open({ dbPath });
+    const service2 = new FactoryFlowService(repo2);
+
+    const details = FactoryFlowDetailsSchema.parse(service2.getFlow(created.flow.id));
+    assert.equal(details.worktreePath, worktreePath);
+    assert.equal(details.branchName, branchName);
+    assert.equal(details.baseBranch, baseBranch);
+    assert.equal(details.flow.worktreePath, worktreePath);
+    assert.equal(details.flow.branchName, branchName);
+    assert.equal(details.flow.baseBranch, baseBranch);
+    assert.deepEqual(
+      details.checkpoints.map(cp => cp.id),
+      [cp1.id, cp2.id, cp3.id],
+    );
+
+    const devCheckpoints = repo2.listCheckpointsByFlowId(created.flow.id, { stage: 'development' });
+    assert.deepEqual(
+      devCheckpoints.map(cp => cp.id),
+      [cp1.id, cp3.id],
+    );
+    const iter1DevCheckpoints = repo2.listCheckpointsByFlowId(created.flow.id, {
+      stage: 'development',
+      iteration: 1,
+    });
+    assert.deepEqual(
+      iter1DevCheckpoints.map(cp => cp.id),
+      [cp1.id],
+    );
+
+    repo2.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Migration v7 é idempotente e preserva fluxos históricos existentes antes de worktree e checkpoints', async () => {
+  const { dir, dbPath } = createTempDbPath();
+
+  try {
+    const legacyFlowId = randomUUID();
+    const legacyStageId = randomUUID();
+    const createdAt = '2026-11-18T10:00:00.000Z';
+
+    const preV7Db = new DatabaseSync(dbPath);
+    try {
+      runMigrations(preV7Db, REVIEW_MIGRATIONS.slice(0, 6));
+      preV7Db
+        .prepare(
+          `INSERT INTO factory_flows (
+            id,
+            contract_version,
+            title,
+            input_type,
+            target_value,
+            repo_path,
+            state,
+            current_stage,
+            current_session_id,
+            iteration,
+            max_iterations,
+            last_review_verdict,
+            loop_paused_reason,
+            created_at,
+            updated_at,
+            finished_at,
+            transitions_json,
+            error_json
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          legacyFlowId,
+          FACTORY_FLOW_CONTRACT_VERSION,
+          'PROD-001 · Fluxo histórico',
+          'jira_key',
+          'PROD-001',
+          '/tmp/legacy-repo',
+          'queued',
+          'triage',
+          null,
+          0,
+          3,
+          null,
+          null,
+          createdAt,
+          createdAt,
+          null,
+          '[]',
+          null,
+        );
+      preV7Db
+        .prepare(
+          `INSERT INTO factory_flow_stages (
+            id,
+            flow_id,
+            contract_version,
+            name,
+            state,
+            session_id,
+            report_path,
+            session_path,
+            approved_notes,
+            created_at,
+            updated_at,
+            started_at,
+            finished_at,
+            error_json
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          legacyStageId,
+          legacyFlowId,
+          FACTORY_FLOW_CONTRACT_VERSION,
+          'triage',
+          'pending',
+          null,
+          null,
+          null,
+          null,
+          createdAt,
+          createdAt,
+          null,
+          null,
+          null,
+        );
+    } finally {
+      preV7Db.close();
+    }
+
+    const repo = SqliteFactoryFlowRepository.open({ dbPath });
+    const service = new FactoryFlowService(repo, { now: createClock() });
+    const legacyDetails = service.getFlow(legacyFlowId);
+    assert.equal(legacyDetails.flow.title, 'PROD-001 · Fluxo histórico');
+    assert.equal(legacyDetails.worktreePath, null);
+    assert.equal(legacyDetails.branchName, null);
+    assert.equal(legacyDetails.baseBranch, null);
+    assert.deepEqual(legacyDetails.checkpoints, []);
+
+    await service.updateWorktreeMetadata(legacyFlowId, {
+      worktreePath: '/tmp/df-worktrees/prod-001',
+      branchName: 'factory/PROD-001',
+      baseBranch: 'main',
+    });
+    const checkpoint = await service.registerCheckpoint(legacyFlowId, {
+      stage: 'development',
+      iteration: 1,
+      commitSha: 'abcdef1234567',
+      message: 'Checkpoint em fluxo migrado',
+    });
+    repo.close();
+
+    // Executa a função up da migration v7 novamente para comprovar idempotência direta do DDL.
+    const rawDb = new DatabaseSync(dbPath);
+    try {
+      const v7Migration = REVIEW_MIGRATIONS.find(migration => migration.version === 7);
+      assert.ok(v7Migration);
+      v7Migration.up(rawDb);
+    } finally {
+      rawDb.close();
+    }
+
+    const repoAfterIdempotentReapply = SqliteFactoryFlowRepository.open({ dbPath });
+    const serviceAfter = new FactoryFlowService(repoAfterIdempotentReapply);
+    const verified = serviceAfter.getFlow(legacyFlowId);
+    assert.equal(verified.worktreePath, '/tmp/df-worktrees/prod-001');
+    assert.equal(verified.branchName, 'factory/PROD-001');
+    assert.equal(verified.baseBranch, 'main');
+    assert.equal(verified.checkpoints.length, 1);
+    assert.equal(verified.checkpoints[0]?.id, checkpoint.id);
+    repoAfterIdempotentReapply.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

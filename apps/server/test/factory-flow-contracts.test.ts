@@ -8,6 +8,8 @@ import {
   FINAL_FACTORY_FLOW_STATES,
   FactoryFlowApiErrorResponseSchema,
   FactoryFlowArtifactSchema,
+  FactoryFlowCheckpointSchema,
+  FactoryFlowDetailsSchema,
   FactoryFlowDomainError,
   FactoryFlowSchema,
   FactoryFlowStageSchema,
@@ -398,4 +400,89 @@ test('permite retorno controlado de review para development ou tests e resolve a
     'tests',
   );
   assert.equal(testArtifact?.kind, 'test_report');
+});
+
+test('FactoryFlowDetailsSchema e FactoryFlowCheckpointSchema validam metadados de worktree e checkpoints', () => {
+  const checkpointId = '00000000-0000-4000-8000-000000000105';
+  const checkpoint = FactoryFlowCheckpointSchema.parse({
+    contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+    id: checkpointId,
+    flowId,
+    stage: 'development',
+    iteration: 1,
+    commitSha: 'a1b2c3d4e5f6789012345678901234567890abcd',
+    branchName: 'factory/PROD-1234',
+    sessionId,
+    message: 'Checkpoint após desenvolvimento',
+    createdAt: waitingAt,
+  });
+  assert.equal(checkpoint.stage, 'development');
+  assert.equal(checkpoint.iteration, 1);
+
+  const flowWithWorktree = FactoryFlowSchema.parse({
+    ...queuedFlow(),
+    worktreePath: '/home/user/.local/share/development-factory/worktrees/flow-1',
+    branchName: 'factory/PROD-1234',
+    baseBranch: 'main',
+  });
+
+  const explicitDetails = FactoryFlowDetailsSchema.parse({
+    contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+    flow: flowWithWorktree,
+    stages: [],
+    artifacts: [],
+    worktreePath: flowWithWorktree.worktreePath,
+    branchName: flowWithWorktree.branchName,
+    baseBranch: flowWithWorktree.baseBranch,
+    checkpoints: [checkpoint],
+  });
+  assert.equal(explicitDetails.worktreePath, flowWithWorktree.worktreePath);
+  assert.equal(explicitDetails.branchName, 'factory/PROD-1234');
+  assert.equal(explicitDetails.baseBranch, 'main');
+  assert.equal(explicitDetails.checkpoints.length, 1);
+
+  const derivedDetails = FactoryFlowDetailsSchema.parse({
+    contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+    flow: flowWithWorktree,
+    stages: [],
+    artifacts: [],
+  });
+  assert.equal(derivedDetails.worktreePath, flowWithWorktree.worktreePath);
+  assert.equal(derivedDetails.branchName, 'factory/PROD-1234');
+  assert.equal(derivedDetails.baseBranch, 'main');
+  assert.deepEqual(derivedDetails.checkpoints, []);
+
+  assert.equal(
+    FactoryFlowDetailsSchema.safeParse({
+      contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+      flow: flowWithWorktree,
+      stages: [],
+      artifacts: [],
+      worktreePath: '/tmp/outro-worktree',
+      checkpoints: [],
+    }).success,
+    false,
+  );
+
+  assert.equal(
+    FactoryFlowCheckpointSchema.safeParse({
+      contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+      id: checkpointId,
+      flowId,
+      stage: 'development',
+      iteration: 0,
+      commitSha: 'not-a-sha',
+      branchName: 'factory/PROD-1234',
+      createdAt: waitingAt,
+    }).success,
+    false,
+  );
+
+  assert.equal(
+    FactoryFlowSchema.safeParse({
+      ...queuedFlow(),
+      branchName: 'feat..invalid',
+    }).success,
+    false,
+  );
 });

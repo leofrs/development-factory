@@ -12,13 +12,33 @@ const approvedNotesSchema = text
   .max(FACTORY_APPROVED_NOTES_MAX_LENGTH)
   .refine(value => !value.includes('\0'), 'Notas inválidas');
 
-const repoPathSchema = text
+const absoluteWslPathSchema = text
   .max(4096)
   .refine(value => value.startsWith('/') && !value.includes('\0'), 'Use um caminho absoluto no WSL');
 
-const artifactPathSchema = text
-  .max(4096)
-  .refine(value => value.startsWith('/') && !value.includes('\0'), 'Use um caminho absoluto no WSL');
+const repoPathSchema = absoluteWslPathSchema;
+const artifactPathSchema = absoluteWslPathSchema;
+
+const gitBranchNameSchema = text
+  .max(255)
+  .refine(
+    value =>
+      !/[\x00-\x1f\x7f\s~^:?*\[\\]/.test(value) &&
+      !value.startsWith('-') &&
+      !value.startsWith('/') &&
+      !value.endsWith('/') &&
+      !value.endsWith('.') &&
+      !value.endsWith('.lock') &&
+      !value.includes('..') &&
+      !value.includes('@{') &&
+      !value.includes('//'),
+    'Nome de branch Git inválido',
+  );
+
+const gitCommitShaSchema = z
+  .string()
+  .trim()
+  .regex(/^[0-9a-f]{7,64}$/i, 'SHA de commit Git inválido');
 
 export const FactoryFlowInputTypeSchema = z.enum(['jira_url', 'jira_key', 'title']);
 export type FactoryFlowInputType = z.infer<typeof FactoryFlowInputTypeSchema>;
@@ -299,6 +319,27 @@ export const FactoryFlowArtifactSchema = z
   });
 export type FactoryFlowArtifact = z.infer<typeof FactoryFlowArtifactSchema>;
 
+export const FactoryFlowCheckpointSchema = z.strictObject({
+  contractVersion: version,
+  id,
+  flowId: id,
+  stage: FactoryStageNameSchema,
+  iteration: z.number().int().nonnegative().default(0),
+  commitSha: gitCommitShaSchema,
+  branchName: gitBranchNameSchema.nullable().default(null),
+  sessionId: id.nullable().default(null),
+  message: text.max(500).nullable().default(null),
+  createdAt: timestamp,
+});
+export type FactoryFlowCheckpoint = z.infer<typeof FactoryFlowCheckpointSchema>;
+
+export const FactoryFlowWorktreeMetadataSchema = z.strictObject({
+  worktreePath: absoluteWslPathSchema.nullable(),
+  branchName: gitBranchNameSchema.nullable(),
+  baseBranch: gitBranchNameSchema.nullable(),
+});
+export type FactoryFlowWorktreeMetadata = z.infer<typeof FactoryFlowWorktreeMetadataSchema>;
+
 export const FactoryFlowTransitionSchema = z
   .strictObject({
     from: FactoryFlowStateSchema,
@@ -323,6 +364,9 @@ export const FactoryFlowSchema = z
     maxIterations: z.number().int().positive().default(FACTORY_MAX_AUTO_ITERATIONS),
     lastReviewVerdict: FactoryReviewVerdictSchema.nullable().default(null),
     loopPausedReason: text.nullable().default(null),
+    worktreePath: absoluteWslPathSchema.nullable().default(null),
+    branchName: gitBranchNameSchema.nullable().default(null),
+    baseBranch: gitBranchNameSchema.nullable().default(null),
     createdAt: timestamp,
     updatedAt: timestamp,
     finishedAt: timestamp.nullable(),
@@ -398,6 +442,9 @@ export const FactoryFlowTransitionCommandSchema = z.strictObject({
   iteration: z.number().int().nonnegative().optional(),
   lastReviewVerdict: FactoryReviewVerdictSchema.nullable().optional(),
   loopPausedReason: text.nullable().optional(),
+  worktreePath: absoluteWslPathSchema.nullable().optional(),
+  branchName: gitBranchNameSchema.nullable().optional(),
+  baseBranch: gitBranchNameSchema.nullable().optional(),
   error: FactoryFlowErrorSchema.nullable().optional(),
 });
 export type FactoryFlowTransitionCommand = z.infer<typeof FactoryFlowTransitionCommandSchema>;
@@ -475,6 +522,12 @@ function applyFactoryFlowTransition(
       next.data.loopPausedReason !== undefined
         ? next.data.loopPausedReason
         : current.data.loopPausedReason,
+    worktreePath:
+      next.data.worktreePath !== undefined ? next.data.worktreePath : current.data.worktreePath,
+    branchName:
+      next.data.branchName !== undefined ? next.data.branchName : current.data.branchName,
+    baseBranch:
+      next.data.baseBranch !== undefined ? next.data.baseBranch : current.data.baseBranch,
     updatedAt: next.data.at,
     finishedAt: isFinalFactoryFlowState(next.data.to) ? next.data.at : null,
     error: next.data.error !== undefined ? next.data.error : current.data.error,
@@ -535,12 +588,47 @@ export const FactoryFlowListResponseSchema = z.strictObject({
 });
 export type FactoryFlowListResponse = z.infer<typeof FactoryFlowListResponseSchema>;
 
-export const FactoryFlowDetailsSchema = z.strictObject({
-  contractVersion: version,
-  flow: FactoryFlowSchema,
-  stages: z.array(FactoryFlowStageSchema),
-  artifacts: z.array(FactoryFlowArtifactSchema),
-});
+export const FactoryFlowDetailsSchema = z
+  .strictObject({
+    contractVersion: version,
+    flow: FactoryFlowSchema,
+    stages: z.array(FactoryFlowStageSchema),
+    artifacts: z.array(FactoryFlowArtifactSchema),
+    worktreePath: absoluteWslPathSchema.nullable().optional(),
+    branchName: gitBranchNameSchema.nullable().optional(),
+    baseBranch: gitBranchNameSchema.nullable().optional(),
+    checkpoints: z.array(FactoryFlowCheckpointSchema).default([]),
+  })
+  .transform(details => ({
+    ...details,
+    worktreePath:
+      details.worktreePath !== undefined ? details.worktreePath : details.flow.worktreePath,
+    branchName: details.branchName !== undefined ? details.branchName : details.flow.branchName,
+    baseBranch: details.baseBranch !== undefined ? details.baseBranch : details.flow.baseBranch,
+  }))
+  .superRefine((details, context) => {
+    if (details.worktreePath !== details.flow.worktreePath) {
+      context.addIssue({
+        code: 'custom',
+        path: ['worktreePath'],
+        message: 'O caminho do worktree nos detalhes deve corresponder ao do fluxo',
+      });
+    }
+    if (details.branchName !== details.flow.branchName) {
+      context.addIssue({
+        code: 'custom',
+        path: ['branchName'],
+        message: 'O nome da branch nos detalhes deve corresponder ao do fluxo',
+      });
+    }
+    if (details.baseBranch !== details.flow.baseBranch) {
+      context.addIssue({
+        code: 'custom',
+        path: ['baseBranch'],
+        message: 'A branch base nos detalhes deve corresponder à do fluxo',
+      });
+    }
+  });
 export type FactoryFlowDetails = z.infer<typeof FactoryFlowDetailsSchema>;
 
 const HANDOFF_ARTIFACT_KINDS = {
@@ -655,6 +743,26 @@ export const RegisterFactoryFlowArtifactRequestSchema = z.strictObject({
   at: timestamp.optional(),
 });
 export type RegisterFactoryFlowArtifactRequest = z.infer<typeof RegisterFactoryFlowArtifactRequestSchema>;
+
+export const UpdateFactoryFlowWorktreeRequestSchema = z.strictObject({
+  worktreePath: absoluteWslPathSchema.nullable().optional(),
+  branchName: gitBranchNameSchema.nullable().optional(),
+  baseBranch: gitBranchNameSchema.nullable().optional(),
+});
+export type UpdateFactoryFlowWorktreeRequest = z.infer<typeof UpdateFactoryFlowWorktreeRequestSchema>;
+
+export const RegisterFactoryFlowCheckpointRequestSchema = z.strictObject({
+  stage: FactoryStageNameSchema,
+  iteration: z.number().int().nonnegative().optional(),
+  commitSha: gitCommitShaSchema,
+  branchName: gitBranchNameSchema.nullable().optional(),
+  sessionId: id.nullable().optional(),
+  message: text.max(500).nullable().optional(),
+  at: timestamp.optional(),
+});
+export type RegisterFactoryFlowCheckpointRequest = z.infer<
+  typeof RegisterFactoryFlowCheckpointRequestSchema
+>;
 
 export const FactoryFlowApiErrorCodeSchema = z.enum([
   'ORIGIN_FORBIDDEN',

@@ -204,6 +204,44 @@ export const REVIEW_MIGRATIONS: readonly Migration[] = [
       `);
     },
   },
+  {
+    version: 7,
+    name: 'add_factory_worktree_and_checkpoints',
+    up(db) {
+      const existingFlowColumns = new Set(
+        (db.prepare('PRAGMA table_info(factory_flows)').all() as Array<{ name: string }>).map(
+          column => column.name,
+        ),
+      );
+      if (!existingFlowColumns.has('worktree_path')) {
+        db.exec('ALTER TABLE factory_flows ADD COLUMN worktree_path TEXT;');
+      }
+      if (!existingFlowColumns.has('branch_name')) {
+        db.exec('ALTER TABLE factory_flows ADD COLUMN branch_name TEXT;');
+      }
+      if (!existingFlowColumns.has('base_branch')) {
+        db.exec('ALTER TABLE factory_flows ADD COLUMN base_branch TEXT;');
+      }
+
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS factory_flow_checkpoints (
+          id TEXT PRIMARY KEY,
+          flow_id TEXT NOT NULL REFERENCES factory_flows(id) ON DELETE RESTRICT,
+          contract_version INTEGER NOT NULL,
+          stage TEXT NOT NULL,
+          iteration INTEGER NOT NULL DEFAULT 0,
+          commit_sha TEXT NOT NULL,
+          branch_name TEXT,
+          session_id TEXT,
+          message TEXT,
+          created_at TEXT NOT NULL
+        ) STRICT;
+
+        CREATE INDEX IF NOT EXISTS idx_factory_flow_checkpoints_flow_stage_iter
+          ON factory_flow_checkpoints (flow_id, stage, iteration DESC, created_at DESC);
+      `);
+    },
+  },
 ];
 
 function validateMigrations(migrations: readonly Migration[]): void {

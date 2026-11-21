@@ -21,8 +21,10 @@ export {
   type CreateFactoryFlowIdempotentlyResult,
   type CreateFactoryFlowResult,
   type FactoryFlowRepositoryOptions,
+  type ListFactoryCheckpointsFilter,
   type ListFactoryFlowsFilter,
   type SaveFactoryArtifactOptions,
   type SaveFactoryFlowTransitionOptions,
+  type UpdateFactoryFlowWorktreeInput,
   type UpdateFactoryStageInput,
 } from './sqlite-factory-flow-repository.js';
