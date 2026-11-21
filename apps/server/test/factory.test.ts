@@ -352,7 +352,10 @@ test('start_factory executa PTY, salva plano em diretório externo sem sujar git
   const xdgDataHome = join(directory, 'xdg-data');
   mkdirSync(repoDir);
   mkdirSync(xdgDataHome);
-  execFileSync('git', ['init'], { cwd: repoDir });
+  execFileSync('git', ['init', '-b', 'main'], { cwd: repoDir });
+  execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repoDir });
+  execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repoDir });
+  execFileSync('git', ['commit', '--allow-empty', '-m', 'init'], { cwd: repoDir });
 
   const previousPath = process.env.PATH;
   const previousXdg = process.env.XDG_DATA_HOME;

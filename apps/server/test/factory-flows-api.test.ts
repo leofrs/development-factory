@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
@@ -91,6 +91,15 @@ async function waitForFlowDetails<T>(
   return current;
 }
 
+function initGitRepo(repoDir: string, branch = 'main'): void {
+  execFileSync('git', ['init', '-b', branch], { cwd: repoDir });
+  execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repoDir });
+  execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repoDir });
+  writeFileSync(join(repoDir, 'README.md'), '# Repo\n');
+  execFileSync('git', ['add', 'README.md'], { cwd: repoDir });
+  execFileSync('git', ['commit', '-m', 'init'], { cwd: repoDir });
+}
+
 test('API REST /api/factory/flows valida origem, idempotência, filtros e ciclo completo com SSE e PTYs paralelos', { timeout: 30000 }, async context => {
   const rootDir = mkdtempSync(join(tmpdir(), 'df-factory-flows-api-'));
   const binDir = join(rootDir, 'bin');
@@ -102,6 +111,8 @@ test('API REST /api/factory/flows valida origem, idempotência, filtros e ciclo 
   mkdirSync(repoA);
   mkdirSync(repoB);
   mkdirSync(xdgDataHome);
+  initGitRepo(repoA);
+  initGitRepo(repoB);
 
   const claudeTarget = join(binDir, 'claude');
   copyFileSync(new URL('./fixtures/claude.ts', import.meta.url), claudeTarget);
@@ -498,7 +509,7 @@ test(
     mkdirSync(binDir);
     mkdirSync(repoDir);
     mkdirSync(xdgDataHome);
-    execFileSync('git', ['init'], { cwd: repoDir });
+    initGitRepo(repoDir);
 
     const claudeTarget = join(binDir, 'claude');
     copyFileSync(new URL('./fixtures/claude.ts', import.meta.url), claudeTarget);
@@ -606,6 +617,15 @@ test(
     assert.equal(detailsOne.flow.currentStage, 'planning');
     assert.equal(detailsTwo.flow.currentStage, 'planning');
     assert.ok(detailsOne.flow.currentSessionId && detailsTwo.flow.currentSessionId);
+    assert.ok(detailsOne.worktreePath && detailsTwo.worktreePath);
+    assert.notEqual(detailsOne.worktreePath, detailsTwo.worktreePath);
+    assert.notEqual(detailsOne.worktreePath, repoDir);
+    assert.equal(detailsOne.branchName, 'factory/implementar-autenticacao-jwt');
+    assert.equal(detailsTwo.branchName, 'factory/corrigir-paginacao-de-auditoria');
+    assert.equal(detailsOne.baseBranch, 'main');
+    assert.equal(detailsTwo.baseBranch, 'main');
+    assert.equal(existsSync(detailsOne.worktreePath), true);
+    assert.equal(existsSync(detailsTwo.worktreePath), true);
 
     const planningSessionOne = detailsOne.flow.currentSessionId;
     const planningSessionTwo = detailsTwo.flow.currentSessionId;
@@ -700,7 +720,8 @@ test(
     const { args, cwd } = z.object({ args: z.array(z.string()), cwd: z.string() }).parse(
       JSON.parse(readyLine.slice('READY:'.length)) as unknown,
     );
-    assert.equal(cwd, repoDir);
+    assert.equal(cwd, detailsOne.worktreePath);
+    assert.notEqual(cwd, repoDir);
     const prompt = args.at(-1);
     assert.ok(prompt);
     assert.ok(prompt.includes(specOne.path));
@@ -758,7 +779,7 @@ test(
     const testsSpawn = z.object({ args: z.array(z.string()), cwd: z.string() }).parse(
       JSON.parse(testsReadyLine.slice('READY:'.length)) as unknown,
     );
-    assert.equal(testsSpawn.cwd, repoDir);
+    assert.equal(testsSpawn.cwd, detailsOne.worktreePath);
     const testsPrompt = testsSpawn.args.at(-1) ?? '';
     assert.ok(testsPrompt.includes(specOne.path));
     assert.ok(testsPrompt.includes(planPath));
@@ -832,7 +853,7 @@ test(
     const reviewSpawn = z.object({ args: z.array(z.string()), cwd: z.string() }).parse(
       JSON.parse(reviewReadyLine.slice('READY:'.length)) as unknown,
     );
-    assert.equal(reviewSpawn.cwd, repoDir);
+    assert.equal(reviewSpawn.cwd, detailsOne.worktreePath);
     const reviewPrompt = reviewSpawn.args.at(-1) ?? '';
     assert.ok(reviewPrompt.includes(specOne.path));
     assert.ok(reviewPrompt.includes(planPath));
@@ -1073,6 +1094,7 @@ test(
     mkdirSync(binDir);
     mkdirSync(repoDir);
     mkdirSync(xdgDataHome);
+    initGitRepo(repoDir);
 
     const claudeTarget = join(binDir, 'claude');
     copyFileSync(new URL('./fixtures/claude.ts', import.meta.url), claudeTarget);
@@ -1241,3 +1263,236 @@ test(
     );
   },
 );
+
+test(
+  'dois fluxos simultâneos no mesmo repoPath executam Desenvolvimento em paralelo em worktrees isolados sem tocar o working tree original',
+  { timeout: 30000 },
+  async context => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'df-factory-concurrent-worktrees-'));
+    const binDir = join(rootDir, 'bin');
+    const repoDir = join(rootDir, 'shared-repo');
+    const xdgDataHome = join(rootDir, 'xdg-data');
+    const dbPath = join(rootDir, 'reviews.db');
+    mkdirSync(binDir);
+    mkdirSync(repoDir);
+    mkdirSync(xdgDataHome);
+    initGitRepo(repoDir, 'main');
+
+    // Desenvolvedor trabalha localmente em outra branch com alterações não commitadas.
+    execFileSync('git', ['checkout', '-b', 'feature/dev-local'], { cwd: repoDir });
+    writeFileSync(join(repoDir, 'README.md'), '# Repo com WIP local\n');
+    writeFileSync(join(repoDir, 'local-untracked.txt'), 'wip local não commitado\n');
+
+    const claudeTarget = join(binDir, 'claude');
+    copyFileSync(new URL('./fixtures/claude.ts', import.meta.url), claudeTarget);
+    chmodSync(claudeTarget, 0o755);
+
+    const previousPath = process.env.PATH;
+    const previousXdg = process.env.XDG_DATA_HOME;
+    process.env.PATH = `${binDir}:${previousPath ?? ''}`;
+    process.env.XDG_DATA_HOME = xdgDataHome;
+
+    const { server, sessionManager, shutdown } = createReviewServer({ dbPath });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+
+    const address = server.address();
+    assert(address && typeof address !== 'string');
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+
+    context.after(async () => {
+      await shutdown();
+      process.env.PATH = previousPath;
+      if (previousXdg === undefined) {
+        delete process.env.XDG_DATA_HOME;
+      } else {
+        process.env.XDG_DATA_HOME = previousXdg;
+      }
+      rmSync(rootDir, { recursive: true, force: true });
+    });
+
+    const createWithBaseMain = async (value: string) => {
+      const response = await fetch(`${baseUrl}/api/factory/flows`, {
+        method: 'POST',
+        headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          task: { inputType: 'jira_key', value, repoPath: repoDir },
+          baseBranch: 'main',
+          startSession: true,
+          cols: 100,
+          rows: 30,
+        }),
+      });
+      assert.equal(response.status, 201);
+      return (await response.json()) as {
+        flow: { id: string; worktreePath: string | null; branchName: string | null; baseBranch: string | null };
+        session: BackgroundSessionSummary;
+      };
+    };
+
+    const [flowOne, flowTwo] = await Promise.all([
+      createWithBaseMain('PROD-101'),
+      createWithBaseMain('PROD-102'),
+    ]);
+
+    assert.ok(flowOne.flow.worktreePath && flowTwo.flow.worktreePath);
+    assert.notEqual(flowOne.flow.worktreePath, flowTwo.flow.worktreePath);
+    assert.equal(flowOne.flow.branchName, 'factory/prod-101');
+    assert.equal(flowTwo.flow.branchName, 'factory/prod-102');
+    assert.equal(flowOne.flow.baseBranch, 'main');
+    assert.equal(flowTwo.flow.baseBranch, 'main');
+
+    // Conclui triagem e planejamento para os dois fluxos chegarem em waiting_action no planejamento.
+    for (const item of [flowOne, flowTwo]) {
+      assert.ok(item.session.reportPath);
+      await waitFor(() => Boolean(sessionManager.getSession(item.session.sessionId)?.buffer.replay().includes('READY:')));
+      writeFileSync(item.session.reportPath, `# Especificação ${item.flow.id}\n\nEscopo ok.\n`);
+      sessionManager.writeInput(item.session.sessionId, 'EXIT0');
+
+      await waitFor(() =>
+        sessionManager
+          .listSessions()
+          .some(s => s.flowId === item.flow.id && s.stage === 'planning' && s.status === 'running'),
+      );
+      const planningSession = sessionManager
+        .listSessions()
+        .find(s => s.flowId === item.flow.id && s.stage === 'planning');
+      assert.ok(planningSession && planningSession.reportPath);
+      await waitFor(() => Boolean(sessionManager.getSession(planningSession.sessionId)?.buffer.replay().includes('READY:')));
+      writeFileSync(planningSession.reportPath, `# Plano ${item.flow.id}\n\n1. Implementar.\n`);
+      sessionManager.writeInput(planningSession.sessionId, 'EXIT0');
+      await waitFor(() => sessionManager.getSession(planningSession.sessionId)?.status === 'exited');
+    }
+
+    // Avança ambos os fluxos para Desenvolvimento (etapa mutante) simultaneamente!
+    const [devResOne, devResTwo] = await Promise.all([
+      fetch(`${baseUrl}/api/factory/flows/${flowOne.flow.id}/advance`, {
+        method: 'POST',
+        headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ startSession: true }),
+      }),
+      fetch(`${baseUrl}/api/factory/flows/${flowTwo.flow.id}/advance`, {
+        method: 'POST',
+        headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ startSession: true }),
+      }),
+    ]);
+    assert.equal(devResOne.status, 200);
+    assert.equal(devResTwo.status, 200);
+
+    const devOne = z.object({ session: BackgroundSessionSummarySchema }).parse(await devResOne.json()).session;
+    const devTwo = z.object({ session: BackgroundSessionSummarySchema }).parse(await devResTwo.json()).session;
+    assert.equal(devOne.stage, 'development');
+    assert.equal(devTwo.stage, 'development');
+    assert.equal(devOne.status, 'running');
+    assert.equal(devTwo.status, 'running');
+
+    // Mesmo fluxo em execução continua bloqueado contra sessão duplicada.
+    const duplicateSameFlowRes = await fetch(`${baseUrl}/api/factory/flows/${flowOne.flow.id}/rerun`, {
+      method: 'POST',
+      headers: { Origin: ALLOWED_ORIGIN },
+    });
+    assert.equal(duplicateSameFlowRes.status, 409);
+
+    const runningOne = sessionManager.getSession(devOne.sessionId);
+    const runningTwo = sessionManager.getSession(devTwo.sessionId);
+    assert.ok(runningOne && runningTwo);
+    await waitFor(
+      () =>
+        /READY:[^\n]*\n/.test(runningOne.buffer.replay()) &&
+        /READY:[^\n]*\n/.test(runningTwo.buffer.replay()),
+    );
+
+    const parseReadyCwd = (replay: string): string => {
+      const line = replay.split(/\r?\n/).find(item => item.startsWith('READY:'));
+      assert.ok(line);
+      return z.object({ cwd: z.string() }).parse(JSON.parse(line.slice('READY:'.length)) as unknown).cwd;
+    };
+
+    assert.equal(parseReadyCwd(runningOne.buffer.replay()), flowOne.flow.worktreePath);
+    assert.equal(parseReadyCwd(runningTwo.buffer.replay()), flowTwo.flow.worktreePath);
+
+    // Simula alterações independentes em cada worktree sem afetar o outro worktree nem o repositório original.
+    writeFileSync(join(flowOne.flow.worktreePath, 'feature-101.ts'), 'export const id = 101;\n');
+    writeFileSync(join(flowTwo.flow.worktreePath, 'feature-102.ts'), 'export const id = 102;\n');
+
+    assert.equal(existsSync(join(flowOne.flow.worktreePath, 'feature-102.ts')), false);
+    assert.equal(existsSync(join(flowTwo.flow.worktreePath, 'feature-101.ts')), false);
+    assert.equal(existsSync(join(repoDir, 'feature-101.ts')), false);
+    assert.equal(existsSync(join(repoDir, 'feature-102.ts')), false);
+    assert.equal(
+      execFileSync('git', ['branch', '--show-current'], { cwd: repoDir, encoding: 'utf8' }).trim(),
+      'feature/dev-local',
+    );
+    assert.equal(readFileSync(join(repoDir, 'README.md'), 'utf8'), '# Repo com WIP local\n');
+    assert.equal(readFileSync(join(repoDir, 'local-untracked.txt'), 'utf8'), 'wip local não commitado\n');
+  },
+);
+
+test('POST /api/factory/flows falha de forma limpa quando baseBranch não existe sem deixar diretórios órfãos', async context => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'df-factory-invalid-base-'));
+  const binDir = join(rootDir, 'bin');
+  const repoDir = join(rootDir, 'repo');
+  const xdgDataHome = join(rootDir, 'xdg-data');
+  const dbPath = join(rootDir, 'reviews.db');
+  mkdirSync(binDir);
+  mkdirSync(repoDir);
+  mkdirSync(xdgDataHome);
+  initGitRepo(repoDir, 'main');
+
+  const claudeTarget = join(binDir, 'claude');
+  copyFileSync(new URL('./fixtures/claude.ts', import.meta.url), claudeTarget);
+  chmodSync(claudeTarget, 0o755);
+
+  const previousPath = process.env.PATH;
+  const previousXdg = process.env.XDG_DATA_HOME;
+  process.env.PATH = `${binDir}:${previousPath ?? ''}`;
+  process.env.XDG_DATA_HOME = xdgDataHome;
+
+  const { server, shutdown } = createReviewServer({ dbPath });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+
+  const address = server.address();
+  assert(address && typeof address !== 'string');
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+
+  context.after(async () => {
+    await shutdown();
+    process.env.PATH = previousPath;
+    if (previousXdg === undefined) {
+      delete process.env.XDG_DATA_HOME;
+    } else {
+      process.env.XDG_DATA_HOME = previousXdg;
+    }
+    rmSync(rootDir, { recursive: true, force: true });
+  });
+
+  const response = await fetch(`${baseUrl}/api/factory/flows`, {
+    method: 'POST',
+    headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      task: { inputType: 'jira_key', value: 'PROD-404', repoPath: repoDir },
+      baseBranch: 'branch-inexistente',
+      startSession: true,
+      cols: 80,
+      rows: 24,
+    }),
+  });
+  assert.equal(response.status, 400);
+  const errorBody = FactoryFlowApiErrorResponseSchema.parse(await response.json());
+  assert.equal(errorBody.error.code, 'FACTORY_FLOW_INVALID_INPUT');
+  assert.match(errorBody.error.message, /branch-inexistente/);
+
+  const worktreesRoot = join(xdgDataHome, 'development-factory', 'worktrees');
+  assert.deepEqual(existsSync(worktreesRoot) ? readdirSync(worktreesRoot) : [], []);
+
+  const listedRes = await fetch(`${baseUrl}/api/factory/flows`, {
+    headers: { Origin: ALLOWED_ORIGIN },
+  });
+  assert.equal(listedRes.status, 200);
+  const listed = FactoryFlowListResponseSchema.parse(await listedRes.json());
+  assert.equal(listed.flows.length, 1);
+  assert.equal(listed.flows[0]?.state, 'failed');
+  assert.equal(listed.flows[0]?.worktreePath, null);
+});

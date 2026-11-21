@@ -19,7 +19,7 @@ const absoluteWslPathSchema = text
 const repoPathSchema = absoluteWslPathSchema;
 const artifactPathSchema = absoluteWslPathSchema;
 
-const gitBranchNameSchema = text
+export const GitBranchNameSchema = text
   .max(255)
   .refine(
     value =>
@@ -34,6 +34,7 @@ const gitBranchNameSchema = text
       !value.includes('//'),
     'Nome de branch Git inválido',
   );
+const gitBranchNameSchema = GitBranchNameSchema;
 
 const gitCommitShaSchema = z
   .string()
@@ -559,6 +560,7 @@ export type FactoryIdempotencyKey = z.infer<typeof FactoryIdempotencyKeySchema>;
 export const CreateFactoryFlowRequestSchema = z.strictObject({
   task: FactoryTaskInputSchema,
   title: text.max(200).optional(),
+  baseBranch: GitBranchNameSchema.optional(),
   idempotencyKey: FactoryIdempotencyKeySchema.optional(),
   startSession: z.boolean().optional(),
   cols: z.number().int().min(2).max(500).optional(),

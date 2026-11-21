@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
@@ -34,6 +35,10 @@ test('API REST /api/sessions valida origem, lista sessões por ordem recente, de
   mkdirSync(binDir);
   mkdirSync(repoDir);
   mkdirSync(xdgDataHome);
+  execFileSync('git', ['init', '-b', 'main'], { cwd: repoDir });
+  execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repoDir });
+  execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repoDir });
+  execFileSync('git', ['commit', '--allow-empty', '-m', 'init'], { cwd: repoDir });
 
   const claudeTarget = join(binDir, 'claude');
   copyFileSync(new URL('./fixtures/claude.ts', import.meta.url), claudeTarget);

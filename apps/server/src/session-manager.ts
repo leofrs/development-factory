@@ -30,6 +30,11 @@ import { buildPrRunnerArgs, readFactoryPrInputs } from './factory-pr.js';
 import { buildReviewRunnerArgs, parseReviewVerdict, readFactoryReviewInputs } from './factory-review.js';
 import { buildReportFileToolPermissions } from './factory-stage-runners.js';
 import { buildTestsRunnerArgs, readFactoryTestsInputs } from './factory-tests.js';
+import {
+  FactoryWorktreeError,
+  provisionFactoryWorktree,
+  verifyExistingFactoryWorktree,
+} from './factory-worktree.js';
 import { createFactoryHistory } from './history.js';
 import { buildCodeReviewPrompt } from './prompts/code-review.js';
 import { buildFactoryArchitecturePrompt } from './prompts/factory-architecture.js';
@@ -255,7 +260,7 @@ export class SessionManager {
   readonly #bufferMaxBytes: number;
   readonly #now: () => number;
   readonly #runtimes = new Map<string, SessionRuntime>();
-  readonly #startingMutatingRepos = new Set<string>();
+  readonly #startingFlowIds = new Set<string>();
   #cleanupTimer: ReturnType<typeof setInterval> | undefined;
 
   constructor(reviewService: ReviewService, options: SessionManagerOptions = {}) {
@@ -626,11 +631,13 @@ export class SessionManager {
             repoPath: input.repoPath,
           },
           ...(input.title ? { title: input.title } : {}),
+          ...(input.baseBranch ? { baseBranch: input.baseBranch } : {}),
         });
         this.#emitEvent({
           type: 'factory_flow.created',
           flow: created.flow,
         });
+        flowDetails = this.#factoryFlowService.getFlow(created.flow.id);
         activeFactorySession = {
           flowId: created.flow.id,
           stage: input.stage ?? created.flow.currentStage,
@@ -639,15 +646,13 @@ export class SessionManager {
     }
 
     const stage = activeFactorySession?.stage ?? input.stage ?? 'triage';
-    if (!isRestrictedRunnerStage(stage) && !isRestrictedRunnerStage(flowDetails?.flow.currentStage)) {
-      return this.#startFactoryRunner(input, stage, activeFactorySession, flowDetails);
-    }
+    const isRestrictedStage = isRestrictedRunnerStage(stage);
+    const currentFlowStageIsRestricted = isRestrictedRunnerStage(flowDetails?.flow.currentStage);
     if (
-      !isRestrictedRunnerStage(stage) ||
-      !flowDetails ||
-      flowDetails.flow.currentStage !== stage
+      (isRestrictedStage || currentFlowStageIsRestricted) &&
+      (!isRestrictedStage || !flowDetails || flowDetails.flow.currentStage !== stage)
     ) {
-      const targetStage = isRestrictedRunnerStage(stage)
+      const targetStage = isRestrictedStage
         ? stage
         : (flowDetails?.flow.currentStage as RestrictedRunnerStage);
       const stageMeta = RESTRICTED_RUNNER_STAGE_CONFIG[targetStage];
@@ -657,48 +662,105 @@ export class SessionManager {
         409,
       );
     }
-    const stageMeta = RESTRICTED_RUNNER_STAGE_CONFIG[stage];
-    const repoPath = realpathSync(input.repoPath);
-    if (repoPath !== realpathSync(flowDetails.flow.target.repoPath)) {
+
+    const canonicalRepoPath = realpathSync(input.repoPath);
+    if (flowDetails && canonicalRepoPath !== realpathSync(flowDetails.flow.target.repoPath)) {
+      const stageLabel = isRestrictedStage ? RESTRICTED_RUNNER_STAGE_CONFIG[stage].label : stage;
       throw new SessionManagerError(
         'INVALID_REPO_PATH',
-        `Use o repositório de destino do fluxo para executar ${stageMeta.label}.`,
+        `Use o repositório de destino do fluxo para executar ${stageLabel}.`,
         400,
       );
     }
-    if (stageMeta.mutatesRepo) {
-      const hasMutatingSessionOnRepo =
-        this.#startingMutatingRepos.has(repoPath) ||
-        [...this.#runtimes.values()].some(({ session }) => {
-          const activeStage = session.activeFactorySession?.stage;
-          return (
-            session.status === 'running' &&
-            session.repoPath === repoPath &&
-            isRestrictedRunnerStage(activeStage) &&
-            RESTRICTED_RUNNER_STAGE_CONFIG[activeStage].mutatesRepo
-          );
-        });
-      if (hasMutatingSessionOnRepo) {
+
+    if (flowDetails && this.#factoryFlowService) {
+      const flowId = flowDetails.flow.id;
+      const hasRunningSessionForFlow =
+        this.#startingFlowIds.has(flowId) ||
+        [...this.#runtimes.values()].some(
+          ({ session }) =>
+            session.status === 'running' && session.activeFactorySession?.flowId === flowId,
+        );
+      if (hasRunningSessionForFlow) {
         throw new SessionManagerError(
           'FACTORY_STAGE_CONFLICT',
-          `Já existe uma sessão em execução modificando este repositório (${stageMeta.label}).`,
+          'Já existe uma sessão em execução para este fluxo.',
           409,
         );
       }
 
-      this.#startingMutatingRepos.add(repoPath);
-    }
-    try {
-      return await this.#startFactoryRunner(
-        { ...input, repoPath, value: flowDetails.flow.target.value },
-        stage,
-        activeFactorySession,
-        flowDetails,
-      );
-    } finally {
-      if (stageMeta.mutatesRepo) {
-        this.#startingMutatingRepos.delete(repoPath);
+      this.#startingFlowIds.add(flowId);
+      try {
+        flowDetails = await this.#ensureFactoryFlowWorktree(
+          flowDetails,
+          canonicalRepoPath,
+          stage,
+          input.baseBranch,
+        );
+        return await this.#startFactoryRunner(
+          { ...input, value: flowDetails.flow.target.value },
+          stage,
+          activeFactorySession,
+          flowDetails,
+        );
+      } finally {
+        this.#startingFlowIds.delete(flowId);
       }
+    }
+
+    return this.#startFactoryRunner(input, stage, activeFactorySession, flowDetails);
+  }
+
+  async #ensureFactoryFlowWorktree(
+    flowDetails: FactoryFlowDetails,
+    repoPath: string,
+    stage: FactoryStageName,
+    requestedBaseBranch?: string,
+  ): Promise<FactoryFlowDetails> {
+    if (!this.#factoryFlowService) {
+      return flowDetails;
+    }
+
+    const flowId = flowDetails.flow.id;
+    try {
+      if (flowDetails.flow.worktreePath !== null) {
+        await verifyExistingFactoryWorktree({
+          repoPath,
+          worktreePath: flowDetails.flow.worktreePath,
+        });
+        return flowDetails;
+      }
+
+      const provisioned = await provisionFactoryWorktree({
+        repoPath,
+        flowId,
+        target: flowDetails.flow.target,
+        baseBranch: flowDetails.flow.baseBranch ?? requestedBaseBranch ?? null,
+      });
+      await this.#factoryFlowService.updateWorktreeMetadata(flowId, {
+        worktreePath: provisioned.worktreePath,
+        branchName: provisioned.branchName,
+        baseBranch: provisioned.baseBranch,
+      });
+      return this.#factoryFlowService.getFlow(flowId);
+    } catch (error) {
+      if (error instanceof FactoryWorktreeError) {
+        if (!isRestrictedRunnerStage(stage) || flowDetails.flow.state === 'queued') {
+          await this.#failFactoryStart(flowId, stage, 'FACTORY_WORKTREE_FAILED', error.message);
+        }
+        if (
+          error.code === 'INVALID_GIT_REPOSITORY' ||
+          error.code === 'BASE_BRANCH_NOT_FOUND' ||
+          error.code === 'EMPTY_REPOSITORY'
+        ) {
+          throw new SessionManagerError('INVALID_REPO_PATH', error.message, 400);
+        }
+        if (error.code === 'WORKTREE_INVALID') {
+          throw new SessionManagerError('FACTORY_STAGE_CONFLICT', error.message, 409);
+        }
+        throw new SessionManagerError('SESSION_CREATION_FAILED', error.message, 500);
+      }
+      throw error;
     }
   }
 
@@ -867,6 +929,8 @@ export class SessionManager {
       runnerArgs = ['--allowedTools', buildFactoryAllowedTools(stage, factoryHistory.reportPath).join(',')];
     }
 
+    const workingDirectory = flowDetails?.flow.worktreePath ?? input.repoPath;
+
     let child: pty.IPty;
     try {
       child = pty.spawn(
@@ -876,7 +940,7 @@ export class SessionManager {
           name: 'xterm-256color',
           cols: input.cols,
           rows: input.rows,
-          cwd: input.repoPath,
+          cwd: workingDirectory,
           env: { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' },
         },
       );

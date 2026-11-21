@@ -3,6 +3,7 @@ import {
   FactoryFlowSchema,
   FactoryFlowStateSchema,
   FactoryStageNameSchema,
+  GitBranchNameSchema,
 } from './factory.js';
 import { ReviewReportDirectoryPathSchema, ReviewStateSchema } from './review.js';
 
@@ -106,6 +107,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     flowId: uuidSchema.optional(),
     stage: FactoryStageNameSchema.optional(),
     title: nonEmptyTextSchema.max(200).optional(),
+    baseBranch: GitBranchNameSchema.optional(),
     cols: columns,
     rows,
   }).superRefine((val, ctx) => {

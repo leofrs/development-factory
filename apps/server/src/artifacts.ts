@@ -31,6 +31,11 @@ export function defaultFactoryArtifactsDirectory(): string {
   return join(reviewDataDirectory(), 'artifacts');
 }
 
+/** Retorna o diretório raiz padrão dos worktrees da Factory fora dos repositórios analisados. */
+export function defaultFactoryWorktreesDirectory(): string {
+  return join(reviewDataDirectory(), 'worktrees');
+}
+
 function canonicalPathAllowingMissing(path: string): string {
   if (lstatSync(path, { throwIfNoEntry: false })) {
     return realpathSync(path);
@@ -78,12 +83,16 @@ function assertExternalDestination(
   }
 }
 
-function ensureManagedDirectory(directory: string, enforcePermissions: boolean): void {
+function ensureManagedDirectory(
+  directory: string,
+  enforcePermissions: boolean,
+  label: string,
+): void {
   const entry = lstatSync(directory, { throwIfNoEntry: false });
   if (entry) {
     if (entry.isSymbolicLink() || !entry.isDirectory()) {
       throw new FactoryArtifactDestinationError(
-        'O diretório de artefatos da Factory precisa ser um diretório real, sem links simbólicos.',
+        `O diretório de ${label} da Factory precisa ser um diretório real, sem links simbólicos.`,
       );
     }
   } else {
@@ -94,60 +103,98 @@ function ensureManagedDirectory(directory: string, enforcePermissions: boolean):
   }
 }
 
+interface ResolveManagedDirectoryOptions {
+  readonly subdirectory: 'artifacts' | 'worktrees';
+  readonly label: string;
+  readonly createFlowDirectory: boolean;
+}
+
+function resolveManagedFlowPath(
+  repoPath: string,
+  options: ResolveManagedDirectoryOptions,
+  flowId?: string,
+): string {
+  const createDestinationError = (message: string) => new FactoryArtifactDestinationError(message);
+
+  if (flowId !== undefined && !SAFE_FLOW_DIRECTORY_PATTERN.test(flowId)) {
+    throw createDestinationError(
+      `Identificador de fluxo inválido para o diretório de ${options.label}.`,
+    );
+  }
+
+  const dataRoot = reviewDataDirectory();
+  const managedRoot = join(dataRoot, options.subdirectory);
+  const targetDirectory = flowId ? join(managedRoot, flowId) : managedRoot;
+
+  if (!isAbsolute(targetDirectory) || targetDirectory.includes('\0')) {
+    throw createDestinationError(
+      `O diretório de ${options.label} da Factory precisa ser um caminho absoluto válido no WSL.`,
+    );
+  }
+
+  const canonicalTarget = canonicalPathAllowingMissing(resolve(targetDirectory));
+  assertExternalDestination(
+    canonicalTarget,
+    repoPath,
+    () =>
+      createDestinationError(
+        `O diretório de ${options.label} da Factory precisa ficar fora do repositório analisado e do Development Factory.`,
+      ),
+  );
+
+  ensureManagedDirectory(dataRoot, false, options.label);
+  ensureManagedDirectory(managedRoot, true, options.label);
+
+  if (flowId && options.createFlowDirectory) {
+    ensureManagedDirectory(targetDirectory, true, options.label);
+  }
+
+  const checkTarget = options.createFlowDirectory || !flowId ? targetDirectory : managedRoot;
+  const resolvedCheckTarget = realpathSync(checkTarget);
+  assertExternalDestination(
+    resolvedCheckTarget,
+    repoPath,
+    () =>
+      createDestinationError(
+        `O diretório de ${options.label} da Factory precisa ficar fora do repositório analisado e do Development Factory.`,
+      ),
+  );
+  if (!statSync(resolvedCheckTarget).isDirectory()) {
+    throw createDestinationError(
+      `O diretório de ${options.label} da Factory precisa ser uma pasta válida.`,
+    );
+  }
+  accessSync(resolvedCheckTarget, constants.W_OK | constants.X_OK);
+
+  if (!flowId || options.createFlowDirectory) {
+    return resolvedCheckTarget;
+  }
+
+  const candidatePath = join(resolvedCheckTarget, flowId);
+  const existingEntry = lstatSync(candidatePath, { throwIfNoEntry: false });
+  if (existingEntry?.isSymbolicLink()) {
+    throw createDestinationError(
+      `O diretório de ${options.label} da Factory precisa ser um diretório real, sem links simbólicos.`,
+    );
+  }
+  return candidatePath;
+}
+
 /**
  * Resolve e prepara o diretório externo gerenciado para artefatos e registros de sessão da Factory,
  * garantindo isolamento fora do repositório, permissões `0o700` e proteção contra symlinks.
  */
 export function resolveFactoryArtifactsDirectory(repoPath: string, flowId?: string): string {
   try {
-    if (flowId !== undefined && !SAFE_FLOW_DIRECTORY_PATTERN.test(flowId)) {
-      throw new FactoryArtifactDestinationError(
-        'Identificador de fluxo inválido para o diretório de artefatos.',
-      );
-    }
-
-    const dataRoot = reviewDataDirectory();
-    const artifactsRoot = defaultFactoryArtifactsDirectory();
-    const targetDirectory = flowId ? join(artifactsRoot, flowId) : artifactsRoot;
-
-    if (!isAbsolute(targetDirectory) || targetDirectory.includes('\0')) {
-      throw new FactoryArtifactDestinationError(
-        'O diretório de artefatos da Factory precisa ser um caminho absoluto válido no WSL.',
-      );
-    }
-
-    const canonicalTarget = canonicalPathAllowingMissing(resolve(targetDirectory));
-    assertExternalDestination(
-      canonicalTarget,
+    return resolveManagedFlowPath(
       repoPath,
-      () =>
-        new FactoryArtifactDestinationError(
-          'O diretório de artefatos da Factory precisa ficar fora do repositório analisado e do Development Factory.',
-        ),
+      {
+        subdirectory: 'artifacts',
+        label: 'artefatos',
+        createFlowDirectory: true,
+      },
+      flowId,
     );
-
-    ensureManagedDirectory(dataRoot, false);
-    ensureManagedDirectory(artifactsRoot, true);
-    if (flowId) {
-      ensureManagedDirectory(targetDirectory, true);
-    }
-
-    const resolved = realpathSync(targetDirectory);
-    assertExternalDestination(
-      resolved,
-      repoPath,
-      () =>
-        new FactoryArtifactDestinationError(
-          'O diretório de artefatos da Factory precisa ficar fora do repositório analisado e do Development Factory.',
-        ),
-    );
-    if (!statSync(resolved).isDirectory()) {
-      throw new FactoryArtifactDestinationError(
-        'O diretório de artefatos da Factory precisa ser uma pasta válida.',
-      );
-    }
-    accessSync(resolved, constants.W_OK | constants.X_OK);
-    return resolved;
   } catch (error) {
     if (error instanceof FactoryArtifactDestinationError) {
       throw error;
@@ -157,6 +204,67 @@ export function resolveFactoryArtifactsDirectory(repoPath: string, flowId?: stri
       { cause: error },
     );
   }
+}
+
+/**
+ * Prepara a raiz externa de worktrees (`0o700`, sem symlinks, fora do repositório alvo) e retorna
+ * o caminho alvo `<worktreesRoot>/<flowId>` pronto para provisionamento via `git worktree add`.
+ */
+export function resolveFactoryWorktreePath(repoPath: string, flowId: string): {
+  worktreesRoot: string;
+  worktreePath: string;
+} {
+  try {
+    const worktreesRoot = resolveManagedFlowPath(repoPath, {
+      subdirectory: 'worktrees',
+      label: 'worktrees',
+      createFlowDirectory: false,
+    });
+    const worktreePath = resolveManagedFlowPath(
+      repoPath,
+      {
+        subdirectory: 'worktrees',
+        label: 'worktrees',
+        createFlowDirectory: false,
+      },
+      flowId,
+    );
+    return { worktreesRoot, worktreePath };
+  } catch (error) {
+    if (error instanceof FactoryArtifactDestinationError) {
+      throw error;
+    }
+    throw new FactoryArtifactDestinationError(
+      'Não foi possível preparar o diretório externo de worktrees da Factory.',
+      { cause: error },
+    );
+  }
+}
+
+/** Verifica se um caminho de worktree existente permanece dentro da raiz gerenciada e fora do repositório. */
+export function assertExternalManagedWorktree(repoPath: string, worktreePath: string): string {
+  const worktreesRoot = realpathSync(defaultFactoryWorktreesDirectory());
+  const entry = lstatSync(worktreePath, { throwIfNoEntry: false });
+  if (!entry || entry.isSymbolicLink() || !entry.isDirectory()) {
+    throw new FactoryArtifactDestinationError(
+      'O diretório do worktree da Factory não existe ou é inválido.',
+    );
+  }
+  const resolvedWorktree = realpathSync(worktreePath);
+  if (!isWithin(worktreesRoot, resolvedWorktree) || resolvedWorktree === worktreesRoot) {
+    throw new FactoryArtifactDestinationError(
+      'O worktree da Factory precisa estar dentro do diretório gerenciado de worktrees.',
+    );
+  }
+  assertExternalDestination(
+    resolvedWorktree,
+    repoPath,
+    () =>
+      new FactoryArtifactDestinationError(
+        'O worktree da Factory precisa ficar fora do repositório analisado e do Development Factory.',
+      ),
+  );
+  return resolvedWorktree;
 }
 
 export function resolveReviewReportDirectory(repoPath: string, selectedDirectory?: string): string {

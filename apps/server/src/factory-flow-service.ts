@@ -142,12 +142,17 @@ function formatZodIssues(error: z.ZodError): string[] {
   });
 }
 
-function fingerprintFlowRequest(task: FactoryTaskInput, title: string): string {
+function fingerprintFlowRequest(
+  task: FactoryTaskInput,
+  title: string,
+  baseBranch?: string,
+): string {
   const canonical = JSON.stringify({
     inputType: task.inputType,
     value: task.value,
     repoPath: task.repoPath,
     title,
+    ...(baseBranch !== undefined ? { baseBranch } : {}),
   });
   return createHash('sha256').update(canonical).digest('hex');
 }
@@ -291,7 +296,7 @@ export class FactoryFlowService {
       loopPausedReason: null,
       worktreePath: null,
       branchName: null,
-      baseBranch: null,
+      baseBranch: parsed.data.baseBranch ?? null,
       createdAt,
       updatedAt: createdAt,
       finishedAt: null,
@@ -325,7 +330,11 @@ export class FactoryFlowService {
           effectiveKey
             ? {
                 key: effectiveKey,
-                fingerprint: fingerprintFlowRequest(parsed.data.task, title),
+                fingerprint: fingerprintFlowRequest(
+                  parsed.data.task,
+                  title,
+                  parsed.data.baseBranch,
+                ),
               }
             : undefined,
         ),
