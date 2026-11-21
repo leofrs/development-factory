@@ -24,7 +24,10 @@ import {
   type ServerMessage,
 } from '@development-factory/shared';
 import { createReviewServer } from '../src/server.js';
-import { getFactoryStageSidecarPath } from '../src/factory-stage-runners.js';
+import {
+  buildTriageAndPlanningRunnerArgs,
+  getFactoryStageSidecarPath,
+} from '../src/factory-stage-runners.js';
 import {
   planningMarkdown,
   sidecarFixtures,
@@ -324,12 +327,23 @@ test('API REST /api/factory/flows valida origem, idempotência, filtros e ciclo 
   assert.equal(attachedBMsg.session.flowId, flowBId);
   assert.equal(attachedBMsg.session.stage, 'triage');
 
-  // Aguarda ambos PTYs estarem prontos em paralelo.
-  await waitFor(() => {
-    const sA = sessionManager.getSession(sessionAId);
-    const sB = sessionManager.getSession(sessionBId);
-    return Boolean(sA?.buffer.replay().includes('READY:') && sB?.buffer.replay().includes('READY:'));
-  });
+  async function readRunnerLaunch(sessionId: string) {
+    const readPayload = () =>
+      /^READY:([^\n]*)\n/m.exec(
+        sessionManager.getSession(sessionId)?.buffer.replay() ?? '',
+      )?.[1];
+    await waitFor(() => readPayload() !== undefined);
+    const payload = readPayload();
+    assert.ok(payload);
+    return z.object({ cwd: z.string(), args: z.array(z.string()) }).parse(
+      JSON.parse(payload) as unknown,
+    );
+  }
+
+  const [triageA, triageB] = await Promise.all([
+    readRunnerLaunch(sessionAId),
+    readRunnerLaunch(sessionBId),
+  ]);
 
   // Confere que GET /api/sessions retorna ambas sessões com flowId e stage distintos.
   const sessionsRes = await fetch(`${baseUrl}/api/sessions`, {
@@ -345,6 +359,17 @@ test('API REST /api/factory/flows valida origem, idempotência, filtros e ciclo 
   assert.equal(sessionBSummary.flowId, flowBId);
   assert.notEqual(sessionASummary.reportPath, sessionBSummary.reportPath);
   assert.notEqual(sessionASummary.sessionPath, sessionBSummary.sessionPath);
+  assert.ok(sessionASummary.reportPath && sessionBSummary.reportPath);
+  assert.deepEqual(triageA.args.slice(0, -1), [
+    '--verbose',
+    ...buildTriageAndPlanningRunnerArgs('triage', sessionASummary.reportPath),
+    '-p',
+  ]);
+  assert.deepEqual(triageB.args.slice(0, -1), [
+    '--verbose',
+    ...buildTriageAndPlanningRunnerArgs('triage', sessionBSummary.reportPath),
+    '-p',
+  ]);
 
   // Confere que não é possível avançar ou reexecutar enquanto a sessão está running.
   const advanceRunningRes = await fetch(`${baseUrl}/api/factory/flows/${flowAId}/advance`, {
@@ -368,7 +393,6 @@ test('API REST /api/factory/flows valida origem, idempotência, filtros e ciclo 
     });
 
   // 5. A triagem sem sidecar bloqueia o avanço e pode ser reexecutada.
-  assert(sessionASummary.reportPath);
   writeFileSync(sessionASummary.reportPath, triageMarkdown('Fluxo A sem sidecar.'));
   rmSync(getFactoryStageSidecarPath(sessionASummary.reportPath));
   sessionManager.writeInput(sessionAId, 'EXIT0');
@@ -461,23 +485,16 @@ test('API REST /api/factory/flows valida origem, idempotência, filtros e ciclo 
   );
 
   const autoPlanningSessionId = detailsA.flow.currentSessionId;
-  await waitFor(() =>
-    /READY:[^\n]*\n/.test(sessionManager.getSession(autoPlanningSessionId)?.buffer.replay() ?? ''),
-  );
-  const planningBuffer = sessionManager.getSession(autoPlanningSessionId)?.buffer.replay() ?? '';
-  const readyLine = planningBuffer.split(/\r?\n/).find(line => line.includes('READY:'));
-  assert.ok(readyLine, 'Sessão automática da etapa planning deve emitir READY com os argumentos do prompt');
-  const readyJson = readyLine.slice(readyLine.indexOf('READY:') + 'READY:'.length);
-  const readyPayload = JSON.parse(readyJson) as { args?: string[] };
-  const args = readyPayload.args ?? [];
-  assert.ok(args.includes('--verbose'));
-  assert.ok(args.includes('--allowedTools'));
-  const allowedToolsArg = args[args.indexOf('--allowedTools') + 1] ?? '';
-  assert.ok(allowedToolsArg.includes('Read,Glob,Grep'));
-  assert.equal(allowedToolsArg.includes('mcp__claude_ai_Atlassian_Rovo'), false);
-  const promptArgIndex = args.indexOf('-p') + 1;
-  assert.ok(promptArgIndex > 0);
-  const planningPrompt = args[promptArgIndex] ?? '';
+  const planning = await readRunnerLaunch(autoPlanningSessionId);
+  const planningReport = sessionManager.getSession(autoPlanningSessionId)?.reportPath;
+  assert.ok(planningReport);
+  assert.equal(planning.cwd, detailsA.flow.worktreePath);
+  assert.deepEqual(planning.args.slice(0, -1), [
+    '--verbose',
+    ...buildTriageAndPlanningRunnerArgs('planning', planningReport),
+    '-p',
+  ]);
+  const planningPrompt = planning.args.at(-1) ?? '';
   assert.ok(planningPrompt.includes('# Documento de Entendimento do Problema'));
   assert.ok(planningPrompt.includes('Fluxo A salvo.'));
   assert.ok(planningPrompt.includes('Sub-etapa A'));

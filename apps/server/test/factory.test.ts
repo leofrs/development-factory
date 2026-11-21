@@ -49,7 +49,10 @@ import { buildDevelopmentRunnerArgs } from '../src/factory-development.js';
 import { buildPrRunnerArgs, isPrSummary } from '../src/factory-pr.js';
 import { loadFactoryRepositoryProfile } from '../src/factory-repository-profile.js';
 import { buildReviewRunnerArgs, isReviewReport, parseReviewVerdict } from '../src/factory-review.js';
-import { getFactoryStageSidecarPath } from '../src/factory-stage-runners.js';
+import {
+  buildTriageAndPlanningRunnerArgs,
+  getFactoryStageSidecarPath,
+} from '../src/factory-stage-runners.js';
 import { buildTestsRunnerArgs, isTestReport } from '../src/factory-tests.js';
 import { createReviewServer } from '../src/server.js';
 import { triageMarkdown, writeFactoryStageSidecar } from './fixtures/factory-stage-artifacts.js';
@@ -270,6 +273,71 @@ test('prompts sem manifesto orientam a consulta ao projeto e ao plano', async co
     assert.doesNotMatch(prompt, /ApiError|dumpErrors|node --run unit-test-ci|Jest/, stage);
   }
   assert.match(prompts.pr, /seções padrão do resumo/);
+});
+
+test('o runner da Triagem restringe o Jira a consultas e grava somente os artefatos externos', () => {
+  const directory = '/tmp/factory artifacts/flow-1';
+  const reportPath = `${directory}/spec.md`;
+
+  assert.deepEqual(buildTriageAndPlanningRunnerArgs('triage', reportPath), [
+    '--restricted',
+    '--settings',
+    '{"allowedMcpServers":[{"serverUrl":"https://mcp.atlassian.com/*"}]}',
+    '--no-chrome',
+    '--permission-mode',
+    'dontAsk',
+    '--add-dir',
+    directory,
+    '--tools',
+    'Read,Edit,Write',
+    '--allowedTools',
+    [
+      'Read',
+      'mcp__claude_ai_Atlassian_Rovo__getAccessibleAtlassianResources',
+      'mcp__claude_ai_Atlassian_Rovo__getJiraIssue',
+      'mcp__claude_ai_Atlassian_Rovo__listJiraIssueComments',
+      'mcp__claude_ai_Atlassian_Rovo__searchJiraIssuesUsingJql',
+      'mcp__claude_ai_Atlassian_Rovo__discover',
+      'mcp__claude_ai_Atlassian_Rovo__executeRead',
+      'Edit(//tmp/factory artifacts/flow-1/spec.md)',
+      'Write(//tmp/factory artifacts/flow-1/spec.md)',
+      'Edit(//tmp/factory artifacts/flow-1/spec.json)',
+      'Write(//tmp/factory artifacts/flow-1/spec.json)',
+    ].join(','),
+    '--disallowedTools',
+    'Edit(/**)',
+  ]);
+});
+
+test('o runner do Planejamento lê o worktree e grava apenas o plano e o sidecar', () => {
+  const directory = '/tmp/factory artifacts/flow-1';
+  const reportPath = `${directory}/plan.md`;
+
+  assert.deepEqual(buildTriageAndPlanningRunnerArgs('planning', reportPath), [
+    '--restricted',
+    '--strict-mcp-config',
+    '--mcp-config',
+    '{"mcpServers":{}}',
+    '--no-chrome',
+    '--permission-mode',
+    'dontAsk',
+    '--add-dir',
+    directory,
+    '--tools',
+    'Read,Glob,Grep,Edit,Write',
+    '--allowedTools',
+    [
+      'Read',
+      'Glob',
+      'Grep',
+      'Edit(//tmp/factory artifacts/flow-1/plan.md)',
+      'Write(//tmp/factory artifacts/flow-1/plan.md)',
+      'Edit(//tmp/factory artifacts/flow-1/plan.json)',
+      'Write(//tmp/factory artifacts/flow-1/plan.json)',
+    ].join(','),
+    '--disallowedTools',
+    'Edit(/**)',
+  ]);
 });
 
 test('prompts, runners e validadores das Etapas 03 a 06 seguem contratos e permissões externas', () => {

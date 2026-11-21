@@ -40,7 +40,7 @@ import type { FactoryRepositoryProfileErrorCode } from './factory-repository-pro
 import { buildReviewRunnerArgs, parseReviewVerdict, readFactoryReviewInputs } from './factory-review.js';
 import {
   FactoryStageArtifactError,
-  buildReportFileToolPermissions,
+  buildTriageAndPlanningRunnerArgs,
   readFactoryStageDocument,
 } from './factory-stage-runners.js';
 import { buildTestsRunnerArgs, readFactoryTestsInputs } from './factory-tests.js';
@@ -227,16 +227,6 @@ function formatReviewTitle(request: ReviewRequest): string {
 function formatFactoryTitle(request: FactoryRequest): string {
   const trimmed = request.value.trim();
   return trimmed.length > 80 ? `${trimmed.slice(0, 77)}...` : trimmed;
-}
-
-function buildFactoryAllowedTools(stage: FactoryStageName, reportPath: string): string[] {
-  const reportPermissions = buildReportFileToolPermissions(reportPath);
-
-  if (stage === 'triage') {
-    return ['Read', 'mcp__claude_ai_Atlassian_Rovo__*', ...reportPermissions];
-  }
-
-  return ['Read', 'Glob', 'Grep', ...reportPermissions];
 }
 
 function validateRepoPath(repoPath: string): void {
@@ -1102,8 +1092,9 @@ export class SessionManager {
       prompt = prepared.prompt;
       runnerArgs = prepared.runnerArgs;
     } else {
+      const initialStage = stage === 'planning' ? 'planning' : 'triage';
       prompt =
-        stage === 'planning'
+        initialStage === 'planning'
           ? buildFactoryArchitecturePrompt({
               inputType: input.inputType,
               value: input.value,
@@ -1113,7 +1104,7 @@ export class SessionManager {
               repositoryProfile,
             })
           : buildFactoryPlanPrompt(input.inputType, input.value, factoryHistory.reportPath);
-      runnerArgs = ['--allowedTools', buildFactoryAllowedTools(stage, factoryHistory.reportPath).join(',')];
+      runnerArgs = buildTriageAndPlanningRunnerArgs(initialStage, factoryHistory.reportPath);
     }
 
     const workingDirectory = flowDetails?.flow.worktreePath ?? input.repoPath;

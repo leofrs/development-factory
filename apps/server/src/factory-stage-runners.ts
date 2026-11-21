@@ -215,6 +215,8 @@ export interface RestrictedRunnerArgsConfig {
   readonly tools: readonly string[];
   readonly allowed: readonly string[];
   readonly denied: readonly string[];
+  readonly additionalDirectory?: string;
+  readonly allowedMcpServerUrl?: string;
 }
 
 /** Constrói permissões explícitas de escrita para o par de arquivos externos da etapa. */
@@ -227,14 +229,20 @@ export function buildReportFileToolPermissions(reportPath: string): string[] {
 
 /** Constrói a linha de argumentos `--restricted` padrão para runners da Factory. */
 export function buildRestrictedRunnerArgs(config: RestrictedRunnerArgsConfig): string[] {
+  const mcpArgs = config.allowedMcpServerUrl
+    ? [
+        '--settings',
+        JSON.stringify({ allowedMcpServers: [{ serverUrl: config.allowedMcpServerUrl }] }),
+      ]
+    : ['--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}'];
+
   return [
     '--restricted',
-    '--strict-mcp-config',
-    '--mcp-config',
-    '{"mcpServers":{}}',
+    ...mcpArgs,
     '--no-chrome',
     '--permission-mode',
     'dontAsk',
+    ...(config.additionalDirectory ? ['--add-dir', config.additionalDirectory] : []),
     '--tools',
     config.tools.join(','),
     '--allowedTools',
@@ -242,6 +250,35 @@ export function buildRestrictedRunnerArgs(config: RestrictedRunnerArgsConfig): s
     '--disallowedTools',
     config.denied.join(','),
   ];
+}
+
+const JIRA_READ_TOOLS = [
+  'getAccessibleAtlassianResources',
+  'getJiraIssue',
+  'listJiraIssueComments',
+  'searchJiraIssuesUsingJql',
+  'discover',
+  'executeRead',
+].map(tool => `mcp__claude_ai_Atlassian_Rovo__${tool}`);
+
+export function buildTriageAndPlanningRunnerArgs(
+  stage: 'triage' | 'planning',
+  reportPath: string,
+): string[] {
+  const isTriage = stage === 'triage';
+  const readTools = isTriage ? ['Read'] : ['Read', 'Glob', 'Grep'];
+
+  return buildRestrictedRunnerArgs({
+    additionalDirectory: dirname(reportPath),
+    ...(isTriage ? { allowedMcpServerUrl: 'https://mcp.atlassian.com/*' } : {}),
+    tools: [...readTools, 'Edit', 'Write'],
+    allowed: [
+      ...readTools,
+      ...(isTriage ? JIRA_READ_TOOLS : []),
+      ...buildReportFileToolPermissions(reportPath),
+    ],
+    denied: ['Edit(/**)'],
+  });
 }
 
 export async function readFactoryStageDocument(

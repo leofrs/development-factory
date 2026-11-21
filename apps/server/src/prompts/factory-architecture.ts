@@ -101,10 +101,7 @@ Nenhum documento prévio do Bloco 1 foi localizado automaticamente. Solicite ou 
 export function buildFactoryArchitecturePrompt(input: FactoryArchitecturePromptInput): string {
   const target = formatTaskTarget(input.inputType, input.value);
   const outputInstruction = input.reportPath
-    ? `
-
-${formatFactoryStageOutput('planning', input.reportPath, PLANNING_SIDECAR_FIELDS)}
-Se a escrita depender de permissão, solicite-a pela TUI.`
+    ? `\n\n${formatFactoryStageOutput('planning', input.reportPath, PLANNING_SIDECAR_FIELDS)}`
     : '';
 
   const understandingInput = formatUnderstandingInput(
