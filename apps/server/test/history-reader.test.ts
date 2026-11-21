@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, open, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -55,4 +56,24 @@ test('recusa travessia, links, diretórios e arquivos fora dos limites de leitur
   await handle.truncate(maxHistoryBytes + 1);
   await handle.close();
   await assert.rejects(readHistoryFile(directory, 'grande.md'), /5 MB/);
+});
+
+test('lê artefatos externos da Factory (.md e .session.md) a partir do diretório gerenciado', async context => {
+  const root = await mkdtemp(join(tmpdir(), 'factory-reader-'));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const flowId = randomUUID();
+  const artifactDir = join(root, 'development-factory', 'artifacts', flowId);
+  await mkdir(artifactDir, { recursive: true, mode: 0o700 });
+  const reportContent = '# Documento de Entendimento\n\nConteúdo externo.\n';
+  const sessionContent = '# Registro da sessão\n\nSaída capturada.\n';
+  await writeFile(join(artifactDir, 'report.md'), reportContent, { mode: 0o600 });
+  await writeFile(join(artifactDir, 'report.session.md'), sessionContent, { mode: 0o600 });
+
+  const listing = HistoryListingSchema.parse(await listHistory(artifactDir));
+  assert.deepEqual(listing.files.map(file => file.name).sort(), ['report.md', 'report.session.md']);
+
+  const readReport = HistoryFileSchema.parse(await readHistoryFile(artifactDir, 'report.md'));
+  assert.equal(readReport.content, reportContent);
+  const readSession = HistoryFileSchema.parse(await readHistoryFile(artifactDir, 'report.session.md'));
+  assert.equal(readSession.content, sessionContent);
 });

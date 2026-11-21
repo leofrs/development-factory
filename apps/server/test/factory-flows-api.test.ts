@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { WebSocket } from 'ws';
 import { z } from 'zod';
@@ -95,17 +96,21 @@ test('API REST /api/factory/flows valida origem, idempotência, filtros e ciclo 
   const binDir = join(rootDir, 'bin');
   const repoA = join(rootDir, 'repo-a');
   const repoB = join(rootDir, 'repo-b');
+  const xdgDataHome = join(rootDir, 'xdg-data');
   const dbPath = join(rootDir, 'reviews.db');
   mkdirSync(binDir);
   mkdirSync(repoA);
   mkdirSync(repoB);
+  mkdirSync(xdgDataHome);
 
   const claudeTarget = join(binDir, 'claude');
   copyFileSync(new URL('./fixtures/claude.ts', import.meta.url), claudeTarget);
   chmodSync(claudeTarget, 0o755);
 
   const previousPath = process.env.PATH;
+  const previousXdg = process.env.XDG_DATA_HOME;
   process.env.PATH = `${binDir}:${previousPath ?? ''}`;
+  process.env.XDG_DATA_HOME = xdgDataHome;
 
   const { server, sessionManager, shutdown } = createReviewServer({ dbPath });
   server.listen(0, '127.0.0.1');
@@ -126,6 +131,11 @@ test('API REST /api/factory/flows valida origem, idempotência, filtros e ciclo 
     }
     await shutdown();
     process.env.PATH = previousPath;
+    if (previousXdg === undefined) {
+      delete process.env.XDG_DATA_HOME;
+    } else {
+      process.env.XDG_DATA_HOME = previousXdg;
+    }
     rmSync(rootDir, { recursive: true, force: true });
   });
 
@@ -477,22 +487,27 @@ test('API REST /api/factory/flows valida origem, idempotência, filtros e ciclo 
 });
 
 test(
-  'fluxos paralelos mantêm artefatos isolados e o Desenvolvimento entrega o fluxo à etapa de Testes',
+  'fluxos paralelos mantêm artefatos isolados fora do repositório e o Desenvolvimento entrega o fluxo à etapa de Testes',
   { timeout: 30000 },
   async context => {
     const rootDir = mkdtempSync(join(tmpdir(), 'df-factory-parallel-same-repo-'));
     const binDir = join(rootDir, 'bin');
     const repoDir = join(rootDir, 'shared-repo');
+    const xdgDataHome = join(rootDir, 'xdg-data');
     const dbPath = join(rootDir, 'reviews.db');
     mkdirSync(binDir);
     mkdirSync(repoDir);
+    mkdirSync(xdgDataHome);
+    execFileSync('git', ['init'], { cwd: repoDir });
 
     const claudeTarget = join(binDir, 'claude');
     copyFileSync(new URL('./fixtures/claude.ts', import.meta.url), claudeTarget);
     chmodSync(claudeTarget, 0o755);
 
     const previousPath = process.env.PATH;
+    const previousXdg = process.env.XDG_DATA_HOME;
     process.env.PATH = `${binDir}:${previousPath ?? ''}`;
+    process.env.XDG_DATA_HOME = xdgDataHome;
 
     const { server, sessionManager, shutdown } = createReviewServer({ dbPath });
     server.listen(0, '127.0.0.1');
@@ -505,6 +520,11 @@ test(
     context.after(async () => {
       await shutdown();
       process.env.PATH = previousPath;
+      if (previousXdg === undefined) {
+        delete process.env.XDG_DATA_HOME;
+      } else {
+        process.env.XDG_DATA_HOME = previousXdg;
+      }
       rmSync(rootDir, { recursive: true, force: true });
     });
 
@@ -1031,6 +1051,13 @@ test(
     const checkTwo = FactoryFlowDetailsSchema.parse(await checkTwoRes.json());
     assert.equal(checkTwo.flow.currentStage, 'planning');
     assert.equal(checkTwo.flow.state, 'waiting_action');
+
+    // Nenhum artefato ou pasta .code-reviews foi criado dentro do repositório alvo.
+    assert.equal(existsSync(join(repoDir, '.code-reviews')), false);
+    assert.equal(execFileSync('git', ['status', '--porcelain'], { cwd: repoDir, encoding: 'utf8' }), '');
+    const artifactsFlowOneDir = join(xdgDataHome, 'development-factory', 'artifacts', createdOne.flow.id);
+    assert.equal(dirname(specOne.path), artifactsFlowOneDir);
+    assert.equal(dirname(prSession.reportPath), artifactsFlowOneDir);
   },
 );
 
@@ -1041,16 +1068,20 @@ test(
     const rootDir = mkdtempSync(join(tmpdir(), 'df-factory-circuit-breaker-'));
     const binDir = join(rootDir, 'bin');
     const repoDir = join(rootDir, 'repo');
+    const xdgDataHome = join(rootDir, 'xdg-data');
     const dbPath = join(rootDir, 'reviews.db');
     mkdirSync(binDir);
     mkdirSync(repoDir);
+    mkdirSync(xdgDataHome);
 
     const claudeTarget = join(binDir, 'claude');
     copyFileSync(new URL('./fixtures/claude.ts', import.meta.url), claudeTarget);
     chmodSync(claudeTarget, 0o755);
 
     const previousPath = process.env.PATH;
+    const previousXdg = process.env.XDG_DATA_HOME;
     process.env.PATH = `${binDir}:${previousPath ?? ''}`;
+    process.env.XDG_DATA_HOME = xdgDataHome;
 
     const { server, sessionManager, shutdown } = createReviewServer({ dbPath });
     server.listen(0, '127.0.0.1');
@@ -1063,6 +1094,11 @@ test(
     context.after(async () => {
       await shutdown();
       process.env.PATH = previousPath;
+      if (previousXdg === undefined) {
+        delete process.env.XDG_DATA_HOME;
+      } else {
+        process.env.XDG_DATA_HOME = previousXdg;
+      }
       rmSync(rootDir, { recursive: true, force: true });
     });
 

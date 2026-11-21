@@ -28,6 +28,7 @@ import { buildDevelopmentRunnerArgs, readFactoryDevelopmentInputs } from './fact
 import { FactoryFlowServiceError, type FactoryFlowService } from './factory-flow-service.js';
 import { buildPrRunnerArgs, readFactoryPrInputs } from './factory-pr.js';
 import { buildReviewRunnerArgs, parseReviewVerdict, readFactoryReviewInputs } from './factory-review.js';
+import { buildReportFileToolPermissions } from './factory-stage-runners.js';
 import { buildTestsRunnerArgs, readFactoryTestsInputs } from './factory-tests.js';
 import { createFactoryHistory } from './history.js';
 import { buildCodeReviewPrompt } from './prompts/code-review.js';
@@ -198,10 +199,7 @@ function formatFactoryTitle(request: FactoryRequest): string {
 }
 
 function buildFactoryAllowedTools(stage: FactoryStageName, reportPath: string): string[] {
-  const reportPermissions = [
-    'Edit(.code-reviews/**)',
-    `Edit(${reportPath})`,
-  ];
+  const reportPermissions = buildReportFileToolPermissions(reportPath);
 
   if (stage === 'triage') {
     return ['Read', 'mcp__claude_ai_Atlassian_Rovo__*', ...reportPermissions];
@@ -798,7 +796,11 @@ export class SessionManager {
     let factoryHistory: ReturnType<typeof createFactoryHistory>;
     try {
       factoryHistory = createFactoryHistory(
-        { ...input, stage },
+        {
+          ...input,
+          ...(activeFactorySession ? { flowId: activeFactorySession.flowId } : {}),
+          stage,
+        },
         state => {
           session.historyState = state;
           if (state === 'saved') {

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { once } from 'node:events';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { chmod, copyFile, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
@@ -42,6 +43,7 @@ import {
   TEST_REPORT_TITLE,
   buildFactoryTestsPrompt,
 } from '../src/prompts/factory-tests.js';
+import { buildDevelopmentRunnerArgs } from '../src/factory-development.js';
 import { buildPrRunnerArgs, isPrSummary } from '../src/factory-pr.js';
 import { buildReviewRunnerArgs, isReviewReport, parseReviewVerdict } from '../src/factory-review.js';
 import { buildTestsRunnerArgs, isTestReport } from '../src/factory-tests.js';
@@ -110,9 +112,13 @@ test('ClientMessageSchema valida entradas de start_factory', () => {
 });
 
 test('buildFactoryPlanPrompt inclui tipo, valor e caminho do relatório', () => {
-  const prompt = buildFactoryPlanPrompt('jira_key', 'PROD-1234', '/tmp/repo/.code-reviews/plano.md');
+  const prompt = buildFactoryPlanPrompt(
+    'jira_key',
+    'PROD-1234',
+    '/tmp/factory-artifacts/flow-1/plano.md',
+  );
   assert(prompt.includes('Chave da tarefa no JIRA: "PROD-1234"'));
-  assert(prompt.includes('/tmp/repo/.code-reviews/plano.md'));
+  assert(prompt.includes('/tmp/factory-artifacts/flow-1/plano.md'));
 });
 
 test('buildFactoryArchitecturePrompt inclui saída do Bloco 1, destino e placeholder do Bloco 2', () => {
@@ -120,12 +126,12 @@ test('buildFactoryArchitecturePrompt inclui saída do Bloco 1, destino e placeho
     inputType: 'jira_key',
     value: 'PROD-1234',
     understandingDocument: '#### 1. Síntese Central (Core)\nQuando X, deve Y.',
-    understandingReportPath: '/tmp/repo/.code-reviews/entendimento.md',
-    reportPath: '/tmp/repo/.code-reviews/arquitetura.md',
+    understandingReportPath: '/tmp/factory-artifacts/flow-1/entendimento.md',
+    reportPath: '/tmp/factory-artifacts/flow-1/arquitetura.md',
   });
   assert(prompt.includes('Chave da tarefa no JIRA: "PROD-1234"'));
-  assert(prompt.includes('/tmp/repo/.code-reviews/arquitetura.md'));
-  assert(prompt.includes('/tmp/repo/.code-reviews/entendimento.md'));
+  assert(prompt.includes('/tmp/factory-artifacts/flow-1/arquitetura.md'));
+  assert(prompt.includes('/tmp/factory-artifacts/flow-1/entendimento.md'));
   assert(prompt.includes('#### 1. Síntese Central (Core)'));
   assert(prompt.includes(FACTORY_ARCHITECTURE_SYSTEM_PROMPT));
 });
@@ -134,9 +140,9 @@ test('buildFactoryArchitecturePrompt trata ausência de conteúdo prévio do Blo
   const withPathOnly = buildFactoryArchitecturePrompt({
     inputType: 'title',
     value: 'Ajustar fluxo',
-    understandingReportPath: '/tmp/repo/.code-reviews/entendimento.md',
+    understandingReportPath: '/tmp/factory-artifacts/flow-1/entendimento.md',
   });
-  assert(withPathOnly.includes('"/tmp/repo/.code-reviews/entendimento.md"'));
+  assert(withPathOnly.includes('"/tmp/factory-artifacts/flow-1/entendimento.md"'));
 
   const withoutBlockOne = buildFactoryArchitecturePrompt({
     inputType: 'title',
@@ -145,33 +151,42 @@ test('buildFactoryArchitecturePrompt trata ausência de conteúdo prévio do Blo
   assert(withoutBlockOne.includes('Nenhum documento prévio do Bloco 1 foi localizado automaticamente.'));
 });
 
-test('prompts, runners e validadores das Etapas 04 (tests) e 05 (review) seguem contratos e permissões', () => {
+test('prompts, runners e validadores das Etapas 03 a 06 seguem contratos e permissões externas', () => {
+  const devArgs = buildDevelopmentRunnerArgs('/tmp/factory-artifacts/flow-1/dev-report.md');
+  assert(devArgs.includes('--restricted'));
+  const devAllowed = devArgs[devArgs.indexOf('--allowedTools') + 1] ?? '';
+  assert(devAllowed.includes('Edit(//tmp/factory-artifacts/flow-1/dev-report.md)'));
+  assert(devAllowed.includes('Write(//tmp/factory-artifacts/flow-1/dev-report.md)'));
+  assert.equal(devAllowed.includes('.code-reviews'), false);
+
   const testsPrompt = buildFactoryTestsPrompt({
     task: 'PROD-1234',
-    understandingReportPath: '/tmp/repo/.code-reviews/spec.md',
-    implementationPlanPath: '/tmp/repo/.code-reviews/plan.md',
-    implementationReportPath: '/tmp/repo/.code-reviews/dev.md',
+    understandingReportPath: '/tmp/factory-artifacts/flow-1/spec.md',
+    implementationPlanPath: '/tmp/factory-artifacts/flow-1/plan.md',
+    implementationReportPath: '/tmp/factory-artifacts/flow-1/dev.md',
     approvedNotes: 'Priorizar casos de borda na autenticação',
-    reportPath: '/tmp/repo/.code-reviews/tests-report.md',
+    reportPath: '/tmp/factory-artifacts/flow-1/tests-report.md',
   });
   assert(testsPrompt.includes(FACTORY_TESTS_SYSTEM_PROMPT));
-  assert(testsPrompt.includes('/tmp/repo/.code-reviews/spec.md'));
-  assert(testsPrompt.includes('/tmp/repo/.code-reviews/plan.md'));
-  assert(testsPrompt.includes('/tmp/repo/.code-reviews/dev.md'));
+  assert(testsPrompt.includes('/tmp/factory-artifacts/flow-1/spec.md'));
+  assert(testsPrompt.includes('/tmp/factory-artifacts/flow-1/plan.md'));
+  assert(testsPrompt.includes('/tmp/factory-artifacts/flow-1/dev.md'));
   assert(testsPrompt.includes('Priorizar casos de borda na autenticação'));
   assert(testsPrompt.includes(`# ${TEST_REPORT_TITLE}`));
   for (const heading of Object.values(TEST_REPORT_SECTIONS)) {
     assert(testsPrompt.includes(`## ${heading}`));
   }
 
-  const testsArgs = buildTestsRunnerArgs('/tmp/repo/.code-reviews/tests-report.md');
+  const testsArgs = buildTestsRunnerArgs('/tmp/factory-artifacts/flow-1/tests-report.md');
   assert(testsArgs.includes('--restricted'));
   assert.equal(testsArgs[testsArgs.indexOf('--tools') + 1], 'Read,Glob,Grep,Edit,Write,Bash');
   const testsAllowed = testsArgs[testsArgs.indexOf('--allowedTools') + 1] ?? '';
   assert(testsAllowed.includes('Bash'));
   assert(testsAllowed.includes('Edit(**/*.test.*)'));
   assert(testsAllowed.includes('Write(**/fixtures/**)'));
-  assert(testsAllowed.includes('Edit(/.code-reviews/tests-report.md)'));
+  assert(testsAllowed.includes('Edit(//tmp/factory-artifacts/flow-1/tests-report.md)'));
+  assert(testsAllowed.includes('Write(//tmp/factory-artifacts/flow-1/tests-report.md)'));
+  assert.equal(testsAllowed.includes('.code-reviews'), false);
   assert.equal(testsAllowed.includes('Edit(**/*.ts)'), false);
   const testsDenied = testsArgs[testsArgs.indexOf('--disallowedTools') + 1] ?? '';
   assert(testsDenied.includes('Bash(git push*)'));
@@ -191,29 +206,31 @@ test('prompts, runners e validadores das Etapas 04 (tests) e 05 (review) seguem 
 
   const reviewPrompt = buildFactoryReviewPrompt({
     task: 'PROD-1234',
-    understandingReportPath: '/tmp/repo/.code-reviews/spec.md',
-    implementationPlanPath: '/tmp/repo/.code-reviews/plan.md',
-    implementationReportPath: '/tmp/repo/.code-reviews/dev.md',
-    testReportPath: '/tmp/repo/.code-reviews/tests-report.md',
+    understandingReportPath: '/tmp/factory-artifacts/flow-1/spec.md',
+    implementationPlanPath: '/tmp/factory-artifacts/flow-1/plan.md',
+    implementationReportPath: '/tmp/factory-artifacts/flow-1/dev.md',
+    testReportPath: '/tmp/factory-artifacts/flow-1/tests-report.md',
     approvedNotes: 'Auditar exposição de tokens nos logs',
-    reportPath: '/tmp/repo/.code-reviews/review-report.md',
+    reportPath: '/tmp/factory-artifacts/flow-1/review-report.md',
   });
   assert(reviewPrompt.includes(FACTORY_REVIEW_SYSTEM_PROMPT));
-  assert(reviewPrompt.includes('/tmp/repo/.code-reviews/tests-report.md'));
+  assert(reviewPrompt.includes('/tmp/factory-artifacts/flow-1/tests-report.md'));
   assert(reviewPrompt.includes('Auditar exposição de tokens nos logs'));
   assert(reviewPrompt.includes(`# ${REVIEW_REPORT_TITLE}`));
   for (const heading of Object.values(REVIEW_REPORT_SECTIONS)) {
     assert(reviewPrompt.includes(`## ${heading}`));
   }
 
-  const reviewArgs = buildReviewRunnerArgs('/tmp/repo/.code-reviews/review-report.md');
+  const reviewArgs = buildReviewRunnerArgs('/tmp/factory-artifacts/flow-1/review-report.md');
   assert(reviewArgs.includes('--restricted'));
   assert.equal(reviewArgs[reviewArgs.indexOf('--tools') + 1], 'Read,Glob,Grep,Edit,Write,Bash');
   const reviewAllowed = reviewArgs[reviewArgs.indexOf('--allowedTools') + 1] ?? '';
   assert(reviewAllowed.includes('Bash(git diff*)'));
   assert(reviewAllowed.includes('Bash(git status*)'));
   assert(reviewAllowed.includes('Bash(git log*)'));
-  assert(reviewAllowed.includes('Edit(/.code-reviews/review-report.md)'));
+  assert(reviewAllowed.includes('Edit(//tmp/factory-artifacts/flow-1/review-report.md)'));
+  assert(reviewAllowed.includes('Write(//tmp/factory-artifacts/flow-1/review-report.md)'));
+  assert.equal(reviewAllowed.includes('.code-reviews'), false);
   assert.equal(reviewAllowed.includes('Edit(**/*.test.*)'), false);
   assert.equal(reviewAllowed.includes('Edit(**/*.ts)'), false);
   assert.equal(reviewAllowed.split(',').includes('Bash'), false);
@@ -271,20 +288,20 @@ test('prompts, runners e validadores das Etapas 04 (tests) e 05 (review) seguem 
 
   const reentryDevPrompt = buildFactoryDevelopmentPrompt({
     task: 'PROD-1234',
-    understandingReportPath: '/tmp/repo/.code-reviews/spec.md',
-    implementationPlanPath: '/tmp/repo/.code-reviews/plan.md',
-    previousImplementationReportPath: '/tmp/repo/.code-reviews/dev-1.md',
-    testReportPath: '/tmp/repo/.code-reviews/tests-1.md',
-    reviewReportPath: '/tmp/repo/.code-reviews/review-1.md',
+    understandingReportPath: '/tmp/factory-artifacts/flow-1/spec.md',
+    implementationPlanPath: '/tmp/factory-artifacts/flow-1/plan.md',
+    previousImplementationReportPath: '/tmp/factory-artifacts/flow-1/dev-1.md',
+    testReportPath: '/tmp/factory-artifacts/flow-1/tests-1.md',
+    reviewReportPath: '/tmp/factory-artifacts/flow-1/review-1.md',
     approvedNotes: 'Preservar assinatura pública',
-    reportPath: '/tmp/repo/.code-reviews/dev-2.md',
+    reportPath: '/tmp/factory-artifacts/flow-1/dev-2.md',
     iteration: 2,
     maxIterations: 3,
   });
   assert(reentryDevPrompt.includes('Iteração 2/3'));
-  assert(reentryDevPrompt.includes('/tmp/repo/.code-reviews/dev-1.md'));
-  assert(reentryDevPrompt.includes('/tmp/repo/.code-reviews/tests-1.md'));
-  assert(reentryDevPrompt.includes('/tmp/repo/.code-reviews/review-1.md'));
+  assert(reentryDevPrompt.includes('/tmp/factory-artifacts/flow-1/dev-1.md'));
+  assert(reentryDevPrompt.includes('/tmp/factory-artifacts/flow-1/tests-1.md'));
+  assert(reentryDevPrompt.includes('/tmp/factory-artifacts/flow-1/review-1.md'));
   assert(reentryDevPrompt.includes(`# ${IMPLEMENTATION_REPORT_TITLE}`));
   for (const heading of Object.values(IMPLEMENTATION_REPORT_SECTIONS)) {
     assert(reentryDevPrompt.includes(`## ${heading}`));
@@ -292,23 +309,26 @@ test('prompts, runners e validadores das Etapas 04 (tests) e 05 (review) seguem 
 
   const prPrompt = buildFactoryPrPrompt({
     task: 'PROD-1234',
-    understandingReportPath: '/tmp/repo/.code-reviews/spec.md',
-    implementationPlanPath: '/tmp/repo/.code-reviews/plan.md',
-    implementationReportPath: '/tmp/repo/.code-reviews/dev-2.md',
-    testReportPath: '/tmp/repo/.code-reviews/tests-2.md',
-    reviewReportPath: '/tmp/repo/.code-reviews/review-2.md',
-    reportPath: '/tmp/repo/.code-reviews/pr-summary.md',
+    understandingReportPath: '/tmp/factory-artifacts/flow-1/spec.md',
+    implementationPlanPath: '/tmp/factory-artifacts/flow-1/plan.md',
+    implementationReportPath: '/tmp/factory-artifacts/flow-1/dev-2.md',
+    testReportPath: '/tmp/factory-artifacts/flow-1/tests-2.md',
+    reviewReportPath: '/tmp/factory-artifacts/flow-1/review-2.md',
+    reportPath: '/tmp/factory-artifacts/flow-1/pr-summary.md',
   });
   assert(prPrompt.includes(FACTORY_PR_SYSTEM_PROMPT));
-  assert(prPrompt.includes('/tmp/repo/.code-reviews/review-2.md'));
+  assert(prPrompt.includes('/tmp/factory-artifacts/flow-1/review-2.md'));
   assert(prPrompt.includes(`# ${PR_SUMMARY_TITLE}`));
   for (const heading of Object.values(PR_SUMMARY_SECTIONS)) {
     assert(prPrompt.includes(`## ${heading}`));
   }
 
-  const prArgs = buildPrRunnerArgs('/tmp/repo/.code-reviews/pr-summary.md');
+  const prArgs = buildPrRunnerArgs('/tmp/factory-artifacts/flow-1/pr-summary.md');
   assert(prArgs.includes('--restricted'));
-  assert.match(prArgs[prArgs.indexOf('--allowedTools') + 1] ?? '', /Edit\(\/\.code-reviews\/pr-summary\.md\)/);
+  const prAllowed = prArgs[prArgs.indexOf('--allowedTools') + 1] ?? '';
+  assert(prAllowed.includes('Edit(//tmp/factory-artifacts/flow-1/pr-summary.md)'));
+  assert(prAllowed.includes('Write(//tmp/factory-artifacts/flow-1/pr-summary.md)'));
+  assert.equal(prAllowed.includes('.code-reviews'), false);
   assert.equal(
     isPrSummary(
       [
@@ -326,16 +346,30 @@ test('prompts, runners e validadores das Etapas 04 (tests) e 05 (review) seguem 
   assert.equal(isPrSummary(`# ${PR_SUMMARY_TITLE}\n\nIncompleto.`), false);
 });
 
-test('start_factory executa PTY, salva plano em Markdown e permite leitura formatada via API', { timeout: 30000 }, async context => {
+test('start_factory executa PTY, salva plano em diretório externo sem sujar git status e permite leitura via API', { timeout: 30000 }, async context => {
   const directory = await mkdtemp(join(tmpdir(), 'factory-pty-'));
+  const repoDir = join(directory, 'repo');
+  const xdgDataHome = join(directory, 'xdg-data');
+  mkdirSync(repoDir);
+  mkdirSync(xdgDataHome);
+  execFileSync('git', ['init'], { cwd: repoDir });
+
   const previousPath = process.env.PATH;
+  const previousXdg = process.env.XDG_DATA_HOME;
+  process.env.XDG_DATA_HOME = xdgDataHome;
+
   const { server, shutdown } = createReviewServer({ dbPath: join(directory, 'reviews.db') });
   const sockets: WebSocket[] = [];
 
   context.after(async () => {
     sockets.forEach(socket => socket.terminate());
-    shutdown();
+    await shutdown();
     process.env.PATH = previousPath;
+    if (previousXdg === undefined) {
+      delete process.env.XDG_DATA_HOME;
+    } else {
+      process.env.XDG_DATA_HOME = previousXdg;
+    }
     await rm(directory, { recursive: true, force: true });
   });
 
@@ -368,7 +402,7 @@ test('start_factory executa PTY, salva plano em Markdown e permite leitura forma
     type: 'start_factory',
     inputType: 'jira_key',
     value: 'PROD-1234',
-    repoPath: directory,
+    repoPath: repoDir,
     cols: 90,
     rows: 25,
   }));
@@ -378,6 +412,15 @@ test('start_factory executa PTY, salva plano em Markdown e permite leitura forma
     'history pending',
   );
   assert.equal(existsSync(pendingHistory.reportPath), true);
+  assert(pendingHistory.sessionPath && existsSync(pendingHistory.sessionPath));
+  const artifactsRoot = join(xdgDataHome, 'development-factory', 'artifacts');
+  assert.equal(dirname(dirname(pendingHistory.reportPath)), artifactsRoot);
+  assert.equal(dirname(pendingHistory.sessionPath), dirname(pendingHistory.reportPath));
+  assert.equal(existsSync(join(repoDir, '.code-reviews')), false);
+  assert.equal(execFileSync('git', ['status', '--porcelain'], { cwd: repoDir, encoding: 'utf8' }), '');
+  assert.equal(statSync(dirname(pendingHistory.reportPath)).mode & 0o777, 0o700);
+  assert.equal(statSync(pendingHistory.reportPath).mode & 0o777, 0o600);
+  assert.equal(statSync(pendingHistory.sessionPath).mode & 0o777, 0o600);
 
   await until(() => (output.includes('PROD-1234') ? true : undefined), 'prompt output');
 
@@ -400,6 +443,17 @@ test('start_factory executa PTY, salva plano em Markdown e permite leitura forma
   const fileData = HistoryFileSchema.parse(await fileResponse.json());
   assert.equal(fileData.content, planMarkdown);
   assert.equal(readFileSync(pendingHistory.reportPath, 'utf8'), planMarkdown);
+
+  const sessionParams = new URLSearchParams({
+    path: dirname(pendingHistory.sessionPath),
+    name: basename(pendingHistory.sessionPath),
+  });
+  const sessionResponse = await fetch(`${httpUrl}/api/history/file?${sessionParams.toString()}`, {
+    headers: { Origin: 'http://localhost:5173' },
+  });
+  assert.equal(sessionResponse.status, 200);
+  const sessionData = HistoryFileSchema.parse(await sessionResponse.json());
+  assert(sessionData.content.includes('PROD-1234'));
 
   socket.close();
 });

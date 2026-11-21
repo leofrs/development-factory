@@ -221,16 +221,20 @@ async function setupServer(context: TestContext, prefix: string): Promise<Server
   const rootDir = mkdtempSync(join(tmpdir(), prefix));
   const binDir = join(rootDir, 'bin');
   const repoDir = join(rootDir, 'repo');
+  const xdgDataHome = join(rootDir, 'xdg-data');
   const dbPath = join(rootDir, 'reviews.db');
   mkdirSync(binDir);
   mkdirSync(repoDir);
+  mkdirSync(xdgDataHome);
 
   const claudeTarget = join(binDir, 'claude');
   copyFileSync(new URL('./fixtures/claude.ts', import.meta.url), claudeTarget);
   chmodSync(claudeTarget, 0o755);
 
   const previousPath = process.env.PATH;
+  const previousXdg = process.env.XDG_DATA_HOME;
   process.env.PATH = `${binDir}:${previousPath ?? ''}`;
+  process.env.XDG_DATA_HOME = xdgDataHome;
 
   const { server, sessionManager, shutdown } = createReviewServer({ dbPath });
   const sockets: WebSocket[] = [];
@@ -245,6 +249,11 @@ async function setupServer(context: TestContext, prefix: string): Promise<Server
     }
     await shutdown();
     process.env.PATH = previousPath;
+    if (previousXdg === undefined) {
+      delete process.env.XDG_DATA_HOME;
+    } else {
+      process.env.XDG_DATA_HOME = previousXdg;
+    }
     rmSync(rootDir, { recursive: true, force: true });
   });
 

@@ -1,4 +1,3 @@
-import { basename } from 'node:path';
 import {
   FactoryReviewVerdictSchema,
   type FactoryFlowDetails,
@@ -6,6 +5,7 @@ import {
 } from '@development-factory/shared';
 import {
   GIT_WRITE_DENIED_BASH_TOOLS,
+  buildReportFileToolPermissions,
   buildRestrictedRunnerArgs,
   readOptionalLatestStageDocument,
   readReadyStageDocuments,
@@ -108,15 +108,13 @@ export function parseReviewVerdict(content: string): FactoryReviewVerdict | null
 
 /** Argumentos restritos do runner da Etapa 05 (somente leitura no código + comandos git de inspeção). */
 export function buildReviewRunnerArgs(reportPath: string): string[] {
-  const reportFile = basename(reportPath);
   return buildRestrictedRunnerArgs({
     tools: ['Read', 'Glob', 'Grep', 'Edit', 'Write', 'Bash'],
     allowed: [
       'Read',
       'Glob',
       'Grep',
-      `Edit(/.code-reviews/${reportFile})`,
-      `Write(/.code-reviews/${reportFile})`,
+      ...buildReportFileToolPermissions(reportPath),
       'Bash(git diff*)',
       'Bash(git status*)',
       'Bash(git log*)',

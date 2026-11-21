@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, watchFile, unwatchFile, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, constants, fstatSync, openSync, readFileSync, watchFile, unwatchFile, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { stripVTControlCharacters } from 'node:util';
 import type { FactoryRequest, FactoryStageName } from '@development-factory/shared';
+import { resolveFactoryArtifactsDirectory } from './artifacts.js';
 import { isImplementationReport } from './factory-development.js';
 import { isPrSummary } from './factory-pr.js';
 import { isReviewReport } from './factory-review.js';
@@ -17,6 +18,7 @@ type HistoryState = 'pending' | 'saved' | 'incomplete';
 
 interface SessionHistoryConfig {
   readonly repoPath: string;
+  readonly flowId?: string;
   readonly slugSource: string;
   readonly prefix: string;
   readonly metadata: string;
@@ -38,6 +40,19 @@ function readValidatedReport(path: string): string {
   }
 }
 
+function writeReportFileSafely(path: string, content: string): void {
+  const descriptor = openSync(
+    path,
+    constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
+    0o600,
+  );
+  try {
+    writeFileSync(descriptor, content, 'utf8');
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
 function createSessionHistory(
   config: SessionHistoryConfig,
   onChange: (state: HistoryState) => void,
@@ -45,11 +60,7 @@ function createSessionHistory(
 ) {
   const startedAt = new Date().toISOString();
   let descriptor = -1;
-  const directory = join(realpathSync(config.repoPath), '.code-reviews');
-  if (!existsSync(directory)) mkdirSync(directory, { mode: 0o700 });
-  if (lstatSync(directory).isSymbolicLink() || !lstatSync(directory).isDirectory()) {
-    throw new Error('.code-reviews precisa ser um diretório real dentro do repositório.');
-  }
+  const directory = resolveFactoryArtifactsDirectory(config.repoPath, config.flowId);
   const slug = config.slugSource.replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 60) || config.prefix;
   const fileBasename = `${startedAt.replace(/[:.]/g, '-')}-${config.prefix}-${slug}-${randomUUID()}`;
   const reportPath = join(directory, `${fileBasename}.md`);
@@ -60,8 +71,13 @@ function createSessionHistory(
     descriptor = openSync(sessionPath, 'wx', 0o600);
     appendFileSync(descriptor, `# ${config.sessionTitle}\n\n${config.metadata}\n> Registro textual da TUI; pode conter redesenhos e repetições. O arquivo final fica em ${JSON.stringify(reportPath)}.\n\n## Saída do terminal\n\n    `);
   } catch (error) {
-    if (descriptor !== -1) closeSync(descriptor);
-    writeFileSync(reportPath, `# ${config.reportPlaceholderTitle} não iniciado\n\n${config.metadata}\nNão foi possível criar o registro da sessão.\n`);
+    if (descriptor !== -1) {
+      closeSync(descriptor);
+    }
+    writeReportFileSafely(
+      reportPath,
+      `# ${config.reportPlaceholderTitle} não iniciado\n\n${config.metadata}\nNão foi possível criar o registro da sessão.\n`,
+    );
     throw error;
   }
   let finished = false;
@@ -70,9 +86,7 @@ function createSessionHistory(
   let escapeTail = '';
   const checkReport = () => {
     try {
-      const content = (config.validateReport
-        ? readValidatedReport(reportPath)
-        : readFileSync(reportPath, 'utf8')).trim();
+      const content = readValidatedReport(reportPath).trim();
       const nextSaved =
         content.length > 0 &&
         content !== placeholder.trim() &&
@@ -97,7 +111,7 @@ function createSessionHistory(
       appendFileSync(descriptor, plain.replace(/\n/g, '\n    '));
     } catch {
       failed = true;
-      onError('Não foi possível continuar salvando o registro da sessão. Verifique o espaço e as permissões do repositório.');
+      onError('Não foi possível continuar salvando o registro da sessão. Verifique o espaço e as permissões do diretório de artefatos.');
     }
   };
   const finish = (reason: string, acceptReport = true) => {
@@ -111,11 +125,14 @@ function createSessionHistory(
       appendFileSync(descriptor, `\n\n- Encerramento: ${reason}\n- Fim: ${new Date().toISOString()}\n`);
       if (!saved) {
         if (!config.validateReport) {
-          writeFileSync(reportPath, `# ${config.incompleteTitle}\n\n${config.metadata}\n${config.incompleteNote} (${reason}).\n\nConsulte o registro da sessão: [${fileBasename}.session.md](./${fileBasename}.session.md).\n`);
+          writeReportFileSafely(
+            reportPath,
+            `# ${config.incompleteTitle}\n\n${config.metadata}\n${config.incompleteNote} (${reason}).\n\nConsulte o registro da sessão: [${fileBasename}.session.md](./${fileBasename}.session.md).\n`,
+          );
         }
         onChange('incomplete');
       }
-    } catch { onError('Falha ao finalizar os arquivos de histórico. Verifique o espaço e as permissões do repositório.'); }
+    } catch { onError('Falha ao finalizar os arquivos de histórico. Verifique o espaço e as permissões do diretório de artefatos.'); }
     finally { closeSync(descriptor); }
   };
   return { reportPath, sessionPath, record, finish };
@@ -180,6 +197,7 @@ export function createFactoryHistory(
   return createSessionHistory(
     {
       repoPath: request.repoPath,
+      ...(request.flowId ? { flowId: request.flowId } : {}),
       slugSource: request.value,
       prefix: stageConfig
         ? `${stageConfig.prefixSegment}-${request.inputType}`

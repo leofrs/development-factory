@@ -1,6 +1,6 @@
-import { basename } from 'node:path';
 import type { FactoryFlowDetails } from '@development-factory/shared';
 import {
+  buildReportFileToolPermissions,
   buildRestrictedRunnerArgs,
   readReadyStageDocuments,
   validateStructuredMarkdownReport,
@@ -9,15 +9,13 @@ import { PR_SUMMARY_SECTIONS, PR_SUMMARY_TITLE } from './prompts/factory-pr.js';
 
 /** Argumentos restritos do runner da Etapa 06 (inspeção git/gh e escrita do `pr_summary`). */
 export function buildPrRunnerArgs(reportPath: string): string[] {
-  const reportFile = basename(reportPath);
   return buildRestrictedRunnerArgs({
     tools: ['Read', 'Glob', 'Grep', 'Edit', 'Write', 'Bash'],
     allowed: [
       'Read',
       'Glob',
       'Grep',
-      `Edit(/.code-reviews/${reportFile})`,
-      `Write(/.code-reviews/${reportFile})`,
+      ...buildReportFileToolPermissions(reportPath),
       'Bash(git status*)',
       'Bash(git diff*)',
       'Bash(git log*)',

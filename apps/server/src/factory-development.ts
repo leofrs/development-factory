@@ -1,8 +1,8 @@
-import { basename } from 'node:path';
 import type { FactoryFlowDetails } from '@development-factory/shared';
 import {
   INFRA_AND_CONFIG_PATHS,
   TEST_AND_FIXTURE_PATTERNS,
+  buildReportFileToolPermissions,
   buildRestrictedRunnerArgs,
   readOptionalLatestStageDocument,
   readReadyStageDocuments,
@@ -29,7 +29,7 @@ export function buildDevelopmentRunnerArgs(reportPath: string): string[] {
       'Glob',
       'Grep',
       ...SOURCE_EXTENSIONS.map(extension => `Edit(**/*.${extension})`),
-      `Edit(/.code-reviews/${basename(reportPath)})`,
+      ...buildReportFileToolPermissions(reportPath),
     ],
     denied: PROTECTED_PATHS.map(path => `Edit(${path})`),
   });

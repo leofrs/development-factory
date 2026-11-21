@@ -29,16 +29,20 @@ test('API REST /api/sessions valida origem, lista sessões por ordem recente, de
   const rootDir = mkdtempSync(join(tmpdir(), 'df-sessions-api-'));
   const binDir = join(rootDir, 'bin');
   const repoDir = join(rootDir, 'repo');
+  const xdgDataHome = join(rootDir, 'xdg-data');
   const dbPath = join(rootDir, 'reviews.db');
   mkdirSync(binDir);
   mkdirSync(repoDir);
+  mkdirSync(xdgDataHome);
 
   const claudeTarget = join(binDir, 'claude');
   copyFileSync(new URL('./fixtures/claude.ts', import.meta.url), claudeTarget);
   chmodSync(claudeTarget, 0o755);
 
   const previousPath = process.env.PATH;
+  const previousXdg = process.env.XDG_DATA_HOME;
   process.env.PATH = `${binDir}:${previousPath ?? ''}`;
+  process.env.XDG_DATA_HOME = xdgDataHome;
 
   const { server, sessionManager, shutdown } = createReviewServer({ dbPath });
   server.listen(0, '127.0.0.1');
@@ -51,6 +55,11 @@ test('API REST /api/sessions valida origem, lista sessões por ordem recente, de
   context.after(async () => {
     await shutdown();
     process.env.PATH = previousPath;
+    if (previousXdg === undefined) {
+      delete process.env.XDG_DATA_HOME;
+    } else {
+      process.env.XDG_DATA_HOME = previousXdg;
+    }
     rmSync(rootDir, { recursive: true, force: true });
   });
 

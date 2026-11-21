@@ -1,9 +1,9 @@
-import { basename } from 'node:path';
 import type { FactoryFlowDetails } from '@development-factory/shared';
 import {
   GIT_WRITE_DENIED_BASH_TOOLS,
   INFRA_AND_CONFIG_PATHS,
   TEST_AND_FIXTURE_PATTERNS,
+  buildReportFileToolPermissions,
   buildRestrictedRunnerArgs,
   readOptionalLatestStageDocument,
   readReadyStageDocuments,
@@ -13,7 +13,6 @@ import { TEST_REPORT_SECTIONS, TEST_REPORT_TITLE } from './prompts/factory-tests
 
 /** Argumentos restritos do runner da Etapa 04 (escrita apenas em testes/fixtures + terminal). */
 export function buildTestsRunnerArgs(reportPath: string): string[] {
-  const reportFile = basename(reportPath);
   return buildRestrictedRunnerArgs({
     tools: ['Read', 'Glob', 'Grep', 'Edit', 'Write', 'Bash'],
     allowed: [
@@ -22,8 +21,7 @@ export function buildTestsRunnerArgs(reportPath: string): string[] {
       'Grep',
       'Bash',
       ...TEST_AND_FIXTURE_PATTERNS.flatMap(pattern => [`Edit(${pattern})`, `Write(${pattern})`]),
-      `Edit(/.code-reviews/${reportFile})`,
-      `Write(/.code-reviews/${reportFile})`,
+      ...buildReportFileToolPermissions(reportPath),
     ],
     denied: [
       ...INFRA_AND_CONFIG_PATHS.flatMap(path => [`Edit(${path})`, `Write(${path})`]),

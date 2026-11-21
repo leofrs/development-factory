@@ -11,7 +11,9 @@ import {
 import { BackgroundTasksPopover } from '../src/components/BackgroundTasksPopover';
 import { FactoryFlowRoadmapModal } from '../src/components/FactoryFlowRoadmapModal';
 import { FactoryPage } from '../src/components/FactoryPage';
+import { FactoryTaskModal } from '../src/components/FactoryTaskModal';
 import { HistoryModal } from '../src/components/HistoryModal';
+import { MarkdownViewerModal } from '../src/components/MarkdownViewerModal';
 import { NotificationToastCenter } from '../src/components/NotificationToastCenter';
 import {
   buildNotification,
@@ -312,7 +314,7 @@ test('Etapa 03 (development) gera notificação de conclusão e oculta atalho de
     stage: 'development',
     status: 'exited',
     historyState: 'saved',
-    reportPath: '/tmp/repo/.code-reviews/factory-development.md',
+    reportPath: '/home/dev/.local/share/development-factory/artifacts/flow-2/factory-development.md',
   });
 
   const notification = buildNotification(devSession, 'finished');
@@ -341,7 +343,7 @@ test('Etapas 04 (tests) e 05 (review) geram notificações e botões de reexecu�
     stage: 'tests',
     status: 'exited',
     historyState: 'saved',
-    reportPath: '/tmp/repo/.code-reviews/factory-tests.md',
+    reportPath: '/home/dev/.local/share/development-factory/artifacts/flow-3/factory-tests.md',
   });
   const testsSavedNotification = buildNotification(testsSession, 'history_saved');
   const testsFinishedNotification = buildNotification(testsSession, 'finished');
@@ -354,7 +356,7 @@ test('Etapas 04 (tests) e 05 (review) geram notificações e botões de reexecu�
     stage: 'review',
     status: 'exited',
     historyState: 'saved',
-    reportPath: '/tmp/repo/.code-reviews/factory-review.md',
+    reportPath: '/home/dev/.local/share/development-factory/artifacts/flow-3/factory-review.md',
   });
   const reviewSavedNotification = buildNotification(reviewSession, 'history_saved');
   const reviewFinishedNotification = buildNotification(reviewSession, 'finished');
@@ -438,4 +440,27 @@ test('Etapas 04 (tests) e 05 (review) geram notificações e botões de reexecu�
     }),
   );
   assert.match(popoverHtml, /Iteração 2\/3/);
+
+  const taskModalHtml = renderToStaticMarkup(
+    createElement(FactoryTaskModal, {
+      repoPath: '/home/dev/repos/api-core',
+      onPickDirectory: noop,
+      onClose: noop,
+      onCreateFlow: noopAsync,
+    }),
+  );
+  assert.match(taskModalHtml, /fora do repositório/);
+  assert.doesNotMatch(taskModalHtml, /\.code-reviews/);
+
+  const externalArtifactPath =
+    '/home/dev/.local/share/development-factory/artifacts/11111111-1111-4111-8111-111111111111/plano.md';
+  const viewerHtml = renderToStaticMarkup(
+    createElement(MarkdownViewerModal, {
+      filePath: externalArtifactPath,
+      title: 'Plano técnico',
+      onClose: noop,
+    }),
+  );
+  assert.match(viewerHtml, /Plano técnico/);
+  assert.match(viewerHtml, /artifacts\/11111111-1111-4111-8111-111111111111\/plano\.md/);
 });

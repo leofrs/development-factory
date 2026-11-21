@@ -254,8 +254,8 @@ export function FactoryTaskModal({
 
         <p className="flex items-center justify-center gap-2 text-center text-[11px] text-muted">
           <LockKeyhole size={12} />
-          Executa em segundo plano sem bloquear outros fluxos e salva o plano em{' '}
-          <span className="font-mono">.code-reviews/</span>.
+          Executa em segundo plano sem bloquear outros fluxos e salva os artefatos fora do
+          repositório.
         </p>
       </form>
     </dialog>

@@ -53,6 +53,12 @@ export interface RestrictedRunnerArgsConfig {
   readonly denied: readonly string[];
 }
 
+/** Constrói permissões explícitas de escrita apenas para o arquivo externo de relatório da etapa. */
+export function buildReportFileToolPermissions(reportPath: string): string[] {
+  const normalizedPath = reportPath.startsWith('/') ? `/${reportPath}` : reportPath;
+  return [`Edit(${normalizedPath})`, `Write(${normalizedPath})`];
+}
+
 /** Constrói a linha de argumentos `--restricted` padrão para runners da Factory. */
 export function buildRestrictedRunnerArgs(config: RestrictedRunnerArgsConfig): string[] {
   return [

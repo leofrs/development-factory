@@ -52,16 +52,20 @@ function setupTestEnvironment(): {
   const binDir = join(rootDir, 'bin');
   const repoA = join(rootDir, 'repo-a');
   const repoB = join(rootDir, 'repo-b');
+  const xdgDataHome = join(rootDir, 'xdg-data');
   mkdirSync(binDir);
   mkdirSync(repoA);
   mkdirSync(repoB);
+  mkdirSync(xdgDataHome);
 
   const claudeTarget = join(binDir, 'claude');
   copyFileSync(new URL('./fixtures/claude.ts', import.meta.url), claudeTarget);
   chmodSync(claudeTarget, 0o755);
 
   const previousPath = process.env.PATH;
+  const previousXdg = process.env.XDG_DATA_HOME;
   process.env.PATH = `${binDir}:${previousPath ?? ''}`;
+  process.env.XDG_DATA_HOME = xdgDataHome;
 
   const repository = SqliteReviewRepository.open({ dbPath: join(rootDir, 'reviews.db') });
   const reviewService = new ReviewService(repository);
@@ -74,6 +78,11 @@ function setupTestEnvironment(): {
     reviewService,
     restorePath: () => {
       process.env.PATH = previousPath;
+      if (previousXdg === undefined) {
+        delete process.env.XDG_DATA_HOME;
+      } else {
+        process.env.XDG_DATA_HOME = previousXdg;
+      }
     },
   };
 }
@@ -377,6 +386,7 @@ test('sessão factory sem clientes conectados consolida falha e estado incomplet
     assert.equal(finishedEvent.session.reportPath, session.reportPath);
     assert.ok(session.reportPath && existsSync(session.reportPath));
     assert.match(readFileSync(session.reportPath, 'utf8'), /Plano da tarefa incompleto/);
+    assert.equal(existsSync(join(env.repoB, '.code-reviews')), false);
   } finally {
     unsubscribe();
     await manager.shutdownAll();
