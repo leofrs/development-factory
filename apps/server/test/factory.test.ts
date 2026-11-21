@@ -50,6 +50,8 @@ import { buildPrRunnerArgs, isPrSummary } from '../src/factory-pr.js';
 import { loadFactoryRepositoryProfile } from '../src/factory-repository-profile.js';
 import { buildReviewRunnerArgs, isReviewReport, parseReviewVerdict } from '../src/factory-review.js';
 import {
+  INFRA_AND_CONFIG_PATHS,
+  TEST_AND_FIXTURE_PATTERNS,
   buildTriageAndPlanningRunnerArgs,
   getFactoryStageSidecarPath,
 } from '../src/factory-stage-runners.js';
@@ -340,16 +342,30 @@ test('o runner do Planejamento lê o worktree e grava apenas o plano e o sidecar
   ]);
 });
 
-test('prompts, runners e validadores das Etapas 03 a 06 seguem contratos e permissões externas', () => {
-  const devArgs = buildDevelopmentRunnerArgs('/tmp/factory-artifacts/flow-1/dev-report.md');
-  assert(devArgs.includes('--restricted'));
-  const devAllowed = devArgs[devArgs.indexOf('--allowedTools') + 1] ?? '';
-  assert(devAllowed.includes('Edit(//tmp/factory-artifacts/flow-1/dev-report.md)'));
-  assert(devAllowed.includes('Write(//tmp/factory-artifacts/flow-1/dev-report.md)'));
-  assert(devAllowed.includes('Edit(//tmp/factory-artifacts/flow-1/dev-report.json)'));
-  assert(devAllowed.includes('Write(//tmp/factory-artifacts/flow-1/dev-report.json)'));
-  assert.equal(devAllowed.includes('.code-reviews'), false);
+test('o runner de Desenvolvimento permite Edit e Write de produção com as mesmas exclusões', () => {
+  const directory = '/tmp/factory-artifacts/flow-1';
+  const args = buildDevelopmentRunnerArgs(`${directory}/dev-report.md`);
+  assert.ok(args.includes('--restricted'));
+  assert.equal(args[args.indexOf('--permission-mode') + 1], 'dontAsk');
+  assert.equal(args[args.indexOf('--add-dir') + 1], directory);
+  assert.equal(args[args.indexOf('--tools') + 1], 'Read,Glob,Grep,Edit,Write');
 
+  const allowed = new Set(args[args.indexOf('--allowedTools') + 1]?.split(','));
+  const denied = new Set(args[args.indexOf('--disallowedTools') + 1]?.split(','));
+  for (const tool of ['Edit', 'Write']) {
+    assert.ok(allowed.has(`${tool}(**/*.ts)`));
+    assert.ok(allowed.has(`${tool}(**/*.py)`));
+    assert.ok(allowed.has(`${tool}(/${directory}/dev-report.md)`));
+    assert.ok(allowed.has(`${tool}(/${directory}/dev-report.json)`));
+    assert.equal(allowed.has(tool), false);
+    for (const pattern of [...TEST_AND_FIXTURE_PATTERNS, ...INFRA_AND_CONFIG_PATHS]) {
+      assert.ok(denied.has(`${tool}(${pattern})`));
+    }
+  }
+  assert.equal(allowed.has('Bash'), false);
+});
+
+test('prompts, runners e validadores das Etapas 04 a 06 seguem contratos e permissões externas', () => {
   const testsReportPath = '/tmp/factory-artifacts/flow-1/tests-report.md';
   const testsPrompt = buildFactoryTestsPrompt({
     task: 'PROD-1234',

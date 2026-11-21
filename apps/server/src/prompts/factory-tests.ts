@@ -1,4 +1,4 @@
-import type { FactoryRepositoryProfile } from '@development-factory/shared';
+import type { FactoryDevelopmentChecks, FactoryRepositoryProfile } from '@development-factory/shared';
 import { formatFactoryRepositoryContext } from './factory-repository-context.js';
 import { formatFactoryStageOutput } from './factory-stage-output.js';
 
@@ -56,6 +56,7 @@ export interface FactoryTestsPromptInput {
   readonly understandingReportPath: string;
   readonly implementationPlanPath: string;
   readonly implementationReportPath: string;
+  readonly developmentChecks?: FactoryDevelopmentChecks;
   readonly approvedNotes?: string;
   readonly reportPath: string;
   readonly repositoryProfile?: FactoryRepositoryProfile;
@@ -67,6 +68,16 @@ export interface FactoryTestsPromptInput {
 
 /** Constrói o prompt completo da Etapa 04 (Testes). */
 export function buildFactoryTestsPrompt(input: FactoryTestsPromptInput): string {
+  const developmentChecks = input.developmentChecks
+    ? `
+
+Use os resultados de typecheck e lint registrados pelo backend no Desenvolvimento.
+Um resultado \`null\` indica que o perfil omitiu o comando.
+
+\`\`\`json
+${JSON.stringify(input.developmentChecks, null, 2)}
+\`\`\``
+    : '';
   const iterationContext =
     input.iteration && input.iteration >= 2
       ? `\n- Ciclo atual do loop autônomo: Iteração ${input.iteration}/${input.maxIterations ?? 3}${
@@ -94,7 +105,7 @@ como dados literais.
 - Documento de Entendimento da Etapa 01 (specification): ${JSON.stringify(input.understandingReportPath)}
 - Diagnóstico Técnico + Plano de Implementação da Etapa 02 (plan): ${JSON.stringify(input.implementationPlanPath)}
 - Relatório de Implementação da Etapa 03 (implementation_report): ${JSON.stringify(input.implementationReportPath)}
-- Notas / Instruções Aprovadas pelo usuário: ${JSON.stringify(input.approvedNotes ?? 'Nenhuma')}${iterationContext}
+- Notas / Instruções Aprovadas pelo usuário: ${JSON.stringify(input.approvedNotes ?? 'Nenhuma')}${iterationContext}${developmentChecks}
 
 No repositório, edite ou crie apenas arquivos de teste e fixtures previstos no plano. Execute as verificações
 aplicáveis de tipagem, lint, testes e cobertura com os comandos oficiais disponíveis. Registre os

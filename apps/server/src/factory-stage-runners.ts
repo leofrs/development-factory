@@ -38,7 +38,9 @@ type FactoryStageArtifactErrorCode =
   | 'FACTORY_SIDECAR_READ_FAILED'
   | 'FACTORY_SIDECAR_MISSING'
   | 'FACTORY_SIDECAR_INVALID_JSON'
-  | 'FACTORY_SIDECAR_INVALID_SCHEMA';
+  | 'FACTORY_SIDECAR_INVALID_SCHEMA'
+  | 'FACTORY_SIDECAR_WRITE_FAILED'
+  | 'FACTORY_DEVELOPMENT_CHECKS_FAILED';
 
 export function formatArtifactIssue(issue: FactoryArtifactIssue): string {
   const field = issue.path.reduce<string>((path, segment) => {

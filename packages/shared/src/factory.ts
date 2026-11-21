@@ -91,12 +91,10 @@ const manifestExecutableSchema = z
       isRepositoryRelativePath(value),
     'Use o nome do executável ou um caminho relativo com / e sem segmentos ".."',
   );
-const manifestCommandSchema = z
-  .tuple([manifestExecutableSchema], manifestCommandArgumentSchema, {
-    error: 'Informe uma lista com o executável seguido dos argumentos',
-  })
-  .nullable()
-  .default(null);
+const manifestCommandTupleSchema = z.tuple([manifestExecutableSchema], manifestCommandArgumentSchema, {
+  error: 'Informe uma lista com o executável seguido dos argumentos',
+});
+const manifestCommandSchema = manifestCommandTupleSchema.nullable().default(null);
 
 const manifestCommandsSchema = z.strictObject(
   {
@@ -488,12 +486,30 @@ export const FactoryPlanningSidecarSchema = z.strictObject({
 });
 export type FactoryPlanningSidecar = z.infer<typeof FactoryPlanningSidecarSchema>;
 
+const developmentCheckSchema = z
+  .strictObject({
+    command: manifestCommandTupleSchema,
+    exitCode: z.number().int().nonnegative().nullable(),
+    errorSummary: text.nullable(),
+  })
+  .refine(result => (result.exitCode === 0) === (result.errorSummary === null), {
+    path: ['errorSummary'],
+    message: 'Informe um resumo de erro somente quando a verificação falhar',
+  });
+
+const developmentChecksSchema = z.strictObject({
+  typecheck: developmentCheckSchema.nullable(),
+  lint: developmentCheckSchema.nullable(),
+});
+export type FactoryDevelopmentChecks = z.infer<typeof developmentChecksSchema>;
+
 export const FactoryDevelopmentSidecarSchema = z.strictObject({
   contractVersion: sidecarVersion,
   stage: z.literal('development'),
   changedFiles: z.array(sidecarFilePathSchema),
   summary: text,
   deviations: z.array(z.strictObject({ description: text, justification: text })),
+  backendChecks: developmentChecksSchema.optional(),
 });
 export type FactoryDevelopmentSidecar = z.infer<typeof FactoryDevelopmentSidecarSchema>;
 

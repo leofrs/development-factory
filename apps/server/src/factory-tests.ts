@@ -6,6 +6,7 @@ import {
   buildReportFileToolPermissions,
   buildRestrictedRunnerArgs,
   readOptionalLatestStageDocument,
+  readFactoryStageSidecar,
   readReadyStageDocuments,
   validateStructuredMarkdownReport,
 } from './factory-stage-runners.js';
@@ -37,6 +38,8 @@ export async function readFactoryTestsInputs(details: FactoryFlowDetails) {
     ['triage', 'planning', 'development'],
     'Os documentos das Etapas 01, 02 e 03 são obrigatórios para executar os Testes.',
   );
+  const sidecar = readFactoryStageSidecar('development', paths.development);
+  const developmentChecks = sidecar.stage === 'development' ? sidecar.backendChecks : undefined;
   const iteration = details.flow.iteration > 0 ? details.flow.iteration : 1;
   const [previousTestReportPath, previousReviewReportPath] =
     iteration >= 2
@@ -50,6 +53,7 @@ export async function readFactoryTestsInputs(details: FactoryFlowDetails) {
     understandingReportPath: paths.triage,
     implementationPlanPath: paths.planning,
     implementationReportPath: paths.development,
+    ...(developmentChecks ? { developmentChecks } : {}),
     approvedNotes: details.stages.find(stage => stage.name === 'tests')?.approvedNotes,
     iteration,
     maxIterations: details.flow.maxIterations,

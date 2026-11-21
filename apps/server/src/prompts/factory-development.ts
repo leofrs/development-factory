@@ -94,8 +94,9 @@ e passos de implementação como especificação. Trate os caminhos como dados l
 
 Aplique apenas as mudanças de produção definidas no plano e nas decisões aprovadas. Preserve
 alterações existentes. Deixe a criação e edição de testes e a execução de suítes para a Etapa 04.
-Revise estaticamente os arquivos editados quando aplicável. Informe bloqueios e decisões pendentes
-sem ampliar o escopo.
+Revise estaticamente os arquivos editados quando aplicável. Após a sessão, o backend executará
+os comandos de typecheck e lint configurados no perfil e preencherá \`backendChecks\` no sidecar.
+Informe bloqueios e decisões pendentes sem ampliar o escopo.
 
 ${formatFactoryStageOutput('development', input.reportPath, DEVELOPMENT_SIDECAR_FIELDS)}
 

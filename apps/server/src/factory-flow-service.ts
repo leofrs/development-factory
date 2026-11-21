@@ -42,6 +42,7 @@ import {
   type RollbackFactoryFlowCheckpointResponse,
   type TransitionFactoryFlowResponse,
 } from '@development-factory/shared';
+import { getFactoryDevelopmentChecksError } from './factory-development-checks.js';
 import { FactoryStageArtifactError, formatArtifactIssue } from './factory-stage-runners.js';
 import {
   FactoryWorktreeError,
@@ -211,7 +212,13 @@ function assertStageContracts(
     }
 
     try {
-      validateFactoryStageArtifacts(stage, artifact.path);
+      const sidecar = validateFactoryStageArtifacts(stage, artifact.path);
+      if (sidecar.stage === 'development') {
+        const error = getFactoryDevelopmentChecksError(artifact.path, sidecar.backendChecks);
+        if (error) {
+          throw error;
+        }
+      }
     } catch (error) {
       if (error instanceof FactoryStageArtifactError) {
         throw new FactoryFlowServiceError(

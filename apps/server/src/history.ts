@@ -288,7 +288,7 @@ export function validateFactoryStageArtifacts(
   stage: FactoryStageName,
   reportPath: string,
   markdown = readFactoryStageMarkdown(stage, reportPath),
-): void {
+) {
   if (!REPORT_STAGE_HISTORY_CONFIG[stage].validateReport(markdown.trim())) {
     throw new FactoryStageArtifactError(
       'FACTORY_MARKDOWN_INVALID',
@@ -297,7 +297,7 @@ export function validateFactoryStageArtifacts(
       'O relatório Markdown não contém o título e as seções obrigatórias',
     );
   }
-  readFactoryStageSidecar(stage, reportPath);
+  return readFactoryStageSidecar(stage, reportPath);
 }
 
 export function createFactoryHistory(

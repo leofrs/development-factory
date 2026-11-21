@@ -1,3 +1,4 @@
+import { dirname } from 'node:path';
 import type { FactoryFlowDetails } from '@development-factory/shared';
 import {
   INFRA_AND_CONFIG_PATHS,
@@ -14,24 +15,28 @@ import {
 } from './prompts/factory-development.js';
 
 const SOURCE_EXTENSIONS = [
-  'astro', 'c', 'cc', 'cpp', 'cs', 'css', 'dart', 'ex', 'go', 'h', 'hpp', 'html',
-  'java', 'js', 'jsx', 'kt', 'kts', 'less', 'mjs', 'cjs', 'mts', 'cts', 'php', 'py',
-  'rb', 'rs', 'sass', 'scala', 'scss', 'sql', 'svelte', 'swift', 'ts', 'tsx', 'vue',
+  'astro', 'c', 'cc', 'cpp', 'cs', 'css', 'dart', 'ex', 'go', 'h', 'hpp', 'html', 'java', 'js',
+  'jsx', 'kt', 'kts', 'less', 'mjs', 'cjs', 'mts', 'cts', 'php', 'py', 'rb', 'rs', 'sass', 'scala',
+  'scss', 'sql', 'svelte', 'swift', 'ts', 'tsx', 'vue',
 ];
 
 const PROTECTED_PATHS = [...TEST_AND_FIXTURE_PATTERNS, ...INFRA_AND_CONFIG_PATHS];
 
 export function buildDevelopmentRunnerArgs(reportPath: string): string[] {
   return buildRestrictedRunnerArgs({
+    additionalDirectory: dirname(reportPath),
     tools: ['Read', 'Glob', 'Grep', 'Edit', 'Write'],
     allowed: [
       'Read',
       'Glob',
       'Grep',
-      ...SOURCE_EXTENSIONS.map(extension => `Edit(**/*.${extension})`),
+      ...SOURCE_EXTENSIONS.flatMap(extension => [
+        `Edit(**/*.${extension})`,
+        `Write(**/*.${extension})`,
+      ]),
       ...buildReportFileToolPermissions(reportPath),
     ],
-    denied: PROTECTED_PATHS.map(path => `Edit(${path})`),
+    denied: PROTECTED_PATHS.flatMap(path => [`Edit(${path})`, `Write(${path})`]),
   });
 }
 

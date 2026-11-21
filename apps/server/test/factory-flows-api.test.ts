@@ -2,7 +2,18 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
@@ -12,6 +23,7 @@ import {
   AppEventSchema,
   BackgroundSessionSummarySchema,
   CreateFactoryFlowResponseSchema,
+  FactoryDevelopmentSidecarSchema,
   FactoryFlowApiErrorResponseSchema,
   FactoryFlowDetailsSchema,
   FactoryFlowListResponseSchema,
@@ -588,13 +600,44 @@ test(
     mkdirSync(repoDir);
     mkdirSync(xdgDataHome);
     initGitRepo(repoDir);
+    const checkScript = 'check.mjs';
+    const literalArgument = 'argumento com espaços e $(literal)';
+    writeFileSync(
+      join(repoDir, checkScript),
+      `import assert from 'node:assert/strict';
+import { existsSync, writeFileSync } from 'node:fs';
+import { setTimeout as delay } from 'node:timers/promises';
+const [check, literal, empty] = process.argv.slice(2);
+assert.equal(literal, ${JSON.stringify(literalArgument)});
+assert.equal(empty, '');
+if (existsSync('.hold-check')) {
+  writeFileSync('.check-started', '');
+  while (existsSync('.hold-check')) {
+    await delay(10);
+  }
+}
+if (!existsSync('src/jwt.ts')) {
+  if (check === 'typecheck') {
+    console.log('error TS2307: módulo ausente');
+    process.exitCode = 17;
+  } else {
+    console.error('error E1000: implementação ausente');
+    process.exitCode = 9;
+  }
+}
+`,
+    );
+    execFileSync('git', ['add', checkScript], { cwd: repoDir });
+    execFileSync('git', ['commit', '-m', 'add check fixture'], { cwd: repoDir });
     execFileSync('git', ['branch', 'integration'], { cwd: repoDir });
     const manifestName = '.development-factory.json';
+    const typecheck = ['node', `./${checkScript}`, 'typecheck', literalArgument, ''];
+    const lint = ['node', `./${checkScript}`, 'lint', literalArgument, ''];
     const manifest = {
       baseBranch: 'integration',
       branchPattern: 'feat/{slug}-factory',
       stack: ['Node.js'],
-      commands: { test: ['./scripts/test-integration'] },
+      commands: { typecheck, lint, test: ['./scripts/test-integration'] },
       protectedPaths: ['deploy/**'],
       architectureRules: ['O domínio depende de interfaces.'],
       prTemplate: '## Evidências do time\n\n## Plano de reversão',
@@ -859,11 +902,75 @@ test(
     );
     assert.equal((await postAction('advance', { startSession: true })).status, 409);
 
-    const rerunResponse = await postAction('rerun', { stage: 'development' });
-    assert.equal(rerunResponse.status, 200);
-    const rerun = z.object({ session: BackgroundSessionSummarySchema }).parse(
-      await rerunResponse.json(),
-    ).session;
+    const rerunDevelopment = async () => {
+      const response = await postAction('rerun', { stage: 'development' });
+      assert.equal(response.status, 200);
+      const body = z.object({ session: BackgroundSessionSummarySchema }).parse(await response.json());
+      return body.session;
+    };
+    const failedChecksSession = await rerunDevelopment();
+    assert.ok(failedChecksSession.reportPath);
+    await waitFor(() => {
+      const output = sessionManager.getSession(failedChecksSession.sessionId)?.buffer.replay();
+      return /READY:[^\n]*\n/.test(output ?? '');
+    });
+    writeFileSync(failedChecksSession.reportPath, implementationMarkdown);
+    writeFactoryStageSidecar(failedChecksSession.reportPath, 'development', {
+      backendChecks: {
+        typecheck: { command: ['claimed'], exitCode: 0, errorSummary: null },
+        lint: { command: ['claimed'], exitCode: 0, errorSummary: null },
+      },
+    });
+    const holdCheck = join(detailsOne.worktreePath, '.hold-check');
+    const checkStarted = join(detailsOne.worktreePath, '.check-started');
+    writeFileSync(holdCheck, '');
+    assert.equal(existsSync(checkStarted), false);
+    sessionManager.writeInput(failedChecksSession.sessionId, 'EXIT0');
+    await waitFor(() => existsSync(checkStarted));
+    assert.equal((await postAction('advance', { startSession: true })).status, 409);
+    assert.equal((await postAction('rerun', { stage: 'development' })).status, 409);
+    unlinkSync(holdCheck);
+    unlinkSync(checkStarted);
+
+    const pausedForChecks = await waitForFlowDetails(
+      getDetails,
+      details => details.flow.error?.code === 'FACTORY_DEVELOPMENT_CHECKS_FAILED',
+    );
+    assert.equal(pausedForChecks.flow.state, 'waiting_action');
+    assert.equal(pausedForChecks.flow.currentStage, 'development');
+    assert.equal(pausedForChecks.flow.currentSessionId, null);
+    const failedSession = sessionManager.getSessionSummary(failedChecksSession.sessionId);
+    assert.equal(failedSession?.exitCode, 0);
+    assert.equal(failedSession.status, 'exited');
+    assert.equal(failedSession.historyState, 'incomplete');
+    const failedReport = pausedForChecks.artifacts.find(
+      artifact => artifact.path === failedChecksSession.reportPath,
+    );
+    assert.equal(failedReport?.status, 'incomplete');
+    assert.deepEqual(failedReport.error, pausedForChecks.flow.error);
+    const failedSidecar = FactoryDevelopmentSidecarSchema.parse(
+      JSON.parse(readFileSync(getFactoryStageSidecarPath(failedChecksSession.reportPath), 'utf8')),
+    );
+    assert.deepEqual(failedSidecar.backendChecks, {
+      typecheck: {
+        command: typecheck,
+        exitCode: 17,
+        errorSummary: 'O comando encerrou com código 17. Diagnósticos TS2307.',
+      },
+      lint: {
+        command: lint,
+        exitCode: 9,
+        errorSummary: 'O comando encerrou com código 9. Diagnósticos E1000.',
+      },
+    });
+    const blockedForChecks = await postAction('advance', { startSession: true });
+    assert.equal(blockedForChecks.status, 409);
+    const checksError = FactoryFlowApiErrorResponseSchema.parse(await blockedForChecks.json());
+    assert.match(checksError.error.message, /typecheck.*código 17.*lint.*código 9/);
+
+    mkdirSync(join(detailsOne.worktreePath, 'src'));
+    writeFileSync(join(detailsOne.worktreePath, 'src', 'jwt.ts'), 'export const jwt = {};\n');
+    const rerun = await rerunDevelopment();
     assert.ok(rerun.reportPath);
     const running = sessionManager.getSession(rerun.sessionId);
     assert.ok(running);
@@ -909,6 +1016,15 @@ test(
     assert.equal(autoTestsOneDetails.flow.state, 'running');
     assert.equal(autoTestsOneDetails.flow.iteration, 1);
     assert.ok(autoTestsOneDetails.flow.currentSessionId);
+    const developmentSidecar = FactoryDevelopmentSidecarSchema.parse(
+      JSON.parse(readFileSync(getFactoryStageSidecarPath(rerun.reportPath), 'utf8')),
+    );
+    const passedChecks = {
+      typecheck: { command: typecheck, exitCode: 0, errorSummary: null },
+      lint: { command: lint, exitCode: 0, errorSummary: null },
+    };
+    assert.deepEqual(developmentSidecar.backendChecks, passedChecks);
+    assert.deepEqual(developmentSidecar.changedFiles, ['src/jwt.ts']);
     const testsSession = sessionManager.getSessionSummary(autoTestsOneDetails.flow.currentSessionId);
     assert.ok(testsSession);
     assert.equal(testsSession.stage, 'tests');
@@ -928,6 +1044,7 @@ test(
     assert.ok(testsPrompt.includes(specOne.path));
     assert.ok(testsPrompt.includes(planPath));
     assert.ok(testsPrompt.includes(rerun.reportPath));
+    assert.ok(testsPrompt.includes(JSON.stringify(passedChecks, null, 2)));
     assert.match(testsPrompt, /\.\/scripts\/test-integration/);
     assert.ok(testsSpawn.args.includes('--restricted'));
     assert.equal(testsSpawn.args[testsSpawn.args.indexOf('--tools') + 1], 'Read,Glob,Grep,Edit,Write,Bash');

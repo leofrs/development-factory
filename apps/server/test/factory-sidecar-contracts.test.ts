@@ -198,6 +198,31 @@ test('exige uma opção recomendada válida, caminhos relativos e justificativas
   );
 });
 
+test('valida verificações de Desenvolvimento omitidas, aprovadas e com falha', () => {
+  const typecheck = { command: ['npm', 'run', 'typecheck'], exitCode: 0, errorSummary: null };
+  const approval = { ...development, backendChecks: { typecheck, lint: null } };
+  assert.deepEqual(FactoryDevelopmentSidecarSchema.parse(approval), approval);
+
+  const lint = { command: ['lint'], exitCode: null, errorSummary: 'Executável ausente.' };
+  const failure = { ...development, backendChecks: { typecheck, lint } };
+  assert.deepEqual(FactoryDevelopmentSidecarSchema.parse(failure), failure);
+
+  for (const invalidLint of [
+    { ...lint, exitCode: -1 },
+    { ...lint, exitCode: 0 },
+    { ...lint, errorSummary: null },
+    { ...lint, stdout: 'campo desconhecido' },
+  ]) {
+    assert.equal(
+      FactoryDevelopmentSidecarSchema.safeParse({
+        ...development,
+        backendChecks: { typecheck, lint: invalidLint },
+      }).success,
+      false,
+    );
+  }
+});
+
 test('valida comandos, status, critérios de aceite e cobertura dos testes', () => {
   const invalidPayloads = [
     { ...tests, executedCommands: [{ ...command, command: [] }] },

@@ -29,6 +29,7 @@ import type {
   TransitionFactoryFlowResponse,
 } from '@development-factory/shared';
 import { resolveReviewReportDirectory } from './artifacts.js';
+import { appendFactoryDevelopmentChecks } from './factory-development-checks.js';
 import { buildDevelopmentRunnerArgs, readFactoryDevelopmentInputs } from './factory-development.js';
 import { FactoryFlowServiceError, type FactoryFlowService } from './factory-flow-service.js';
 import { buildPrRunnerArgs, readFactoryPrInputs } from './factory-pr.js';
@@ -123,6 +124,11 @@ export interface StartFactorySessionInput extends FactoryRequest {
 
 interface SessionRuntime {
   readonly session: ManagedSession;
+  readonly developmentChecks?: {
+    readonly worktreePath: string;
+    readonly commands: FactoryRepositoryProfile['commands'];
+    readonly abortController: AbortController;
+  };
   operationChain: Promise<void>;
   finalized: boolean;
 }
@@ -1003,6 +1009,23 @@ export class SessionManager {
       this.#assertCapacity();
     }
 
+    const worktreePath = flowDetails?.flow.worktreePath;
+    const developmentChecks =
+      stage === 'development' && worktreePath && repositoryProfile
+        ? {
+            worktreePath,
+            commands: repositoryProfile.commands,
+            abortController: new AbortController(),
+          }
+        : undefined;
+    if (stage === 'development' && !developmentChecks) {
+      throw new SessionManagerError(
+        'FACTORY_STAGE_CONFLICT',
+        'O Desenvolvimento requer um worktree e um perfil de repositório válidos.',
+        409,
+      );
+    }
+
     const session: ManagedSession = {
       sessionId: randomUUID(),
       mode: 'factory',
@@ -1028,6 +1051,7 @@ export class SessionManager {
 
     const runtime: SessionRuntime = {
       session,
+      developmentChecks,
       operationChain: Promise.resolve(),
       finalized: false,
     };
@@ -1107,7 +1131,7 @@ export class SessionManager {
       runnerArgs = buildTriageAndPlanningRunnerArgs(initialStage, factoryHistory.reportPath);
     }
 
-    const workingDirectory = flowDetails?.flow.worktreePath ?? input.repoPath;
+    const workingDirectory = worktreePath ?? input.repoPath;
 
     let child: pty.IPty;
     try {
@@ -1396,15 +1420,59 @@ export class SessionManager {
     if (session.ptyProcess !== child || runtime.finalized) {
       return;
     }
-    runtime.finalized = true;
-
     disposePtyProcess(session, false);
+
+    const checks = runtime.developmentChecks;
+    const reportPath = session.reportPath;
+    if (exitCode === 0 && checks && reportPath) {
+      this.#enqueue(runtime, async () => {
+        let developmentError: FactoryStageArtifactError | undefined;
+        try {
+          developmentError = await appendFactoryDevelopmentChecks(
+            reportPath,
+            checks.worktreePath,
+            checks.commands,
+            checks.abortController.signal,
+          );
+        } catch (error) {
+          developmentError =
+            error instanceof FactoryStageArtifactError
+              ? error
+              : new FactoryStageArtifactError(
+                  'FACTORY_SIDECAR_WRITE_FAILED',
+                  'development',
+                  reportPath,
+                  'Não foi possível registrar as verificações de Desenvolvimento',
+                );
+        }
+        if (!runtime.finalized) {
+          this.#finalizePtyExit(runtime, exitCode, signal, developmentError);
+        }
+      });
+      return;
+    }
+    this.#finalizePtyExit(runtime, exitCode, signal);
+  }
+
+  #finalizePtyExit(
+    runtime: SessionRuntime,
+    exitCode: number,
+    signal: number | undefined,
+    developmentError?: FactoryStageArtifactError,
+  ): void {
+    const { session } = runtime;
+    runtime.finalized = true;
     const currentHistory = session.history;
     session.history = undefined;
-    const artifactError = currentHistory?.finish(
+    const historyError = currentHistory?.finish(
       `processo finalizado com código ${exitCode}`,
-      !isRestrictedRunnerStage(session.activeFactorySession?.stage) || exitCode === 0,
+      developmentError === undefined &&
+        (!isRestrictedRunnerStage(session.activeFactorySession?.stage) || exitCode === 0),
     );
+    const artifactError = historyError ?? developmentError;
+    if (developmentError && !historyError) {
+      broadcast(session, { type: 'error', message: developmentError.message });
+    }
 
     session.exitCode = exitCode;
     session.signal = signal ?? null;
@@ -1927,6 +1995,7 @@ export class SessionManager {
     }
 
     runtime.finalized = true;
+    runtime.developmentChecks?.abortController.abort();
     disposePtyProcess(session, true);
 
     const currentHistory = session.history;
