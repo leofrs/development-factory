@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { lstatSync } from 'node:fs';
 import { z } from 'zod';
 import {
   AdvanceFactoryStageRequestSchema,
@@ -43,6 +42,7 @@ import {
   type RollbackFactoryFlowCheckpointResponse,
   type TransitionFactoryFlowResponse,
 } from '@development-factory/shared';
+import { FactoryStageArtifactError, formatArtifactIssue } from './factory-stage-runners.js';
 import {
   FactoryWorktreeError,
   cleanupFactoryWorktree,
@@ -50,7 +50,7 @@ import {
   getFactoryWorktreeHeadSha,
   rollbackFactoryWorktreeToCheckpoint,
 } from './factory-worktree.js';
-import { maxHistoryBytes } from './history-reader.js';
+import { validateFactoryStageArtifacts } from './history.js';
 import {
   ReviewStorageError,
   type SaveFactoryArtifactOptions,
@@ -61,52 +61,46 @@ import {
 const FlowIdSchema = z.string().uuid('Identificador de fluxo inválido.');
 const SessionIdSchema = z.string().uuid('Identificador de sessão inválido.');
 
-type HandoffTargetStage = 'development' | 'tests' | 'review' | 'pr';
-type HandoffSourceStage = 'triage' | 'planning' | 'development' | 'tests' | 'review';
+type HandoffTargetStage = Exclude<FactoryStageName, 'triage'>;
 
 const HANDOFF_CONFIG: Readonly<
   Record<
     HandoffTargetStage,
     {
-      readonly requiredArtifacts: readonly HandoffSourceStage[];
       readonly missingMessage: string;
-      readonly handoffReason: string;
+      readonly handoffReason?: string;
       readonly acceptsApprovedNotes: boolean;
     }
   >
 > = {
+  planning: {
+    missingMessage: 'Conclua a Triagem com a especificação salva antes de avançar.',
+    acceptsApprovedNotes: false,
+  },
   development: {
-    requiredArtifacts: ['triage', 'planning'],
     missingMessage: 'Conclua a Triagem e o Planejamento com os artefatos salvos antes de avançar.',
     handoffReason: 'Planejamento aprovado para execução do Desenvolvimento',
     acceptsApprovedNotes: true,
   },
   tests: {
-    requiredArtifacts: ['triage', 'planning', 'development'],
     missingMessage:
       'Conclua a Triagem, o Planejamento e o Desenvolvimento com os artefatos salvos antes de avançar.',
     handoffReason: 'Relatório de Implementação entregue à etapa de Testes',
     acceptsApprovedNotes: true,
   },
   review: {
-    requiredArtifacts: ['triage', 'planning', 'development', 'tests'],
     missingMessage:
       'Conclua as etapas anteriores incluindo o Relatório de Testes salvo antes de avançar.',
     handoffReason: 'Relatório de Testes entregue à etapa de Code Review',
     acceptsApprovedNotes: true,
   },
   pr: {
-    requiredArtifacts: ['triage', 'planning', 'development', 'tests', 'review'],
     missingMessage:
       'Conclua as etapas anteriores incluindo o Relatório de Code Review salvo antes de avançar.',
     handoffReason: 'Code Review aprovado e entregue à etapa de PR',
     acceptsApprovedNotes: false,
   },
 };
-
-function isHandoffTargetStage(stage: FactoryStageName): stage is HandoffTargetStage {
-  return Object.hasOwn(HANDOFF_CONFIG, stage);
-}
 
 export interface FactoryFlowServiceOptions {
   readonly now?: () => string;
@@ -196,15 +190,40 @@ function deriveFlowTitle(task: FactoryTaskInput, explicitTitle?: string): string
   return raw.slice(0, 200).trim();
 }
 
-function isAvailableArtifact(artifact: FactoryFlowArtifact | undefined): boolean {
-  if (!artifact) {
-    return false;
-  }
-  try {
-    const info = lstatSync(artifact.path);
-    return info.isFile() && info.size > 0 && info.size <= maxHistoryBytes;
-  } catch {
-    return false;
+function assertStageContracts(
+  details: FactoryFlowDetails,
+  stages: readonly FactoryStageName[],
+  missingMessage: string,
+): void {
+  for (const stage of stages) {
+    const artifact = getReadyFactoryStageArtifact(details, stage);
+    if (!artifact) {
+      const reportPath = details.stages.find(item => item.name === stage)?.reportPath;
+      const reportError = details.artifacts.find(
+        item => item.stage === stage && item.path === reportPath,
+      )?.error;
+      throw new FactoryFlowServiceError(
+        reportError ? 'FACTORY_FLOW_INVALID_CONTRACT' : 'FACTORY_FLOW_INVALID_STAGE_ADVANCE',
+        reportError?.message ?? `${missingMessage} Artefato da etapa ${stage} indisponível.`,
+        409,
+        reportError?.issues?.map(formatArtifactIssue),
+      );
+    }
+
+    try {
+      validateFactoryStageArtifacts(stage, artifact.path);
+    } catch (error) {
+      if (error instanceof FactoryStageArtifactError) {
+        throw new FactoryFlowServiceError(
+          'FACTORY_FLOW_INVALID_CONTRACT',
+          error.message,
+          409,
+          error.details,
+          { cause: error },
+        );
+      }
+      throw error;
+    }
   }
 }
 
@@ -585,6 +604,17 @@ export class FactoryFlowService {
     }
   }
 
+  assertStageHandoff(details: FactoryFlowDetails, stage: FactoryStageName): void {
+    if (stage === 'triage') {
+      return;
+    }
+    assertStageContracts(
+      details,
+      FACTORY_STAGE_ORDER.slice(0, FACTORY_STAGE_ORDER.indexOf(stage)),
+      HANDOFF_CONFIG[stage].missingMessage,
+    );
+  }
+
   async transitionFlow(
     flowIdInput: string,
     commandInput: unknown,
@@ -606,6 +636,7 @@ export class FactoryFlowService {
     const command = {
       ...rest,
       at: at ?? this.now(),
+      ...(rest.to === 'completed' && rest.error === undefined ? { error: null } : {}),
     };
     const saveOptions: SaveFactoryFlowTransitionOptions = {
       expectedUpdatedAt: options.expectedUpdatedAt ?? expectedUpdatedAt,
@@ -634,11 +665,7 @@ export class FactoryFlowService {
         }
 
         const currentStage = currentFlow.currentStage;
-        if (
-          command.stage &&
-          command.stage !== currentStage &&
-          (isHandoffTargetStage(command.stage) || isHandoffTargetStage(currentStage))
-        ) {
+        if (command.stage && command.stage !== currentStage) {
           throw new FactoryFlowServiceError(
             'FACTORY_FLOW_INVALID_STAGE_ADVANCE',
             'Use a ação de avanço da etapa para validar os artefatos do fluxo.',
@@ -648,6 +675,20 @@ export class FactoryFlowService {
 
         // Valida a transição de domínio antes de remover o worktree externo.
         const preview = transitionFactoryFlow(currentFlow, command);
+        if (preview.state === 'completed') {
+          if (currentStage !== 'pr') {
+            throw new FactoryFlowServiceError(
+              'FACTORY_FLOW_INVALID_STAGE_ADVANCE',
+              'Conclua todas as etapas até o PR antes de finalizar o fluxo.',
+              409,
+            );
+          }
+          assertStageContracts(
+            this.getFlow(flowId),
+            FACTORY_STAGE_ORDER,
+            'Conclua todas as etapas com os artefatos salvos antes de finalizar o fluxo.',
+          );
+        }
         let effectiveCommand: FactoryFlowTransitionCommand = command;
         if (
           currentFlow.worktreePath !== null &&
@@ -715,54 +756,45 @@ export class FactoryFlowService {
           }
 
           const nextStage = getNextFactoryStage(flow.currentStage);
-          if (!nextStage || flow.currentStage === 'pr') {
+          if (!nextStage || nextStage === 'triage') {
             throw new FactoryFlowServiceError(
               'FACTORY_FLOW_INVALID_STAGE_ADVANCE',
-              flow.currentStage === 'pr'
-                ? 'A execução da Etapa 06 (PR) será disponibilizada em uma próxima implementação.'
-                : `O fluxo já está na etapa final (${flow.currentStage}).`,
+              `O fluxo já está na etapa final (${flow.currentStage}).`,
               409,
             );
           }
 
-          const handoffConfig = isHandoffTargetStage(nextStage)
-            ? HANDOFF_CONFIG[nextStage]
-            : undefined;
-          if (handoffConfig) {
-            const details = this.getFlow(flowId);
-            const hasArtifacts = handoffConfig.requiredArtifacts.every(stage =>
-              isAvailableArtifact(getReadyFactoryStageArtifact(details, stage)),
+          if (flow.state !== 'waiting_action' || flow.currentSessionId !== null) {
+            throw new FactoryFlowServiceError(
+              'FACTORY_FLOW_INVALID_STAGE_ADVANCE',
+              'Conclua a sessão da etapa atual antes de avançar.',
+              409,
             );
-            if (flow.state !== 'waiting_action' || flow.currentSessionId || !hasArtifacts) {
-              throw new FactoryFlowServiceError(
-                'FACTORY_FLOW_INVALID_STAGE_ADVANCE',
-                handoffConfig.missingMessage,
-                409,
-              );
-            }
           }
-          if (parsed.data.approvedNotes !== undefined && !handoffConfig?.acceptsApprovedNotes) {
+          const handoffConfig = HANDOFF_CONFIG[nextStage];
+          if (parsed.data.approvedNotes !== undefined && !handoffConfig.acceptsApprovedNotes) {
             throw new FactoryFlowServiceError(
               'FACTORY_FLOW_INVALID_INPUT',
               'As notas aprovadas são recebidas no avanço para Desenvolvimento, Testes ou Code Review.',
               400,
             );
           }
+          this.assertStageHandoff(this.getFlow(flowId), nextStage);
 
           const at = parsed.data.at ?? this.now();
-          const nextState = flow.state === 'running' ? 'waiting_action' : 'running';
           const nextIteration =
             nextStage === 'development' && flow.iteration === 0 ? 1 : undefined;
           const advanced = this.repository.saveFlowTransition(
             flowId,
             {
-              to: nextState,
+              to: 'running',
               stage: nextStage,
               at,
               reason: parsed.data.reason ?? `Avanço da etapa ${flow.currentStage} para ${nextStage}`,
               currentSessionId: null,
               ...(nextIteration !== undefined ? { iteration: nextIteration } : {}),
               loopPausedReason: null,
+              error: null,
             },
             { expectedUpdatedAt: parsed.data.expectedUpdatedAt },
           );
@@ -772,7 +804,7 @@ export class FactoryFlowService {
               updatedAt: at,
             });
           }
-          if (handoffConfig) {
+          if (handoffConfig.handoffReason) {
             return this.repository.saveFlowTransition(flowId, {
               to: 'waiting_action',
               stage: nextStage,
@@ -846,18 +878,7 @@ export class FactoryFlowService {
             );
           }
 
-          const details = this.getFlow(flowId);
-          const targetConfig = HANDOFF_CONFIG[targetStage];
-          const hasArtifacts = targetConfig.requiredArtifacts.every(stage =>
-            isAvailableArtifact(getReadyFactoryStageArtifact(details, stage)),
-          );
-          if (!hasArtifacts) {
-            throw new FactoryFlowServiceError(
-              'FACTORY_FLOW_INVALID_STAGE_ADVANCE',
-              targetConfig.missingMessage,
-              409,
-            );
-          }
+          this.assertStageHandoff(this.getFlow(flowId), targetStage);
 
           const at = parsed.data.at ?? this.now();
           const nextIteration = Math.max(flow.iteration, 1) + 1;
@@ -872,6 +893,7 @@ export class FactoryFlowService {
               iteration: nextIteration,
               lastReviewVerdict: null,
               loopPausedReason: null,
+              error: null,
             },
             { expectedUpdatedAt: parsed.data.expectedUpdatedAt, direction: 'return' },
           );
@@ -949,26 +971,16 @@ export class FactoryFlowService {
         }
 
         const targetStage = options.stage ?? flow.currentStage;
-        if (flow.state === 'running' && targetStage === flow.currentStage) {
-          this.repository.updateFlowSession(flowId, parsedSessionId.data, flow.updatedAt);
-          return;
+        if (targetStage !== flow.currentStage) {
+          throw new FactoryFlowServiceError(
+            'FACTORY_FLOW_INVALID_STAGE_ADVANCE',
+            'Use a ação de avanço ou retorno antes de vincular uma sessão a outra etapa.',
+            409,
+          );
         }
 
         if (flow.state === 'running') {
-          this.repository.saveFlowTransition(flowId, {
-            to: 'waiting_action',
-            stage: targetStage,
-            at,
-            reason: options.reason ?? `Preparando etapa ${targetStage} para nova sessão`,
-            currentSessionId: parsedSessionId.data,
-          });
-          this.repository.saveFlowTransition(flowId, {
-            to: 'running',
-            stage: targetStage,
-            at,
-            reason: options.reason ?? `Sessão ${parsedSessionId.data} vinculada à etapa ${targetStage}`,
-            currentSessionId: parsedSessionId.data,
-          });
+          this.repository.updateFlowSession(flowId, parsedSessionId.data, flow.updatedAt);
           return;
         }
 
@@ -978,6 +990,7 @@ export class FactoryFlowService {
           at,
           reason: options.reason ?? `Sessão ${parsedSessionId.data} vinculada à etapa ${targetStage}`,
           currentSessionId: parsedSessionId.data,
+          error: null,
         });
       });
 

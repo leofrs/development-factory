@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, closeSync, constants, openSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { extname, join } from 'node:path';
 import { stripVTControlCharacters } from 'node:util';
 import type { FactoryRequest, FactoryStageName } from '@development-factory/shared';
 import { resolveFactoryArtifactsDirectory } from './artifacts.js';
@@ -30,7 +30,7 @@ interface StageHistoryConfig {
   readonly validateReport: (content: string) => boolean;
 }
 
-interface SessionHistoryConfig extends StageHistoryConfig {
+interface SessionHistoryConfig {
   readonly stage: FactoryStageName;
   readonly inputType: FactoryRequest['inputType'];
   readonly repoPath: string;
@@ -57,23 +57,24 @@ function createSessionHistory(
   onChange: (state: HistoryResult) => void,
   onError: (message: string) => void,
 ) {
+  const stageConfig = REPORT_STAGE_HISTORY_CONFIG[config.stage];
   const startedAt = new Date().toISOString();
   let descriptor = -1;
   const directory = resolveFactoryArtifactsDirectory(config.repoPath, config.flowId);
-  const prefix = `${config.prefixSegment}-${config.inputType}`;
+  const prefix = `${stageConfig.prefixSegment}-${config.inputType}`;
   const slug = config.slugSource.replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 60) || prefix;
   const fileBasename = `${startedAt.replace(/[:.]/g, '-')}-${prefix}-${slug}-${randomUUID()}`;
   const reportPath = join(directory, `${fileBasename}.md`);
   const sidecarPath = getFactoryStageSidecarPath(reportPath);
   const sessionPath = join(directory, `${fileBasename}.session.md`);
-  const placeholder = `# ${config.reportPlaceholderTitle}\n\n${config.metadata}\n> ${config.reportPlaceholderNote}\n`;
+  const placeholder = `# ${stageConfig.reportPlaceholderTitle}\n\n${config.metadata}\n> ${stageConfig.reportPlaceholderNote}\n`;
   writeFileSync(reportPath, placeholder, { flag: 'wx', mode: 0o600 });
   try {
     writeFileSync(sidecarPath, '', { flag: 'wx', mode: 0o600 });
     descriptor = openSync(sessionPath, 'wx', 0o600);
     appendFileSync(
       descriptor,
-      `# ${config.sessionTitle}\n\n${config.metadata}\n` +
+      `# ${stageConfig.sessionTitle}\n\n${config.metadata}\n` +
         `> Registro textual da TUI. O relatório fica em ${JSON.stringify(reportPath)}.\n` +
         `> O sidecar JSON fica em ${JSON.stringify(sidecarPath)}.\n\n## Saída do terminal\n\n    `,
     );
@@ -83,7 +84,7 @@ function createSessionHistory(
     }
     writeReportFileSafely(
       reportPath,
-      `# ${config.reportPlaceholderTitle} não iniciado\n\n${config.metadata}\n` +
+      `# ${stageConfig.reportPlaceholderTitle} não iniciado\n\n${config.metadata}\n` +
         'Falha ao preparar o sidecar JSON ou o registro da sessão.\n',
     );
     throw error;
@@ -126,25 +127,17 @@ function createSessionHistory(
     // Consolida a entrega após o encerramento para validar os dois arquivos já gravados.
     if (acceptReport) {
       try {
-        content = readFactoryArtifactFile(reportPath).toString('utf8');
-        if (!config.validateReport(content.trim())) {
-          throw new FactoryStageArtifactError(
-            'FACTORY_MARKDOWN_INVALID',
-            config.stage,
-            reportPath,
-            'O relatório Markdown não contém o título e as seções obrigatórias',
-          );
-        }
-        readFactoryStageSidecar(config.stage, reportPath);
+        content = readFactoryStageMarkdown(config.stage, reportPath);
+        validateFactoryStageArtifacts(config.stage, reportPath, content);
       } catch (error) {
         artifactError =
           error instanceof FactoryStageArtifactError
             ? error
             : new FactoryStageArtifactError(
-                'FACTORY_MARKDOWN_READ_FAILED',
+                'FACTORY_MARKDOWN_INVALID',
                 config.stage,
                 reportPath,
-                'Não foi possível ler o relatório Markdown como arquivo regular de até 5 MB, sem link simbólico',
+                'Não foi possível validar o contrato do relatório da etapa',
               );
       }
     }
@@ -161,7 +154,7 @@ function createSessionHistory(
       ) {
         writeReportFileSafely(
           reportPath,
-          `# ${config.reportPlaceholderTitle} incompleto\n\n${config.metadata}\n` +
+          `# ${stageConfig.reportPlaceholderTitle} incompleto\n\n${config.metadata}\n` +
             `O relatório final não foi salvo antes do encerramento (${reason}).\n\n` +
             `Consulte o registro da sessão: [${fileBasename}.session.md](./${fileBasename}.session.md).\n`,
         );
@@ -270,6 +263,43 @@ const REPORT_STAGE_HISTORY_CONFIG: Readonly<Record<FactoryStageName, StageHistor
   },
 };
 
+function readFactoryStageMarkdown(stage: FactoryStageName, reportPath: string): string {
+  if (extname(reportPath).toLowerCase() !== '.md') {
+    throw new FactoryStageArtifactError(
+      'FACTORY_MARKDOWN_INVALID',
+      stage,
+      reportPath,
+      'O relatório da etapa precisa ter a extensão .md',
+    );
+  }
+  try {
+    return readFactoryArtifactFile(reportPath).toString('utf8');
+  } catch {
+    throw new FactoryStageArtifactError(
+      'FACTORY_MARKDOWN_READ_FAILED',
+      stage,
+      reportPath,
+      'Não foi possível ler o relatório Markdown como arquivo regular de até 5 MB, sem link simbólico',
+    );
+  }
+}
+
+export function validateFactoryStageArtifacts(
+  stage: FactoryStageName,
+  reportPath: string,
+  markdown = readFactoryStageMarkdown(stage, reportPath),
+): void {
+  if (!REPORT_STAGE_HISTORY_CONFIG[stage].validateReport(markdown.trim())) {
+    throw new FactoryStageArtifactError(
+      'FACTORY_MARKDOWN_INVALID',
+      stage,
+      reportPath,
+      'O relatório Markdown não contém o título e as seções obrigatórias',
+    );
+  }
+  readFactoryStageSidecar(stage, reportPath);
+}
+
 export function createFactoryHistory(
   request: FactoryRequest,
   onChange: (state: HistoryResult) => void,
@@ -283,11 +313,9 @@ export function createFactoryHistory(
   };
   const metadata = `- Origem: ${labels[request.inputType]}\n- Tarefa: ${JSON.stringify(request.value)}\n- Repositório: ${JSON.stringify(request.repoPath)}\n- Início: ${startedAt}\n`;
   const stage = request.stage ?? 'triage';
-  const stageConfig = REPORT_STAGE_HISTORY_CONFIG[stage];
 
   return createSessionHistory(
     {
-      ...stageConfig,
       stage,
       inputType: request.inputType,
       repoPath: request.repoPath,

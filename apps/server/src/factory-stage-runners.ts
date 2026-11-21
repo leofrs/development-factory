@@ -40,7 +40,7 @@ type FactoryStageArtifactErrorCode =
   | 'FACTORY_SIDECAR_INVALID_JSON'
   | 'FACTORY_SIDECAR_INVALID_SCHEMA';
 
-function formatArtifactIssue(issue: FactoryArtifactIssue): string {
+export function formatArtifactIssue(issue: FactoryArtifactIssue): string {
   const field = issue.path.reduce<string>((path, segment) => {
     if (typeof segment === 'number') {
       return `${path}[${segment}]`;

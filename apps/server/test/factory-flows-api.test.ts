@@ -15,6 +15,7 @@ import {
   FactoryFlowApiErrorResponseSchema,
   FactoryFlowDetailsSchema,
   FactoryFlowListResponseSchema,
+  FactoryFlowSchema,
   RollbackFactoryFlowCheckpointResponseSchema,
   ServerMessageSchema,
   TransitionFactoryFlowResponseSchema,
@@ -26,6 +27,7 @@ import { createReviewServer } from '../src/server.js';
 import { getFactoryStageSidecarPath } from '../src/factory-stage-runners.js';
 import {
   planningMarkdown,
+  sidecarFixtures,
   triageMarkdown,
   writeFactoryStageSidecar,
 } from './fixtures/factory-stage-artifacts.js';
@@ -358,15 +360,66 @@ test('API REST /api/factory/flows valida origem, idempotência, filtros e ciclo 
   });
   assert.equal(rerunRunningRes.status, 409);
 
-  // 5. Entrega a especificação e o sidecar do Fluxo A e encerra a triagem.
+  const postFlowA = (action: string, data: object) =>
+    fetch(`${baseUrl}/api/factory/flows/${flowAId}/${action}`, {
+      method: 'POST',
+      headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+
+  // 5. A triagem sem sidecar bloqueia o avanço e pode ser reexecutada.
   assert(sessionASummary.reportPath);
-  writeFileSync(sessionASummary.reportPath, triageMarkdown('Fluxo A salvo.'));
-  writeFactoryStageSidecar(sessionASummary.reportPath, 'triage');
+  writeFileSync(sessionASummary.reportPath, triageMarkdown('Fluxo A sem sidecar.'));
+  rmSync(getFactoryStageSidecarPath(sessionASummary.reportPath));
   sessionManager.writeInput(sessionAId, 'EXIT0');
   await waitFor(() =>
     events.some(
       event =>
-        event.type === 'session.history_saved' && event.session.sessionId === sessionAId,
+        event.type === 'factory_flow.updated' &&
+        event.flow.id === flowAId &&
+        event.flow.state === 'waiting_action' &&
+        event.flow.currentStage === 'triage' &&
+        event.flow.currentSessionId === null &&
+        event.flow.error?.code === 'FACTORY_SIDECAR_MISSING',
+    ),
+  );
+  const blockedAdvance = await postFlowA('advance', { startSession: true });
+  assert.equal(blockedAdvance.status, 409);
+  const advanceError = FactoryFlowApiErrorResponseSchema.parse(await blockedAdvance.json());
+  assert.equal(advanceError.error.code, 'FACTORY_FLOW_INVALID_CONTRACT');
+  assert.match(advanceError.error.message, /sidecar JSON está ausente.*triage/);
+  const blockedStart = await postFlowA('start', { stage: 'planning' });
+  assert.equal(blockedStart.status, 409);
+  const blockedTransition = await postFlowA('transitions', {
+    to: 'running',
+    stage: 'planning',
+    reason: 'Solicitar Planejamento pela rota de transições',
+  });
+  assert.equal(blockedTransition.status, 409);
+  assert.ok(
+    sessionManager.listSessions().every(
+      session => session.flowId !== flowAId || session.stage === 'triage',
+    ),
+  );
+
+  const retryResponse = await postFlowA('rerun', { stage: 'triage' });
+  assert.equal(retryResponse.status, 200);
+  const retried = z
+    .object({ flow: FactoryFlowSchema, session: BackgroundSessionSummarySchema })
+    .parse(await retryResponse.json());
+  assert.equal(retried.flow.error, null);
+  assert.ok(retried.session.reportPath);
+  const retriedTriageId = retried.session.sessionId;
+  await waitFor(() =>
+    Boolean(sessionManager.getSession(retriedTriageId)?.buffer.replay().includes('READY:')),
+  );
+  writeFileSync(retried.session.reportPath, triageMarkdown('Fluxo A salvo.'));
+  writeFactoryStageSidecar(retried.session.reportPath, 'triage');
+  sessionManager.writeInput(retriedTriageId, 'EXIT0');
+  await waitFor(() =>
+    events.some(
+      event =>
+        event.type === 'session.history_saved' && event.session.sessionId === retriedTriageId,
     ),
   );
 
@@ -700,6 +753,7 @@ test(
     const invalidPlan = afterPlanTwo.artifacts.find(artifact => artifact.path === invalidPlanPath);
     assert.equal(invalidPlan?.status, 'incomplete');
     assert.equal(invalidPlan.error?.code, 'FACTORY_SIDECAR_INVALID_SCHEMA');
+    assert.deepEqual(afterPlanTwo.flow.error, invalidPlan.error);
     assert.deepEqual(invalidPlan.error.issues, [
       {
         code: 'custom',
@@ -734,7 +788,22 @@ test(
 
     const noPlan = await postAction('advance', { startSession: true }, createdTwo.flow.id);
     assert.equal(noPlan.status, 409);
+    const planError = FactoryFlowApiErrorResponseSchema.parse(await noPlan.json());
+    assert.match(planError.error.details?.[0] ?? '', /\$\.pendingDecisions\[0\]\.recommendedOption/);
+
+    writeFileSync(
+      getFactoryStageSidecarPath(specOne.path),
+      JSON.stringify({ ...sidecarFixtures.triage, technicalContext: 42 }),
+    );
     const approvedNotes = 'Usar a opção 2 para renovação do JWT.';
+    const invalidTriage = await postAction('advance', { startSession: false, approvedNotes });
+    assert.equal(invalidTriage.status, 409);
+    const triageError = FactoryFlowApiErrorResponseSchema.parse(await invalidTriage.json());
+    assert.equal(triageError.error.code, 'FACTORY_FLOW_INVALID_CONTRACT');
+    assert.match(triageError.error.details?.[0] ?? '', /^\$\.technicalContext /);
+    assert.deepEqual(await getDetails(), afterPlanOne);
+    writeFactoryStageSidecar(specOne.path, 'triage');
+
     const developmentResponse = await postAction('advance', { startSession: true, approvedNotes });
     assert.equal(developmentResponse.status, 200);
     const development = z.object({ session: BackgroundSessionSummarySchema }).parse(
@@ -744,15 +813,33 @@ test(
     assert.ok(development.reportPath);
     assert.equal((await postAction('advance', { startSession: true })).status, 409);
 
-    await waitFor(() => Boolean(sessionManager.getSession(development.sessionId)?.buffer.replay().includes('READY:')));
-    writeFileSync(development.reportPath, '# Relatório de Implementação\n\nIncompleto.\n');
+    const implementationMarkdown = [
+      '# Relatório de Implementação',
+      '## Arquivos alterados',
+      '- src/jwt.ts',
+      '## Resumo das mudanças',
+      'Renovação do JWT atualizada.',
+      '## Status dos passos do plano',
+      '| Passo do Plano | Status | Observações |',
+      '| --- | --- | --- |',
+      '| Ajustar JWT | Concluído | Código de produção atualizado |',
+      '',
+    ].join('\n');
+    await waitFor(() =>
+      Boolean(sessionManager.getSession(development.sessionId)?.buffer.replay().includes('READY:')),
+    );
+    writeFileSync(development.reportPath, implementationMarkdown);
     sessionManager.writeInput(development.sessionId, 'EXIT0');
-    await waitFor(() => sessionManager.getSession(development.sessionId)?.status === 'exited');
-    const incompleteDetails = await getDetails();
+    const incompleteDetails = await waitForFlowDetails(getDetails, details =>
+      details.flow.error?.code === 'FACTORY_SIDECAR_MISSING',
+    );
     assert.equal(incompleteDetails.flow.state, 'waiting_action');
-    assert.ok(incompleteDetails.artifacts.some(artifact =>
-      artifact.kind === 'implementation_report' && artifact.status === 'incomplete',
-    ));
+    assert.equal(incompleteDetails.flow.currentStage, 'development');
+    assert.ok(
+      incompleteDetails.artifacts.some(
+        artifact => artifact.kind === 'implementation_report' && artifact.status === 'incomplete',
+      ),
+    );
     assert.equal((await postAction('advance', { startSession: true })).status, 409);
 
     const rerunResponse = await postAction('rerun', { stage: 'development' });
@@ -785,18 +872,7 @@ test(
     assert.match(args[args.indexOf('--disallowedTools') + 1] ?? '', /\.test\.\*/);
     assert.match(args[args.indexOf('--disallowedTools') + 1] ?? '', /\.spec\.\*/);
 
-    writeFileSync(rerun.reportPath, [
-      '# Relatório de Implementação',
-      '## Arquivos alterados',
-      '- src/jwt.ts',
-      '## Resumo das mudanças',
-      'Renovação do JWT atualizada.',
-      '## Status dos passos do plano',
-      '| Passo do Plano | Status | Observações |',
-      '| --- | --- | --- |',
-      '| Ajustar JWT | Concluído | Código de produção atualizado |',
-      '',
-    ].join('\n'));
+    writeFileSync(rerun.reportPath, implementationMarkdown);
     writeFactoryStageSidecar(rerun.reportPath, 'development', { changedFiles: ['src/jwt.ts'] });
     sessionManager.writeInput(rerun.sessionId, 'EXIT0');
 
@@ -841,12 +917,25 @@ test(
     assert.match(testsSpawn.args[testsSpawn.args.indexOf('--allowedTools') + 1] ?? '', /Edit\(\*\*\/\*\.test\.\*\)/);
     assert.match(testsSpawn.args[testsSpawn.args.indexOf('--allowedTools') + 1] ?? '', /Bash/);
 
-    // Relatório de testes incompleto pausa em waiting_action para reexecução manual.
-    writeFileSync(testsSession.reportPath, '# Relatório de Testes\n\nIncompleto.\n');
+    // O relatório de testes exige um sidecar válido antes do Code Review.
+    const testsMarkdown = [
+      '# Relatório de Testes',
+      '## Arquivos de teste alterados',
+      '- test/jwt.test.ts',
+      '## Comandos executados',
+      '- npm test (exit 1)',
+      '## Resultados e cobertura',
+      'FAIL: renovação de token expirado retornou 500 em src/jwt.ts:42.',
+      '',
+    ].join('\n');
+    writeFileSync(testsSession.reportPath, testsMarkdown);
+    writeFileSync(getFactoryStageSidecarPath(testsSession.reportPath), '{');
     sessionManager.writeInput(testsSession.sessionId, 'EXIT0');
-    await waitFor(() => sessionManager.getSession(testsSession.sessionId)?.status === 'exited');
-    const incompleteTestsDetails = await getDetails();
+    const incompleteTestsDetails = await waitForFlowDetails(getDetails, details =>
+      details.flow.error?.code === 'FACTORY_SIDECAR_INVALID_JSON',
+    );
     assert.equal(incompleteTestsDetails.flow.state, 'waiting_action');
+    assert.equal(incompleteTestsDetails.flow.currentStage, 'tests');
     assert.ok(
       incompleteTestsDetails.artifacts.some(
         artifact => artifact.kind === 'test_report' && artifact.status === 'incomplete',
@@ -862,19 +951,7 @@ test(
     ).session;
     assert.ok(rerunTests.reportPath);
     await waitFor(() => Boolean(sessionManager.getSession(rerunTests.sessionId)?.buffer.replay().includes('READY:')));
-    writeFileSync(
-      rerunTests.reportPath,
-      [
-        '# Relatório de Testes',
-        '## Arquivos de teste alterados',
-        '- test/jwt.test.ts',
-        '## Comandos executados',
-        '- npm test (exit 1)',
-        '## Resultados e cobertura',
-        'FAIL: renovação de token expirado retornou 500 em src/jwt.ts:42.',
-        '',
-      ].join('\n'),
-    );
+    writeFileSync(rerunTests.reportPath, testsMarkdown);
     writeFactoryStageSidecar(rerunTests.reportPath, 'tests', {
       status: 'failed',
       executedCommands: [{ command: ['npm', 'test'], exitCode: 1 }],
@@ -922,10 +999,25 @@ test(
     assert.ok(reviewAllowedTools.includes('Bash(git log*)'));
     assert.equal(reviewAllowedTools.includes('Edit(**/*.ts)'), false);
 
-    // Relatório de review sem veredito determinístico falha validação e pausa em waiting_action.
-    writeFileSync(reviewSession.reportPath, '# Relatório de Code Review\n\nIncompleto.\n');
+    // O Markdown com veredito de aprovação exige o sidecar antes da etapa de PR.
+    const approvedReviewMarkdown = [
+      '# Relatório de Code Review',
+      '## Resumo Executivo',
+      'Correção confirmada e aderente ao plano.',
+      '## Pontos Encontrados',
+      'Nenhum bloqueador crítico.',
+      '## Parecer Final',
+      'Veredito: APROVADO PARA PR',
+      'Pronto para preparar o Pull Request.',
+      '',
+    ].join('\n');
+    writeFileSync(reviewSession.reportPath, approvedReviewMarkdown);
     sessionManager.writeInput(reviewSession.sessionId, 'EXIT0');
-    await waitFor(() => sessionManager.getSession(reviewSession.sessionId)?.status === 'exited');
+    const incompleteReview = await waitForFlowDetails(getDetails, details =>
+      details.flow.error?.code === 'FACTORY_SIDECAR_MISSING',
+    );
+    assert.equal(incompleteReview.flow.state, 'waiting_action');
+    assert.equal(incompleteReview.flow.currentStage, 'review');
     assert.equal((await postAction('advance', { startSession: true })).status, 409);
 
     // 3. Review confirma falha (REPROVADO / REQUER AJUSTES) e retorna AUTOMATICAMENTE para Development (Iteração 2/3).
@@ -1054,17 +1146,6 @@ test(
     const iter2ReviewSession = sessionManager.getSession(iter2ReviewDetails.flow.currentSessionId);
     assert.ok(iter2ReviewSession && iter2ReviewSession.reportPath);
     await waitFor(() => iter2ReviewSession.buffer.replay().includes('READY:'));
-    const approvedReviewMarkdown = [
-      '# Relatório de Code Review',
-      '## Resumo Executivo',
-      'Correção confirmada e aderente ao plano.',
-      '## Pontos Encontrados',
-      'Nenhum bloqueador crítico.',
-      '## Parecer Final',
-      'Veredito: APROVADO PARA PR',
-      'Pronto para preparar o Pull Request.',
-      '',
-    ].join('\n');
     writeFileSync(iter2ReviewSession.reportPath, approvedReviewMarkdown);
     writeFactoryStageSidecar(iter2ReviewSession.reportPath, 'review');
     sessionManager.writeInput(iter2ReviewSession.sessionId, 'EXIT0');
@@ -1127,13 +1208,27 @@ test(
       baseBranch: prPausedDetails.baseBranch,
       headBranch: prPausedDetails.branchName,
     });
+    rmSync(getFactoryStageSidecarPath(iter2ReviewSession.reportPath));
     sessionManager.writeInput(prSession.sessionId, 'EXIT0');
-    const completedPrDetails = await waitForFlowDetails(
-      getDetails,
-      details => details.flow.state === 'completed',
+    const blockedPr = await waitForFlowDetails(getDetails, details =>
+      details.flow.error?.code === 'FACTORY_SIDECAR_MISSING',
     );
+    assert.equal(blockedPr.flow.currentStage, 'pr');
+    assert.equal(blockedPr.flow.state, 'waiting_action');
+    assert.equal(blockedPr.flow.currentSessionId, null);
+    assert.match(blockedPr.flow.error?.message ?? '', /sidecar JSON está ausente.*review/);
+    assert.ok(existsSync(detailsOne.worktreePath));
+
+    const completion = { to: 'completed', reason: 'Concluir o fluxo após validar os artefatos' };
+    const invalidCompletion = await postAction('transitions', completion);
+    assert.equal(invalidCompletion.status, 409);
+    writeFactoryStageSidecar(iter2ReviewSession.reportPath, 'review');
+    const completedResponse = await postAction('transitions', completion);
+    assert.equal(completedResponse.status, 200);
+    const completedPrDetails = await getDetails();
     assert.equal(completedPrDetails.flow.currentStage, 'pr');
     assert.equal(completedPrDetails.flow.state, 'completed');
+    assert.equal(completedPrDetails.flow.error, null);
     assert.equal(completedPrDetails.worktreePath, null);
     assert.ok(completedPrDetails.branchName);
     assert.ok(completedPrDetails.checkpoints.length >= 4);

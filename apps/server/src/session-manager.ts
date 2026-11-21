@@ -7,7 +7,6 @@ import { WebSocket } from 'ws';
 import {
   FACTORY_FLOW_CONTRACT_VERSION,
   REVIEW_CONTRACT_VERSION,
-  getNextFactoryStage,
   getReadyFactoryStageArtifact,
   isFactoryReviewApprovedVerdict,
   isFinalFactoryFlowState,
@@ -24,7 +23,11 @@ import {
   type ReviewRequest,
   type ServerMessage,
 } from '@development-factory/shared';
-import type { FactoryRepositoryProfile, HistoryFile } from '@development-factory/shared';
+import type {
+  FactoryRepositoryProfile,
+  HistoryFile,
+  TransitionFactoryFlowResponse,
+} from '@development-factory/shared';
 import { resolveReviewReportDirectory } from './artifacts.js';
 import { buildDevelopmentRunnerArgs, readFactoryDevelopmentInputs } from './factory-development.js';
 import { FactoryFlowServiceError, type FactoryFlowService } from './factory-flow-service.js';
@@ -134,13 +137,19 @@ function buildReviewError(code: string, message: string, retryable: boolean): Re
   };
 }
 
-function buildFactoryFlowError(code: string, message: string, retryable: boolean): FactoryFlowError {
+function buildFactoryFlowError(
+  code: string,
+  message: string,
+  retryable: boolean,
+  issues?: FactoryFlowError['issues'],
+): FactoryFlowError {
   return {
     contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
     code,
     message,
     occurredAt: new Date().toISOString(),
     retryable,
+    ...(issues?.length ? { issues } : {}),
   };
 }
 
@@ -606,10 +615,17 @@ export class SessionManager {
     validateRepoPath(input.repoPath);
     this.#assertCapacity();
 
-    if (isRestrictedRunnerStage(input.stage) && !input.flowId) {
+    if (isRestrictedRunnerStage(input.stage) && (!input.flowId || !this.#factoryFlowService)) {
       throw new SessionManagerError(
         'FACTORY_STAGE_CONFLICT',
         `Avance o fluxo do ${RESTRICTED_RUNNER_STAGE_CONFIG[input.stage].previousLabel} para ${RESTRICTED_RUNNER_STAGE_CONFIG[input.stage].label} antes de iniciar a sessão.`,
+        409,
+      );
+    }
+    if (input.stage === 'planning' && !input.flowId && this.#factoryFlowService) {
+      throw new SessionManagerError(
+        'FACTORY_STAGE_CONFLICT',
+        'Conclua a Triagem do fluxo antes de iniciar o Planejamento.',
         409,
       );
     }
@@ -662,26 +678,19 @@ export class SessionManager {
     }
 
     const stage = activeFactorySession?.stage ?? input.stage ?? 'triage';
-    const isRestrictedStage = isRestrictedRunnerStage(stage);
-    const currentFlowStageIsRestricted = isRestrictedRunnerStage(flowDetails?.flow.currentStage);
-    if (
-      (isRestrictedStage || currentFlowStageIsRestricted) &&
-      (!isRestrictedStage || !flowDetails || flowDetails.flow.currentStage !== stage)
-    ) {
-      const targetStage = isRestrictedStage
-        ? stage
-        : (flowDetails?.flow.currentStage as RestrictedRunnerStage);
-      const stageMeta = RESTRICTED_RUNNER_STAGE_CONFIG[targetStage];
+    if (flowDetails && flowDetails.flow.currentStage !== stage) {
       throw new SessionManagerError(
         'FACTORY_STAGE_CONFLICT',
-        `Avance o fluxo do ${stageMeta.previousLabel} para ${stageMeta.label} antes de iniciar a sessão.`,
+        `Use a ação de avanço ou retorno antes de iniciar uma sessão na etapa ${stage}.`,
         409,
       );
     }
 
     const canonicalRepoPath = realpathSync(input.repoPath);
     if (flowDetails && canonicalRepoPath !== realpathSync(flowDetails.flow.target.repoPath)) {
-      const stageLabel = isRestrictedStage ? RESTRICTED_RUNNER_STAGE_CONFIG[stage].label : stage;
+      const stageLabel = isRestrictedRunnerStage(stage)
+        ? RESTRICTED_RUNNER_STAGE_CONFIG[stage].label
+        : stage;
       throw new SessionManagerError(
         'INVALID_REPO_PATH',
         `Use o repositório de destino do fluxo para executar ${stageLabel}.`,
@@ -707,6 +716,7 @@ export class SessionManager {
 
       this.#startingFlowIds.add(flowId);
       try {
+        this.#factoryFlowService.assertStageHandoff(flowDetails, stage);
         const preparedWorktree = await this.#ensureFactoryFlowWorktree(
           flowDetails,
           canonicalRepoPath,
@@ -969,9 +979,14 @@ export class SessionManager {
         );
       } else if (stage === 'planning' && flowDetails) {
         const triageArtifact = getReadyFactoryStageArtifact(flowDetails, 'triage');
-        if (triageArtifact) {
-          understanding = await readFactoryStageDocument('triage', triageArtifact.path);
+        if (!triageArtifact) {
+          throw new SessionManagerError(
+            'FACTORY_STAGE_CONFLICT',
+            'Conclua a Triagem com a especificação salva antes de iniciar o Planejamento.',
+            409,
+          );
         }
+        understanding = await readFactoryStageDocument('triage', triageArtifact.path);
       }
     } catch (error) {
       if (error instanceof FactoryStageArtifactError) {
@@ -986,12 +1001,12 @@ export class SessionManager {
       }
       throw error;
     }
-    if (isRestrictedRunnerStage(stage) && flowDetails) {
+    if (flowDetails) {
       const current = this.#factoryFlowService?.getFlow(flowDetails.flow.id).flow;
       if (!current || isFinalFactoryFlowState(current.state) || current.currentStage !== stage) {
         throw new SessionManagerError(
           'FACTORY_STAGE_CONFLICT',
-          `O fluxo mudou enquanto os artefatos eram preparados para ${RESTRICTED_RUNNER_STAGE_CONFIG[stage].label}.`,
+          `O fluxo mudou enquanto os artefatos eram preparados para a etapa ${stage}.`,
           409,
         );
       }
@@ -1243,6 +1258,12 @@ export class SessionManager {
         return;
       }
       const detail = error instanceof Error ? error.message : 'Falha desconhecida';
+      if (
+        error instanceof FactoryFlowServiceError && error.code === 'FACTORY_FLOW_INVALID_CONTRACT'
+      ) {
+        session.error = detail;
+        broadcast(session, { type: 'error', message: detail });
+      }
       if (current.state === 'running') {
         const fallback = await this.#factoryFlowService.transitionFlow(flowId, {
           to: 'waiting_action',
@@ -1525,6 +1546,7 @@ export class SessionManager {
             `Processo PTY encerrado com código ${exitCode}.`,
             true,
           );
+    let contractError: FactoryFlowError | null = null;
     if (session.historyState === 'saved') {
       await this.#registerFactorySessionReport(session, activeFactory, 'ready', null);
     } else if (failureError) {
@@ -1535,10 +1557,13 @@ export class SessionManager {
         (isRestrictedRunnerStage(stage)
           ? RESTRICTED_RUNNER_STAGE_CONFIG[stage].incompleteArtifactError
           : 'O processo PTY encerrou sem salvar o artefato final da etapa.');
-      await this.#registerFactorySessionReport(session, activeFactory, 'incomplete', {
-        ...buildFactoryFlowError(artifactError?.code ?? 'FACTORY_ARTIFACT_INCOMPLETE', message, true),
-        ...(artifactError?.issues.length ? { issues: artifactError.issues } : {}),
-      });
+      contractError = buildFactoryFlowError(
+        artifactError?.code ?? 'FACTORY_ARTIFACT_INCOMPLETE',
+        message,
+        true,
+        artifactError?.issues,
+      );
+      await this.#registerFactorySessionReport(session, activeFactory, 'incomplete', contractError);
     }
 
     if (!failureError) {
@@ -1716,18 +1741,40 @@ export class SessionManager {
         }
       }
 
-      const nextState =
-        session.historyState === 'saved' && getNextFactoryStage(stage) === null
-          ? 'completed'
-          : 'waiting_action';
-      const transitioned = await this.#factoryFlowService.transitionFlow(flowId, {
-        to: nextState,
+      let transitioned: TransitionFactoryFlowResponse | undefined;
+      if (session.historyState === 'saved' && stage === 'pr') {
+        try {
+          transitioned = await this.#factoryFlowService.transitionFlow(flowId, {
+            to: 'completed',
+            stage,
+            reason: 'Etapa final de PR concluída com artefatos validados',
+            currentSessionId: null,
+          });
+        } catch (error) {
+          if (
+            !(error instanceof FactoryFlowServiceError) ||
+            (error.code !== 'FACTORY_FLOW_INVALID_CONTRACT' &&
+              error.code !== 'FACTORY_FLOW_INVALID_STAGE_ADVANCE')
+          ) {
+            throw error;
+          }
+          const cause = error.cause;
+          contractError = buildFactoryFlowError(
+            cause instanceof FactoryStageArtifactError ? cause.code : error.code,
+            error.message,
+            true,
+            cause instanceof FactoryStageArtifactError ? cause.issues : undefined,
+          );
+          session.error = error.message;
+          broadcast(session, { type: 'error', message: error.message });
+        }
+      }
+      transitioned ??= await this.#factoryFlowService.transitionFlow(flowId, {
+        to: 'waiting_action',
         stage,
-        reason:
-          nextState === 'completed'
-            ? `Etapa final ${stage} concluída com artefato salvo`
-            : `Sessão da etapa ${stage} finalizada com código 0`,
+        reason: contractError?.message ?? `Sessão da etapa ${stage} finalizada com código 0`,
         currentSessionId: null,
+        error: contractError,
       });
 
       this.#emitEvent({

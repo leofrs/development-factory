@@ -11,12 +11,18 @@ import {
   FactoryFlowDetailsSchema,
 } from '@development-factory/shared';
 import { FactoryFlowService, FactoryFlowServiceError } from '../src/factory-flow-service.js';
+import { getFactoryStageSidecarPath } from '../src/factory-stage-runners.js';
 import {
   REVIEW_MIGRATIONS,
   ReviewStorageError,
   SqliteFactoryFlowRepository,
   runMigrations,
 } from '../src/storage/index.js';
+import {
+  planningMarkdown,
+  triageMarkdown,
+  writeFactoryStageSidecar,
+} from './fixtures/factory-stage-artifacts.js';
 
 function createTempDbPath(): { dir: string; dbPath: string } {
   const dir = mkdtempSync(join(tmpdir(), 'df-factory-storage-'));
@@ -174,6 +180,7 @@ test('FactoryFlowService garante idempotência na criação e rejeita conflitos'
 });
 
 test('FactoryFlowService valida transições de estado, avanço sequencial de etapas e concorrência otimista', async () => {
+  const artifactsDir = mkdtempSync(join(tmpdir(), 'df-factory-advance-'));
   const repo = SqliteFactoryFlowRepository.open({ dbPath: ':memory:' });
   try {
     const service = new FactoryFlowService(repo, { now: createClock() });
@@ -216,6 +223,37 @@ test('FactoryFlowService valida transições de estado, avanço sequencial de et
         error.statusCode === 409,
     );
 
+    const specPath = join(artifactsDir, 'spec.md');
+    writeFileSync(specPath, triageMarkdown('Triagem concluída.'));
+    await service.registerArtifact(created.flow.id, {
+      stage: 'triage',
+      kind: 'specification',
+      path: specPath,
+      status: 'ready',
+    });
+    const paused = await service.transitionFlow(created.flow.id, {
+      to: 'waiting_action',
+      reason: 'Triagem encerrada',
+    });
+    await assert.rejects(
+      () => service.advanceStage(created.flow.id),
+      (error: unknown) =>
+        error instanceof FactoryFlowServiceError &&
+        error.code === 'FACTORY_FLOW_INVALID_CONTRACT' &&
+        /sidecar JSON está ausente/.test(error.message),
+    );
+    assert.deepEqual(service.getFlow(created.flow.id).flow, paused.flow);
+
+    writeFactoryStageSidecar(specPath, 'triage');
+    writeFileSync(specPath, '# Triagem sem seções obrigatórias\n');
+    await assert.rejects(
+      () => service.advanceStage(created.flow.id),
+      (error: unknown) =>
+        error instanceof FactoryFlowServiceError &&
+        error.code === 'FACTORY_FLOW_INVALID_CONTRACT' &&
+        /título e as seções obrigatórias/.test(error.message),
+    );
+    writeFileSync(specPath, triageMarkdown('Triagem concluída.'));
     const advanced = await service.advanceStage(created.flow.id);
     assert.equal(advanced.flow.currentStage, 'planning');
 
@@ -249,6 +287,7 @@ test('FactoryFlowService valida transições de estado, avanço sequencial de et
     assert.equal(details.stages.find(stage => stage.name === 'development')?.state, 'pending');
   } finally {
     repo.close();
+    rmSync(artifactsDir, { recursive: true, force: true });
   }
 });
 
@@ -379,10 +418,30 @@ test('FactoryFlowService valida retorno de review para development/tests e reini
     const planPath = join(artifactsDir, 'plan.md');
     const devPath = join(artifactsDir, 'dev.md');
     const testsPath = join(artifactsDir, 'tests.md');
-    writeFileSync(specPath, '# Spec\n');
-    writeFileSync(planPath, '# Plan\n');
-    writeFileSync(devPath, '# Dev\n');
-    writeFileSync(testsPath, '# Tests\n');
+    writeFileSync(specPath, triageMarkdown('Escopo definido.'));
+    writeFactoryStageSidecar(specPath, 'triage');
+    writeFileSync(planPath, planningMarkdown('Ajustar o fluxo.'));
+    writeFactoryStageSidecar(planPath, 'planning');
+    writeFileSync(devPath, [
+      '# Relatório de Implementação',
+      '## Arquivos alterados',
+      '- src/feature.ts',
+      '## Resumo das mudanças',
+      'Fluxo ajustado.',
+      '## Status dos passos do plano',
+      '| Ajustar o fluxo | Concluído | Implementado |',
+    ].join('\n'));
+    writeFactoryStageSidecar(devPath, 'development');
+    writeFileSync(testsPath, [
+      '# Relatório de Testes',
+      '## Arquivos de teste alterados',
+      '- test/feature.test.ts',
+      '## Comandos executados',
+      '- npm test',
+      '## Resultados e cobertura',
+      'Testes aprovados.',
+    ].join('\n'));
+    writeFactoryStageSidecar(testsPath, 'tests');
 
     await service.transitionFlow(created.flow.id, { to: 'running', reason: 'Triagem iniciada' });
     await service.registerArtifact(created.flow.id, {
@@ -391,6 +450,7 @@ test('FactoryFlowService valida retorno de review para development/tests e reini
       path: specPath,
       status: 'ready',
     });
+    await service.transitionFlow(created.flow.id, { to: 'waiting_action', reason: 'Triagem encerrada' });
     await service.advanceStage(created.flow.id);
     await service.registerArtifact(created.flow.id, {
       stage: 'planning',
@@ -398,6 +458,7 @@ test('FactoryFlowService valida retorno de review para development/tests e reini
       path: planPath,
       status: 'ready',
     });
+    await service.transitionFlow(created.flow.id, { to: 'waiting_action', reason: 'Plano encerrado' });
 
     await service.advanceStage(created.flow.id, { approvedNotes: 'Notas dev' });
     assert.equal(service.getFlow(created.flow.id).flow.iteration, 1);
@@ -421,6 +482,17 @@ test('FactoryFlowService valida retorno de review para development/tests e reini
     assert.equal(beforeReturn.flow.currentStage, 'review');
     assert.equal(beforeReturn.flow.state, 'waiting_action');
     assert.equal(beforeReturn.flow.iteration, 1);
+
+    writeFileSync(getFactoryStageSidecarPath(planPath), '{');
+    await assert.rejects(
+      () => service.returnStage(created.flow.id, { targetStage: 'development' }),
+      (error: unknown) =>
+        error instanceof FactoryFlowServiceError &&
+        error.code === 'FACTORY_FLOW_INVALID_CONTRACT' &&
+        /sidecar contém JSON inválido/.test(error.message),
+    );
+    assert.deepEqual(service.getFlow(created.flow.id).flow, beforeReturn.flow);
+    writeFactoryStageSidecar(planPath, 'planning');
 
     const returned = await service.returnStage(created.flow.id, {
       targetStage: 'development',
