@@ -8,6 +8,7 @@ const id = z.string().uuid();
 const timestamp = z.iso.datetime();
 const text = z.string().trim().min(1);
 const time = (value: string): number => Date.parse(value);
+const jiraKeyPattern = /^[A-Z][A-Z0-9_]*-\d+$/i;
 const approvedNotesSchema = text
   .max(FACTORY_APPROVED_NOTES_MAX_LENGTH)
   .refine(value => !value.includes('\0'), 'Notas inválidas');
@@ -264,7 +265,7 @@ function validateFactoryTaskValue(
     return;
   }
 
-  if (value.inputType === 'jira_key' && !/^[A-Z][A-Z0-9_]*-\d+$/i.test(value.value)) {
+  if (value.inputType === 'jira_key' && !jiraKeyPattern.test(value.value)) {
     ctx.addIssue({
       code: 'custom',
       path: ['value'],
@@ -424,6 +425,125 @@ export const FactoryFlowArtifactSchema = z
     }
   });
 export type FactoryFlowArtifact = z.infer<typeof FactoryFlowArtifactSchema>;
+
+export const FACTORY_STAGE_SIDECAR_CONTRACT_VERSION = 1 as const;
+const sidecarVersion = z.literal(FACTORY_STAGE_SIDECAR_CONTRACT_VERSION);
+
+const sidecarFilePathSchema = manifestSingleLineSchema
+  .trim()
+  .min(1, 'Informe um caminho de arquivo')
+  .refine(isRepositoryRelativePath, 'Use um caminho relativo com / e sem segmentos ".."');
+
+export const FactoryTriageSidecarSchema = z.strictObject({
+  contractVersion: sidecarVersion,
+  stage: z.literal('triage'),
+  acceptanceCriteria: z
+    .array(z.strictObject({ id: text, description: text }))
+    .refine(
+      criteria => new Set(criteria.map(criterion => criterion.id)).size === criteria.length,
+      'Os IDs dos critérios de aceite devem ser únicos',
+    ),
+  negativeScope: z.array(text),
+  blockers: z.array(text),
+  jiraContext: z
+    .strictObject({
+      key: text.regex(jiraKeyPattern, 'Informe uma chave JIRA válida, como PROD-1234'),
+      url: z
+        .url({
+          protocol: /^https?$/,
+          error: 'Informe uma URL HTTP ou HTTPS válida da tarefa no JIRA',
+        })
+        .nullable(),
+    })
+    .nullable(),
+  technicalContext: text,
+});
+export type FactoryTriageSidecar = z.infer<typeof FactoryTriageSidecarSchema>;
+
+const pendingDecisionSchema = z
+  .strictObject({
+    question: text,
+    options: z.array(text).min(2),
+    recommendedOption: text,
+  })
+  .refine(decision => decision.options.includes(decision.recommendedOption), {
+    path: ['recommendedOption'],
+    message: 'A recomendação deve corresponder a uma das opções',
+  });
+
+export const FactoryPlanningSidecarSchema = z.strictObject({
+  contractVersion: sidecarVersion,
+  stage: z.literal('planning'),
+  pendingDecisions: z.array(pendingDecisionSchema),
+  plannedFiles: z.array(sidecarFilePathSchema),
+  testPlan: z.array(text),
+});
+export type FactoryPlanningSidecar = z.infer<typeof FactoryPlanningSidecarSchema>;
+
+export const FactoryDevelopmentSidecarSchema = z.strictObject({
+  contractVersion: sidecarVersion,
+  stage: z.literal('development'),
+  changedFiles: z.array(sidecarFilePathSchema),
+  summary: text,
+  deviations: z.array(z.strictObject({ description: text, justification: text })),
+});
+export type FactoryDevelopmentSidecar = z.infer<typeof FactoryDevelopmentSidecarSchema>;
+
+const coveragePercentSchema = z.number().min(0).max(100);
+
+export const FactoryTestsSidecarSchema = z.strictObject({
+  contractVersion: sidecarVersion,
+  stage: z.literal('tests'),
+  executedCommands: z.array(
+    z.strictObject({
+      command: z.tuple([text], z.string()),
+      exitCode: z.number().int().nonnegative().nullable(),
+    }),
+  ),
+  testCases: z.array(
+    z.strictObject({
+      id: text,
+      description: text,
+      acceptanceCriteriaIds: z.array(text).min(1),
+      status: z.enum(['passed', 'failed', 'skipped']),
+    }),
+  ),
+  status: z.enum(['passed', 'failed', 'not_run']),
+  coverage: z
+    .strictObject({
+      linesPercent: coveragePercentSchema,
+      branchesPercent: coveragePercentSchema.nullable(),
+    })
+    .nullable(),
+});
+export type FactoryTestsSidecar = z.infer<typeof FactoryTestsSidecarSchema>;
+
+export const FactoryReviewSidecarSchema = z.strictObject({
+  contractVersion: sidecarVersion,
+  stage: z.literal('review'),
+  verdict: FactoryReviewVerdictSchema,
+  findings: z.array(
+    z.strictObject({
+      severity: z.enum(['BLOQUEANTE', 'SUGESTÃO', 'NIT']),
+      file: sidecarFilePathSchema,
+      line: z.number().int().positive(),
+      explanation: text,
+    }),
+  ),
+});
+export type FactoryReviewSidecar = z.infer<typeof FactoryReviewSidecarSchema>;
+
+export const FactoryPrSidecarSchema = z.strictObject({
+  contractVersion: sidecarVersion,
+  stage: z.literal('pr'),
+  title: text,
+  summary: text,
+  baseBranch: GitBranchNameSchema,
+  headBranch: GitBranchNameSchema,
+  satisfiedAcceptanceCriteriaIds: z.array(text),
+  evidence: z.array(text),
+});
+export type FactoryPrSidecar = z.infer<typeof FactoryPrSidecarSchema>;
 
 export const FactoryFlowCheckpointSchema = z.strictObject({
   contractVersion: version,

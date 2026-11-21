@@ -1,0 +1,234 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import {
+  FACTORY_STAGE_SIDECAR_CONTRACT_VERSION,
+  FactoryDevelopmentSidecarSchema,
+  FactoryPlanningSidecarSchema,
+  FactoryPrSidecarSchema,
+  FactoryReviewSidecarSchema,
+  FactoryTestsSidecarSchema,
+  FactoryTriageSidecarSchema,
+} from '@development-factory/shared';
+import type {
+  FactoryDevelopmentSidecar,
+  FactoryPlanningSidecar,
+  FactoryPrSidecar,
+  FactoryReviewSidecar,
+  FactoryTestsSidecar,
+  FactoryTriageSidecar,
+} from '@development-factory/shared';
+
+const contractVersion = FACTORY_STAGE_SIDECAR_CONTRACT_VERSION;
+const file = 'src/factory.ts';
+const criterion = { id: 'CA-1', description: 'Rejeitar artefatos com campos desconhecidos' };
+const jiraContext = { key: 'DEV-42', url: 'https://empresa.atlassian.net/browse/DEV-42' };
+const decision = {
+  question: 'Qual formato usar para o artefato estruturado?',
+  options: ['JSON', 'YAML'],
+  recommendedOption: 'JSON',
+};
+const deviation = {
+  description: 'Mover o contrato para o pacote compartilhado',
+  justification: 'O servidor e a interface precisam ler o mesmo formato',
+};
+const command: FactoryTestsSidecar['executedCommands'][number] = {
+  command: ['npm', 'test'],
+  exitCode: 0,
+};
+const testCase: FactoryTestsSidecar['testCases'][number] = {
+  id: 'T-1',
+  description: 'Enviar um artefato com propriedade extra',
+  acceptanceCriteriaIds: [criterion.id],
+  status: 'passed',
+};
+const coverage = { linesPercent: 98.5, branchesPercent: 95 };
+const finding: FactoryReviewSidecar['findings'][number] = {
+  severity: 'SUGESTÃO',
+  file,
+  line: 42,
+  explanation: 'Usar a mesma descrição do critério no relatório Markdown',
+};
+
+const triage: FactoryTriageSidecar = {
+  contractVersion,
+  stage: 'triage',
+  acceptanceCriteria: [criterion],
+  negativeScope: ['Alterações na persistência'],
+  blockers: [],
+  jiraContext,
+  technicalContext: 'A Factory utiliza schemas Zod para validar dados compartilhados',
+};
+const planning: FactoryPlanningSidecar = {
+  contractVersion,
+  stage: 'planning',
+  pendingDecisions: [decision],
+  plannedFiles: [file],
+  testPlan: ['Validar a rejeição de campos desconhecidos no CA-1'],
+};
+const development: FactoryDevelopmentSidecar = {
+  contractVersion,
+  stage: 'development',
+  changedFiles: [file],
+  summary: 'Adicionados contratos estritos para os sidecars',
+  deviations: [deviation],
+};
+const tests: FactoryTestsSidecar = {
+  contractVersion,
+  stage: 'tests',
+  executedCommands: [command],
+  testCases: [testCase],
+  status: 'passed',
+  coverage,
+};
+const review: FactoryReviewSidecar = {
+  contractVersion,
+  stage: 'review',
+  verdict: 'approved_with_warnings',
+  findings: [finding],
+};
+const pr: FactoryPrSidecar = {
+  contractVersion,
+  stage: 'pr',
+  title: 'Validação de artefatos da Factory',
+  summary: 'Adiciona contratos JSON para os seis blocos',
+  baseBranch: 'main',
+  headBranch: 'factory/dev-42',
+  satisfiedAcceptanceCriteriaIds: [criterion.id],
+  evidence: ['O teste T-1 passou na execução de npm test'],
+};
+
+const contracts = [
+  { schema: FactoryTriageSidecarSchema, payload: triage },
+  { schema: FactoryPlanningSidecarSchema, payload: planning },
+  { schema: FactoryDevelopmentSidecarSchema, payload: development },
+  { schema: FactoryTestsSidecarSchema, payload: tests },
+  { schema: FactoryReviewSidecarSchema, payload: review },
+  { schema: FactoryPrSidecarSchema, payload: pr },
+];
+
+for (const { schema, payload } of contracts) {
+  test(`valida o contrato versionado do sidecar de ${payload.stage}`, () => {
+    assert.deepEqual(schema.parse(payload), payload);
+
+    for (const field of Object.keys(payload)) {
+      const incomplete: Record<string, unknown> = { ...payload };
+      delete incomplete[field];
+      assert.equal(schema.safeParse(incomplete).success, false, `Campo obrigatório: ${field}`);
+    }
+
+    const wrongStage = payload.stage === 'triage' ? 'planning' : 'triage';
+    const wrongVersion = contractVersion + 1;
+    assert.equal(schema.safeParse({ ...payload, stage: wrongStage }).success, false);
+    assert.equal(schema.safeParse({ ...payload, contractVersion: wrongVersion }).success, false);
+    assert.equal(schema.safeParse({ ...payload, extra: true }).success, false);
+  });
+}
+
+test('rejeita propriedades desconhecidas nos objetos internos dos sidecars', () => {
+  const inputs = [
+    [
+      FactoryTriageSidecarSchema,
+      { ...triage, acceptanceCriteria: [{ ...criterion, extra: true }] },
+    ],
+    [FactoryTriageSidecarSchema, { ...triage, jiraContext: { ...jiraContext, extra: true } }],
+    [
+      FactoryPlanningSidecarSchema,
+      { ...planning, pendingDecisions: [{ ...decision, extra: true }] },
+    ],
+    [
+      FactoryDevelopmentSidecarSchema,
+      { ...development, deviations: [{ ...deviation, extra: true }] },
+    ],
+    [FactoryTestsSidecarSchema, { ...tests, executedCommands: [{ ...command, extra: true }] }],
+    [FactoryTestsSidecarSchema, { ...tests, testCases: [{ ...testCase, extra: true }] }],
+    [FactoryTestsSidecarSchema, { ...tests, coverage: { ...coverage, extra: true } }],
+    [FactoryReviewSidecarSchema, { ...review, findings: [{ ...finding, extra: true }] }],
+  ] as const;
+
+  for (const [schema, payload] of inputs) {
+    const result = schema.safeParse(payload);
+    assert.ok(!result.success);
+    assert.equal(result.error.issues[0]?.code, 'unrecognized_keys');
+  }
+});
+
+test('valida o contexto Jira e a unicidade dos identificadores dos critérios de aceite', () => {
+  const withoutJira = { ...triage, jiraContext: null };
+  assert.deepEqual(FactoryTriageSidecarSchema.parse(withoutJira), withoutJira);
+  assert.equal(
+    FactoryTriageSidecarSchema.safeParse({
+      ...triage,
+      jiraContext: { ...jiraContext, url: 'ftp://empresa.atlassian.net/browse/DEV-42' },
+    }).success,
+    false,
+  );
+  assert.equal(
+    FactoryTriageSidecarSchema.safeParse({ ...triage, acceptanceCriteria: [criterion, criterion] })
+      .success,
+    false,
+  );
+});
+
+test('exige uma opção recomendada válida, caminhos relativos e justificativas para desvios', () => {
+  const invalidRecommendation = FactoryPlanningSidecarSchema.safeParse({
+    ...planning,
+    pendingDecisions: [{ ...decision, recommendedOption: 'XML' }],
+  });
+  assert.ok(!invalidRecommendation.success);
+  assert.deepEqual(invalidRecommendation.error.issues[0]?.path, [
+    'pendingDecisions',
+    0,
+    'recommendedOption',
+  ]);
+  assert.equal(
+    FactoryPlanningSidecarSchema.safeParse({ ...planning, plannedFiles: ['/tmp/file.ts'] }).success,
+    false,
+  );
+  assert.equal(
+    FactoryDevelopmentSidecarSchema.safeParse({ ...development, changedFiles: ['../file.ts'] })
+      .success,
+    false,
+  );
+  assert.equal(
+    FactoryDevelopmentSidecarSchema.safeParse({
+      ...development,
+      deviations: [{ description: deviation.description }],
+    }).success,
+    false,
+  );
+});
+
+test('valida comandos, status, critérios de aceite e cobertura dos testes', () => {
+  const invalidPayloads = [
+    { ...tests, executedCommands: [{ ...command, command: [] }] },
+    { ...tests, executedCommands: [{ ...command, exitCode: -1 }] },
+    { ...tests, testCases: [{ ...testCase, acceptanceCriteriaIds: [] }] },
+    { ...tests, testCases: [{ ...testCase, status: 'unknown' }] },
+    { ...tests, status: 'unknown' },
+    { ...tests, coverage: { ...coverage, linesPercent: 101 } },
+  ];
+  for (const payload of invalidPayloads) {
+    assert.equal(FactoryTestsSidecarSchema.safeParse(payload).success, false);
+  }
+
+  const withoutCoverage: FactoryTestsSidecar = { ...tests, coverage: null };
+  assert.deepEqual(FactoryTestsSidecarSchema.parse(withoutCoverage), withoutCoverage);
+});
+
+test('valida vereditos, severidades e linhas em findings de revisão', () => {
+  const invalidPayloads = [
+    { ...review, verdict: 'unknown' },
+    { ...review, findings: [{ ...finding, severity: 'CRÍTICO' }] },
+    { ...review, findings: [{ ...finding, line: 0 }] },
+  ];
+  for (const payload of invalidPayloads) {
+    assert.equal(FactoryReviewSidecarSchema.safeParse(payload).success, false);
+  }
+});
+
+test('rejeita referências de branches inválidas nos metadados de PR', () => {
+  const invalidBase = { ...pr, baseBranch: 'release..main' };
+  const invalidHead = { ...pr, headBranch: 'bad branch' };
+  assert.equal(FactoryPrSidecarSchema.safeParse(invalidBase).success, false);
+  assert.equal(FactoryPrSidecarSchema.safeParse(invalidHead).success, false);
+});
