@@ -10,6 +10,7 @@ import { loadFactoryRepositoryProfile } from '../src/factory-repository-profile.
 const defaultProfile: FactoryRepositoryProfile = {
   baseBranch: null,
   branchPattern: 'factory/{slug}',
+  stack: [],
   commands: {
     typecheck: null,
     lint: null,
@@ -35,6 +36,7 @@ test('carrega o perfil completo da raiz do repositório', async context => {
   const profile: FactoryRepositoryProfile = {
     baseBranch: 'release/atual',
     branchPattern: 'feat/{slug}-factory',
+    stack: ['TypeScript', 'Node.js'],
     commands: {
       typecheck: ['npm', 'run', 'typecheck'],
       lint: ['npm', 'run', 'lint'],
@@ -92,6 +94,7 @@ test('identifica os campos e motivos dos erros de validação do perfil', async 
     { input: [], diagnostic: /raiz do manifesto \(Informe um objeto JSON\)/ },
     { input: { baseBranch: 'release/.tmp' }, diagnostic: /baseBranch .*branch Git válido/ },
     { input: { branchPattern: 'feat/{chave}' }, diagnostic: /branchPattern .*marcador \{slug\}/ },
+    { input: { stack: [' '] }, diagnostic: /stack\.0 .*item da stack/ },
     { input: { commands: { test: 'npm test' } }, diagnostic: /commands\.test .*executável/ },
     { input: { commands: { test: [] } }, diagnostic: /commands\.test\.0 .*executável/ },
     { input: { commands: { build: ['npm'] } }, diagnostic: /commands .*Campos desconhecidos.*build/ },

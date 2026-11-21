@@ -2,13 +2,19 @@ import { execFile } from 'node:child_process';
 import { chmodSync, existsSync, lstatSync, realpathSync, rmSync } from 'node:fs';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
-import type { FactoryFlowTarget, FactoryStageName } from '@development-factory/shared';
+import { GitBranchNameSchema } from '@development-factory/shared';
+import type {
+  FactoryFlowTarget,
+  FactoryRepositoryProfile,
+  FactoryStageName,
+} from '@development-factory/shared';
 import {
   FactoryArtifactDestinationError,
   assertExternalManagedWorktree,
   defaultFactoryWorktreesDirectory,
   resolveFactoryWorktreePath,
 } from './artifacts.js';
+import { loadFactoryRepositoryProfile } from './factory-repository-profile.js';
 
 const execFileAsync = promisify(execFile);
 const GIT_COMMAND_TIMEOUT_MS = 15_000;
@@ -48,6 +54,7 @@ export interface ProvisionedFactoryWorktree {
   readonly branchName: string;
   readonly baseBranch: string;
   readonly repoRoot: string;
+  readonly repositoryProfile: FactoryRepositoryProfile;
 }
 
 export interface VerifyFactoryWorktreeOptions {
@@ -212,26 +219,28 @@ async function resolveUniqueBranchName(
   repoRoot: string,
   target: Pick<FactoryFlowTarget, 'inputType' | 'value'>,
   flowId: string,
+  branchPattern: string,
 ): Promise<string> {
   const baseSlug = buildFactoryBranchSlug(target, flowId);
-  const candidates = [
-    `factory/${baseSlug}`,
-    `factory/${baseSlug}-${flowId.slice(0, 8)}`,
-  ];
+  const uniqueSlug = `${baseSlug}-${flowId.slice(0, 8)}`;
 
-  for (const candidate of candidates) {
-    if (!(await gitRefExists(repoRoot, `refs/heads/${candidate}`))) {
-      await runGit(repoRoot, ['check-ref-format', '--branch', candidate]);
-      return candidate;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const slug = attempt === 0 ? baseSlug : uniqueSlug;
+    const suffix = attempt > 1 ? `-${attempt}` : '';
+    const candidate = branchPattern.replaceAll('{slug}', `${slug}${suffix}`);
+    if (await gitRefExists(repoRoot, `refs/heads/${candidate}`)) {
+      continue;
     }
-  }
-
-  for (let suffix = 2; suffix < 100; suffix += 1) {
-    const candidate = `factory/${baseSlug}-${flowId.slice(0, 8)}-${suffix}`;
-    if (!(await gitRefExists(repoRoot, `refs/heads/${candidate}`))) {
-      await runGit(repoRoot, ['check-ref-format', '--branch', candidate]);
-      return candidate;
+    if (
+      !GitBranchNameSchema.safeParse(candidate).success ||
+      (await tryRunGit(repoRoot, ['check-ref-format', '--branch', candidate])) === null
+    ) {
+      throw new FactoryWorktreeError(
+        'WORKTREE_PROVISION_FAILED',
+        'O branchPattern do perfil gerou um nome de branch Git inválido para a tarefa.',
+      );
     }
+    return candidate;
   }
 
   throw new FactoryWorktreeError(
@@ -336,7 +345,7 @@ async function resolveBaseBranchRef(
   }
 }
 
-async function resolveValidGitRepoRoot(repoPath: string): Promise<string> {
+export async function resolveValidGitRepoRoot(repoPath: string): Promise<string> {
   let repoTopLevel: string;
   try {
     repoTopLevel = await runGit(repoPath, ['rev-parse', '--show-toplevel']);
@@ -371,15 +380,18 @@ function cleanupOrphanWorktreeDirectory(worktreePath: string): void {
 
 /**
  * Provisiona um `git worktree` isolado em diretório externo gerenciado (`worktrees/<flowId>`)
- * com uma branch dedicada (`factory/<jira-key-ou-slug>`) a partir da branch base escolhida.
+ * com uma branch dedicada segundo o perfil do repositório e a branch base escolhida.
  * Em caso de falha, limpa qualquer diretório ou referência órfã antes de propagar o erro.
  */
 export async function provisionFactoryWorktree(
   options: ProvisionFactoryWorktreeOptions,
 ): Promise<ProvisionedFactoryWorktree> {
+  const repoRoot = await resolveValidGitRepoRoot(options.repoPath);
+  const { profile: repositoryProfile } = await loadFactoryRepositoryProfile(repoRoot);
+
   let targetLocation: { worktreesRoot: string; worktreePath: string };
   try {
-    targetLocation = resolveFactoryWorktreePath(options.repoPath, options.flowId);
+    targetLocation = resolveFactoryWorktreePath(repoRoot, options.flowId);
   } catch (error) {
     const message =
       error instanceof FactoryArtifactDestinationError
@@ -387,8 +399,6 @@ export async function provisionFactoryWorktree(
         : 'Não foi possível preparar o caminho do worktree da Factory.';
     throw new FactoryWorktreeError('WORKTREE_PROVISION_FAILED', message, { cause: error });
   }
-
-  const repoRoot = await resolveValidGitRepoRoot(options.repoPath);
 
   return withRepoWorktreeLock(repoRoot, async () => {
     const existingEntry = lstatSync(targetLocation.worktreePath, { throwIfNoEntry: false });
@@ -399,8 +409,16 @@ export async function provisionFactoryWorktree(
       );
     }
 
-    const { baseBranch, baseRef } = await resolveBaseBranchRef(repoRoot, options.baseBranch);
-    const branchName = await resolveUniqueBranchName(repoRoot, options.target, options.flowId);
+    const { baseBranch, baseRef } = await resolveBaseBranchRef(
+      repoRoot,
+      options.baseBranch ?? repositoryProfile.baseBranch,
+    );
+    const branchName = await resolveUniqueBranchName(
+      repoRoot,
+      options.target,
+      options.flowId,
+      repositoryProfile.branchPattern,
+    );
     const branchExistedBefore = await gitRefExists(repoRoot, `refs/heads/${branchName}`);
 
     try {
@@ -424,6 +442,7 @@ export async function provisionFactoryWorktree(
       branchName,
       baseBranch,
       repoRoot,
+      repositoryProfile,
     };
   });
 }

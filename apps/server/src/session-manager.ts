@@ -23,10 +23,16 @@ import {
   type ReviewRequest,
   type ServerMessage,
 } from '@development-factory/shared';
+import type { FactoryRepositoryProfile } from '@development-factory/shared';
 import { resolveReviewReportDirectory } from './artifacts.js';
 import { buildDevelopmentRunnerArgs, readFactoryDevelopmentInputs } from './factory-development.js';
 import { FactoryFlowServiceError, type FactoryFlowService } from './factory-flow-service.js';
 import { buildPrRunnerArgs, readFactoryPrInputs } from './factory-pr.js';
+import {
+  FactoryRepositoryProfileError,
+  loadFactoryRepositoryProfile,
+} from './factory-repository-profile.js';
+import type { FactoryRepositoryProfileErrorCode } from './factory-repository-profile.js';
 import { buildReviewRunnerArgs, parseReviewVerdict, readFactoryReviewInputs } from './factory-review.js';
 import { buildReportFileToolPermissions } from './factory-stage-runners.js';
 import { buildTestsRunnerArgs, readFactoryTestsInputs } from './factory-tests.js';
@@ -34,6 +40,7 @@ import {
   FactoryWorktreeError,
   getFactoryWorktreeHeadSha,
   provisionFactoryWorktree,
+  resolveValidGitRepoRoot,
   verifyExistingFactoryWorktree,
 } from './factory-worktree.js';
 import { createFactoryHistory } from './history.js';
@@ -62,7 +69,7 @@ const APP_EVENT_NAME = 'app_event';
 
 export type SessionManagerErrorCode =
   | 'SESSION_NOT_FOUND'
-  | 'INVALID_REPO_PATH'
+  | FactoryRepositoryProfileErrorCode
   | 'INVALID_REPORT_DIRECTORY'
   | 'FACTORY_STAGE_CONFLICT'
   | 'MAX_SESSIONS_REACHED'
@@ -692,12 +699,13 @@ export class SessionManager {
 
       this.#startingFlowIds.add(flowId);
       try {
-        flowDetails = await this.#ensureFactoryFlowWorktree(
+        const preparedWorktree = await this.#ensureFactoryFlowWorktree(
           flowDetails,
           canonicalRepoPath,
           stage,
           input.baseBranch,
         );
+        flowDetails = preparedWorktree.flowDetails;
         if (isRestrictedRunnerStage(stage) && RESTRICTED_RUNNER_STAGE_CONFIG[stage].mutatesRepo) {
           flowDetails = await this.#ensurePreExecutionWorktreeCheckpoint(flowDetails, stage);
         }
@@ -706,13 +714,38 @@ export class SessionManager {
           stage,
           activeFactorySession,
           flowDetails,
+          preparedWorktree.repositoryProfile,
         );
       } finally {
         this.#startingFlowIds.delete(flowId);
       }
     }
 
-    return this.#startFactoryRunner(input, stage, activeFactorySession, flowDetails);
+    let repositoryProfile: FactoryRepositoryProfile | undefined;
+    if (stage === 'planning') {
+      const repoRoot = await resolveValidGitRepoRoot(canonicalRepoPath).catch((error: unknown) => {
+        if (error instanceof FactoryWorktreeError && error.code === 'INVALID_GIT_REPOSITORY') {
+          return canonicalRepoPath;
+        }
+        throw error;
+      });
+      try {
+        const loaded = await loadFactoryRepositoryProfile(repoRoot);
+        repositoryProfile = loaded.profile;
+      } catch (error) {
+        if (error instanceof FactoryRepositoryProfileError) {
+          throw new SessionManagerError(error.code, error.message, 400);
+        }
+        throw error;
+      }
+    }
+    return this.#startFactoryRunner(
+      input,
+      stage,
+      activeFactorySession,
+      flowDetails,
+      repositoryProfile,
+    );
   }
 
   async #ensureFactoryFlowWorktree(
@@ -720,9 +753,9 @@ export class SessionManager {
     repoPath: string,
     stage: FactoryStageName,
     requestedBaseBranch?: string,
-  ): Promise<FactoryFlowDetails> {
+  ): Promise<{ flowDetails: FactoryFlowDetails; repositoryProfile?: FactoryRepositoryProfile }> {
     if (!this.#factoryFlowService) {
-      return flowDetails;
+      return { flowDetails };
     }
 
     const flowId = flowDetails.flow.id;
@@ -732,7 +765,12 @@ export class SessionManager {
           repoPath,
           worktreePath: flowDetails.flow.worktreePath,
         });
-        return flowDetails;
+        if (stage === 'triage' || stage === 'review') {
+          return { flowDetails };
+        }
+        const repoRoot = await resolveValidGitRepoRoot(repoPath);
+        const { profile: repositoryProfile } = await loadFactoryRepositoryProfile(repoRoot);
+        return { flowDetails, repositoryProfile };
       }
 
       const provisioned = await provisionFactoryWorktree({
@@ -746,8 +784,17 @@ export class SessionManager {
         branchName: provisioned.branchName,
         baseBranch: provisioned.baseBranch,
       });
-      return this.#factoryFlowService.getFlow(flowId);
+      return {
+        flowDetails: this.#factoryFlowService.getFlow(flowId),
+        repositoryProfile: provisioned.repositoryProfile,
+      };
     } catch (error) {
+      if (error instanceof FactoryRepositoryProfileError) {
+        if (flowDetails.flow.state === 'queued') {
+          await this.#failFactoryStart(flowId, stage, error.code, error.message);
+        }
+        throw new SessionManagerError(error.code, error.message, 400);
+      }
       if (error instanceof FactoryWorktreeError) {
         if (!isRestrictedRunnerStage(stage) || flowDetails.flow.state === 'queued') {
           await this.#failFactoryStart(flowId, stage, 'FACTORY_WORKTREE_FAILED', error.message);
@@ -858,18 +905,19 @@ export class SessionManager {
     stage: RestrictedRunnerStage,
     flowDetails: FactoryFlowDetails,
     task: string,
+    repositoryProfile?: FactoryRepositoryProfile,
   ): Promise<(reportPath: string) => { prompt: string; runnerArgs: string[] }> {
     if (stage === 'development') {
       const inputs = await readFactoryDevelopmentInputs(flowDetails);
       return reportPath => ({
-        prompt: buildFactoryDevelopmentPrompt({ ...inputs, task, reportPath }),
+        prompt: buildFactoryDevelopmentPrompt({ ...inputs, task, reportPath, repositoryProfile }),
         runnerArgs: buildDevelopmentRunnerArgs(reportPath),
       });
     }
     if (stage === 'tests') {
       const inputs = await readFactoryTestsInputs(flowDetails);
       return reportPath => ({
-        prompt: buildFactoryTestsPrompt({ ...inputs, task, reportPath }),
+        prompt: buildFactoryTestsPrompt({ ...inputs, task, reportPath, repositoryProfile }),
         runnerArgs: buildTestsRunnerArgs(reportPath),
       });
     }
@@ -882,7 +930,14 @@ export class SessionManager {
     }
     const inputs = await readFactoryPrInputs(flowDetails);
     return reportPath => ({
-      prompt: buildFactoryPrPrompt({ ...inputs, task, reportPath }),
+      prompt: buildFactoryPrPrompt({
+        ...inputs,
+        task,
+        reportPath,
+        repositoryProfile,
+        branchName: flowDetails.flow.branchName,
+        baseBranch: flowDetails.flow.baseBranch,
+      }),
       runnerArgs: buildPrRunnerArgs(reportPath),
     });
   }
@@ -892,11 +947,17 @@ export class SessionManager {
     stage: FactoryStageName,
     activeFactorySession?: ActiveFactorySession,
     flowDetails?: FactoryFlowDetails,
+    repositoryProfile?: FactoryRepositoryProfile,
   ): Promise<ManagedSession> {
     let buildRunnerConfig: ((reportPath: string) => { prompt: string; runnerArgs: string[] }) | undefined;
     if (isRestrictedRunnerStage(stage) && flowDetails) {
       try {
-        buildRunnerConfig = await this.#prepareRestrictedRunnerFactory(stage, flowDetails, input.value);
+        buildRunnerConfig = await this.#prepareRestrictedRunnerFactory(
+          stage,
+          flowDetails,
+          input.value,
+          repositoryProfile,
+        );
       } catch {
         throw new SessionManagerError(
           'FACTORY_STAGE_CONFLICT',
@@ -1015,6 +1076,7 @@ export class SessionManager {
         stage,
         factoryHistory.reportPath,
         flowDetails,
+        repositoryProfile,
       );
       runnerArgs = ['--allowedTools', buildFactoryAllowedTools(stage, factoryHistory.reportPath).join(',')];
     }
@@ -1140,6 +1202,7 @@ export class SessionManager {
     stage: FactoryStageName,
     reportPath: string,
     flowDetails?: FactoryFlowDetails,
+    repositoryProfile?: FactoryRepositoryProfile,
   ): Promise<string> {
     if (stage !== 'planning') {
       return buildFactoryPlanPrompt(input.inputType, input.value, reportPath);
@@ -1171,6 +1234,7 @@ export class SessionManager {
       understandingDocument,
       understandingReportPath,
       reportPath,
+      repositoryProfile,
     });
   }
 

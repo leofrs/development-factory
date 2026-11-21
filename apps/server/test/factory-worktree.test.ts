@@ -147,6 +147,50 @@ test('provisionFactoryWorktree cria worktree externo isolado com branch dedicada
   }
 });
 
+test('worktree usa o perfil da raiz Git ao iniciar de um subdiretório', async context => {
+  const env = createTempEnv('df-worktree-profile-');
+  context.after(env.restore);
+  initGitRepoWithCommits(env.repoDir);
+
+  execFileSync('git', ['switch', '-c', 'release/atual'], { cwd: env.repoDir });
+  writeFileSync(join(env.repoDir, 'release.txt'), 'Disponível na branch release.\n');
+  execFileSync('git', ['add', 'release.txt'], { cwd: env.repoDir });
+  execFileSync('git', ['commit', '-m', 'release commit'], { cwd: env.repoDir });
+  execFileSync('git', ['switch', 'main'], { cwd: env.repoDir });
+
+  const subdirectory = join(env.repoDir, 'modulo');
+  mkdirSync(subdirectory);
+  writeFileSync(join(subdirectory, '.development-factory.json'), '{ inválido');
+  writeFileSync(
+    join(env.repoDir, '.development-factory.json'),
+    JSON.stringify({ baseBranch: 'release/atual', branchPattern: 'feat/{slug}-factory' }),
+  );
+
+  const target = { inputType: 'jira_key', value: 'PROD-42' } as const;
+  const first = await provisionFactoryWorktree({
+    repoPath: subdirectory,
+    flowId: randomUUID(),
+    target,
+  });
+  assert.equal(first.baseBranch, 'release/atual');
+  assert.equal(first.branchName, 'feat/prod-42-factory');
+  assert.equal(
+    readFileSync(join(first.worktreePath, 'release.txt'), 'utf8'),
+    'Disponível na branch release.\n',
+  );
+
+  const secondFlowId = randomUUID();
+  const second = await provisionFactoryWorktree({
+    repoPath: subdirectory,
+    flowId: secondFlowId,
+    target,
+    baseBranch: 'main',
+  });
+  assert.equal(second.baseBranch, 'main');
+  assert.equal(second.branchName, `feat/prod-42-${secondFlowId.slice(0, 8)}-factory`);
+  assert.equal(existsSync(join(second.worktreePath, 'release.txt')), false);
+});
+
 test('provisionFactoryWorktree resolve colisão de branch e suporta provisionamento concorrente no mesmo repositório', async () => {
   const env = createTempEnv('df-worktree-concurrent-');
   try {

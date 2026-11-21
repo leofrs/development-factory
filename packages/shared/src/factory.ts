@@ -123,6 +123,11 @@ export const FactoryRepositoryProfileSchema = z.strictObject(
         );
       }, 'Informe um padrão de branch Git válido com o marcador {slug}')
       .default('factory/{slug}'),
+    stack: z
+      .array(manifestSingleLineSchema.trim().min(1, 'Informe um item da stack'), {
+        error: 'Informe uma lista de tecnologias',
+      })
+      .default(() => []),
     commands: manifestCommandsSchema.prefault({}),
     protectedPaths: z
       .array(manifestProtectedPathSchema, { error: 'Informe uma lista de caminhos protegidos' })

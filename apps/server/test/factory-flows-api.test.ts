@@ -511,6 +511,20 @@ test(
     mkdirSync(repoDir);
     mkdirSync(xdgDataHome);
     initGitRepo(repoDir);
+    execFileSync('git', ['branch', 'integration'], { cwd: repoDir });
+    const manifestName = '.development-factory.json';
+    const manifest = {
+      baseBranch: 'integration',
+      branchPattern: 'feat/{slug}-factory',
+      stack: ['Node.js'],
+      commands: { test: ['./scripts/test-integration'] },
+      protectedPaths: ['deploy/**'],
+      architectureRules: ['O domínio depende de interfaces.'],
+      prTemplate: '## Evidências do time\n\n## Plano de reversão',
+    };
+    writeFileSync(join(repoDir, manifestName), JSON.stringify(manifest));
+    execFileSync('git', ['add', manifestName], { cwd: repoDir });
+    execFileSync('git', ['commit', '-m', 'configure factory'], { cwd: repoDir });
 
     const claudeTarget = join(binDir, 'claude');
     copyFileSync(new URL('./fixtures/claude.ts', import.meta.url), claudeTarget);
@@ -621,20 +635,26 @@ test(
     assert.ok(detailsOne.worktreePath && detailsTwo.worktreePath);
     assert.notEqual(detailsOne.worktreePath, detailsTwo.worktreePath);
     assert.notEqual(detailsOne.worktreePath, repoDir);
-    assert.equal(detailsOne.branchName, 'factory/implementar-autenticacao-jwt');
-    assert.equal(detailsTwo.branchName, 'factory/corrigir-paginacao-de-auditoria');
-    assert.equal(detailsOne.baseBranch, 'main');
-    assert.equal(detailsTwo.baseBranch, 'main');
+    assert.equal(detailsOne.branchName, 'feat/implementar-autenticacao-jwt-factory');
+    assert.equal(detailsTwo.branchName, 'feat/corrigir-paginacao-de-auditoria-factory');
+    assert.equal(detailsOne.baseBranch, 'integration');
+    assert.equal(detailsTwo.baseBranch, 'integration');
     assert.equal(existsSync(detailsOne.worktreePath), true);
     assert.equal(existsSync(detailsTwo.worktreePath), true);
+    assert.equal(existsSync(join(detailsOne.worktreePath, manifestName)), false);
 
     const planningSessionOne = detailsOne.flow.currentSessionId;
     const planningSessionTwo = detailsTwo.flow.currentSessionId;
     await waitFor(() => {
       const p1 = sessionManager.getSession(planningSessionOne);
       const p2 = sessionManager.getSession(planningSessionTwo);
-      return Boolean(p1?.buffer.replay().includes('READY:') && p2?.buffer.replay().includes('READY:'));
+      return (
+        /READY:[^\n]*\n/.test(p1?.buffer.replay() ?? '') &&
+        /READY:[^\n]*\n/.test(p2?.buffer.replay() ?? '')
+      );
     });
+    const planningOutput = sessionManager.getSession(planningSessionOne)?.buffer.replay() ?? '';
+    assert.match(planningOutput, /O domínio depende de interfaces\./);
 
     const planPath = sessionManager.getSession(planningSessionOne)?.reportPath;
     assert.ok(planPath);
@@ -729,6 +749,7 @@ test(
     assert.ok(prompt.includes(planPath));
     assert.ok(prompt.includes(approvedNotes));
     assert.ok(prompt.includes(rerun.reportPath));
+    assert.match(prompt, /deploy\/\*\*/);
     assert.doesNotMatch(prompt, /Paginação isolada/);
     assert.ok(args.includes('--restricted'));
     assert.equal(args[args.indexOf('--tools') + 1], 'Read,Glob,Grep,Edit,Write');
@@ -785,6 +806,7 @@ test(
     assert.ok(testsPrompt.includes(specOne.path));
     assert.ok(testsPrompt.includes(planPath));
     assert.ok(testsPrompt.includes(rerun.reportPath));
+    assert.match(testsPrompt, /\.\/scripts\/test-integration/);
     assert.ok(testsSpawn.args.includes('--restricted'));
     assert.equal(testsSpawn.args[testsSpawn.args.indexOf('--tools') + 1], 'Read,Glob,Grep,Edit,Write,Bash');
     assert.match(testsSpawn.args[testsSpawn.args.indexOf('--allowedTools') + 1] ?? '', /Edit\(\*\*\/\*\.test\.\*\)/);
@@ -1038,7 +1060,10 @@ test(
     ).session;
     assert.equal(prSession.stage, 'pr');
     assert.ok(prSession.reportPath);
-    await waitFor(() => Boolean(sessionManager.getSession(prSession.sessionId)?.buffer.replay().includes('READY:')));
+    const runningPr = sessionManager.getSession(prSession.sessionId);
+    assert.ok(runningPr);
+    await waitFor(() => /READY:[^\n]*\n/.test(runningPr.buffer.replay()));
+    assert.match(runningPr.buffer.replay(), /## Evidências do time/);
     writeFileSync(
       prSession.reportPath,
       [
@@ -1048,7 +1073,7 @@ test(
         '## Validação e Evidências',
         'Testes e Code Review aprovados.',
         '## Dados do Pull Request',
-        'Branch feat/jwt -> main.',
+        `Branch ${prPausedDetails.branchName} -> ${prPausedDetails.baseBranch}.`,
         '',
       ].join('\n'),
     );
@@ -1434,7 +1459,7 @@ test(
   },
 );
 
-test('POST /api/factory/flows falha de forma limpa quando baseBranch não existe sem deixar diretórios órfãos', async context => {
+test('API diagnostica branch base inexistente e manifesto inválido', async context => {
   const rootDir = mkdtempSync(join(tmpdir(), 'df-factory-invalid-base-'));
   const binDir = join(rootDir, 'bin');
   const repoDir = join(rootDir, 'repo');
@@ -1500,6 +1525,23 @@ test('POST /api/factory/flows falha de forma limpa quando baseBranch não existe
   assert.equal(listed.flows.length, 1);
   assert.equal(listed.flows[0]?.state, 'failed');
   assert.equal(listed.flows[0]?.worktreePath, null);
+
+  writeFileSync(join(repoDir, '.development-factory.json'), '{"commands":{"test":"npm test"}}');
+  const invalidManifestResponse = await fetch(`${baseUrl}/api/factory/flows`, {
+    method: 'POST',
+    headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      task: { inputType: 'jira_key', value: 'PROD-405', repoPath: repoDir },
+      startSession: true,
+    }),
+  });
+  assert.equal(invalidManifestResponse.status, 400);
+  const invalidManifest = FactoryFlowApiErrorResponseSchema.parse(
+    await invalidManifestResponse.json(),
+  );
+  assert.equal(invalidManifest.error.code, 'FACTORY_FLOW_INVALID_INPUT');
+  assert.match(invalidManifest.error.message, /\.development-factory\.json.*\ncommands\.test/);
+  assert.deepEqual(existsSync(worktreesRoot) ? readdirSync(worktreesRoot) : [], []);
 });
 
 test(

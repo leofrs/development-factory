@@ -14,6 +14,7 @@ import {
   ServerMessageSchema,
   type ServerMessage,
 } from '@development-factory/shared';
+import type { FactoryRepositoryProfile } from '@development-factory/shared';
 import {
   FACTORY_ARCHITECTURE_SYSTEM_PROMPT,
   buildFactoryArchitecturePrompt,
@@ -45,6 +46,7 @@ import {
 } from '../src/prompts/factory-tests.js';
 import { buildDevelopmentRunnerArgs } from '../src/factory-development.js';
 import { buildPrRunnerArgs, isPrSummary } from '../src/factory-pr.js';
+import { loadFactoryRepositoryProfile } from '../src/factory-repository-profile.js';
 import { buildReviewRunnerArgs, isReviewReport, parseReviewVerdict } from '../src/factory-review.js';
 import { buildTestsRunnerArgs, isTestReport } from '../src/factory-tests.js';
 import { createReviewServer } from '../src/server.js';
@@ -149,6 +151,82 @@ test('buildFactoryArchitecturePrompt trata ausência de conteúdo prévio do Blo
     value: 'Ajustar fluxo',
   });
   assert(withoutBlockOne.includes('Nenhum documento prévio do Bloco 1 foi localizado automaticamente.'));
+});
+
+function buildProfilePrompts(repositoryProfile?: FactoryRepositoryProfile) {
+  const common = {
+    task: 'Ajustar integração',
+    understandingReportPath: '/tmp/triagem.md',
+    implementationPlanPath: '/tmp/plano.md',
+    implementationReportPath: '/tmp/desenvolvimento.md',
+    repositoryProfile,
+  };
+  return {
+    planning: buildFactoryArchitecturePrompt({
+      inputType: 'title',
+      value: common.task,
+      understandingReportPath: common.understandingReportPath,
+      reportPath: common.implementationPlanPath,
+      repositoryProfile,
+    }),
+    development: buildFactoryDevelopmentPrompt({ ...common, reportPath: '/tmp/dev.md' }),
+    tests: buildFactoryTestsPrompt({ ...common, reportPath: '/tmp/testes.md' }),
+    pr: buildFactoryPrPrompt({
+      ...common,
+      testReportPath: '/tmp/testes.md',
+      reviewReportPath: '/tmp/revisao.md',
+      reportPath: '/tmp/pr.md',
+    }),
+  };
+}
+
+test('prompts dos Blocos 02, 03, 04 e 06 renderizam o perfil do manifesto', async context => {
+  const repoRoot = await mkdtemp(join(tmpdir(), 'df-prompt-profile-'));
+  context.after(() => rm(repoRoot, { recursive: true, force: true }));
+  const expectedContext = {
+    stack: ['Rust', 'Clippy'],
+    commands: {
+      typecheck: ['cargo', 'check', '--workspace'],
+      lint: ['cargo', 'clippy'],
+      test: ['./scripts/test', '--filter', 'integração com espaços'],
+      coverage: ['cargo', 'llvm-cov'],
+    },
+    protectedPaths: ['infra/**', 'Cargo.lock'],
+    architectureRules: [
+      'O domínio depende de interfaces.\nA infraestrutura implementa as interfaces.',
+    ],
+  };
+  const template = '## Contexto do time\n\n## Evidências registradas';
+  writeFileSync(
+    join(repoRoot, '.development-factory.json'),
+    JSON.stringify({ ...expectedContext, baseBranch: 'integration', prTemplate: template }),
+  );
+
+  const { profile } = await loadFactoryRepositoryProfile(repoRoot);
+  const prompts = buildProfilePrompts(profile);
+  for (const [stage, prompt] of Object.entries(prompts)) {
+    assert.ok(prompt.includes(JSON.stringify(expectedContext, null, 2)), stage);
+    assert.equal(prompt.includes(JSON.stringify(template)), stage === 'pr', stage);
+  }
+  assert.match(prompts.pr, /Branch de destino — "integration"/);
+});
+
+test('prompts sem manifesto orientam a consulta ao projeto e ao plano', async context => {
+  const repoRoot = await mkdtemp(join(tmpdir(), 'df-prompt-defaults-'));
+  context.after(() => rm(repoRoot, { recursive: true, force: true }));
+  const { profile } = await loadFactoryRepositoryProfile(repoRoot);
+
+  const prompts = buildProfilePrompts(profile);
+  assert.deepEqual(prompts, buildProfilePrompts());
+  for (const [stage, prompt] of Object.entries(prompts)) {
+    assert.match(prompt, /consulte os arquivos de configuração do repositório/, stage);
+    assert.match(prompt, /"stack": \[\]/, stage);
+    assert.match(prompt, /"test": null/, stage);
+    assert.match(prompt, /"protectedPaths": \[\]/, stage);
+    assert.match(prompt, /"architectureRules": \[\]/, stage);
+    assert.doesNotMatch(prompt, /ApiError|dumpErrors|node --run unit-test-ci|Jest/, stage);
+  }
+  assert.match(prompts.pr, /seções padrão do resumo/);
 });
 
 test('prompts, runners e validadores das Etapas 03 a 06 seguem contratos e permissões externas', () => {

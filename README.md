@@ -76,7 +76,8 @@ Cole o prompt operacional definitivo em `FACTORY_DEVELOPMENT_SYSTEM_PROMPT` no a
 
 ## Perfil de repositório da Factory
 
-O backend pode carregar um perfil de `.development-factory.json` na raiz do repositório alvo.
+O backend usa o perfil de `.development-factory.json` na raiz Git do repositório alvo para
+provisionar o worktree e montar os prompts de Planejamento, Desenvolvimento, Testes e PR.
 O arquivo é opcional. Tanto a ausência do manifesto quanto a omissão de campos em um manifesto
 parcial usam os valores padrão abaixo.
 
@@ -84,16 +85,24 @@ parcial usam os valores padrão abaixo.
 | --- | --- | --- |
 | `baseBranch` | `null` | Nome de branch Git. O padrão mantém a seleção automática da Factory pela branch atual ou, com `HEAD` destacado, por `main`, `master` ou `HEAD`, nessa ordem. |
 | `branchPattern` | `factory/{slug}` | Padrão de nome de branch Git com o marcador `{slug}` para a chave Jira ou o título normalizado da tarefa. |
+| `stack` | `[]` | Lista de tecnologias e ferramentas usadas no projeto. |
 | `commands` | `null` por comando | Objeto com as chaves `typecheck`, `lint`, `test` e `coverage`. Cada comando é uma lista com o executável seguido dos argumentos. |
 | `protectedPaths` | `[]` | Lista de caminhos ou globs adicionais relativos à raiz do repositório. |
 | `architectureRules` | `[]` | Lista de regras de arquitetura em texto. |
 | `prTemplate` | `null` | Conteúdo Markdown do template de PR. |
 
-Este exemplo define a branch base, os comandos de tipagem e teste e um caminho protegido.
+Uma branch base informada no fluxo tem prioridade sobre `baseBranch` do manifesto. Em caso de
+colisão de nomes, a Factory acrescenta um sufixo ao valor de `{slug}` dentro do padrão. As etapas
+que usam o perfil consultam o manifesto no repositório alvo, mesmo quando a branch base do worktree
+tem outra versão do arquivo. Os prompts orientam a consulta aos arquivos do projeto e ao plano
+para identificar tecnologias e comandos omitidos.
+
+Este exemplo define a branch base, a stack, os comandos de tipagem e teste e um caminho protegido.
 
 ```json
 {
   "baseBranch": "main",
+  "stack": ["TypeScript", "Node.js"],
   "commands": {
     "typecheck": ["npm", "run", "typecheck"],
     "test": ["npm", "test"]

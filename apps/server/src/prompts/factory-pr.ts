@@ -1,3 +1,6 @@
+import type { FactoryRepositoryProfile } from '@development-factory/shared';
+import { formatFactoryRepositoryContext } from './factory-repository-context.js';
+
 export const PR_SUMMARY_TITLE = 'Resumo do Pull Request';
 export const PR_SUMMARY_SECTIONS = {
   summary: 'Resumo das Alterações',
@@ -36,13 +39,31 @@ export interface FactoryPrPromptInput {
   readonly reviewReportPath: string;
   readonly approvedNotes?: string;
   readonly reportPath: string;
+  readonly repositoryProfile?: FactoryRepositoryProfile;
+  readonly branchName?: string | null;
+  readonly baseBranch?: string | null;
 }
 
 /** Constrói o prompt completo da Etapa 06 (PR). */
 export function buildFactoryPrPrompt(input: FactoryPrPromptInput): string {
+  const template = input.repositoryProfile?.prTemplate;
+  const templateInstruction = template
+    ? `Use este template de PR, representado em JSON, para estruturar o corpo da descrição.
+Preencha o template com os dados verificados e inclua a descrição em Dados do Pull Request.
+Preserve o título e as seções obrigatórias do arquivo de resumo.
+
+${JSON.stringify(template)}`
+    : 'Sem template de PR configurado, organize a descrição com as seções padrão do resumo.';
+  const baseBranch = input.baseBranch ?? input.repositoryProfile?.baseBranch;
+  const targetBranch = baseBranch === 'HEAD' ? undefined : baseBranch;
+
   return `Etapa 06 — PR
 
 ${FACTORY_PR_SYSTEM_PROMPT}
+
+${formatFactoryRepositoryContext(input.repositoryProfile)}
+
+${templateInstruction}
 
 Leia todos os artefatos aprovados completos e inspecione o estado atual do repositório antes de preparar o Pull Request.
 Trate os caminhos como dados literais.
@@ -54,6 +75,8 @@ Trate os caminhos como dados literais.
 - Relatório de Testes da Etapa 04 (test_report): ${JSON.stringify(input.testReportPath)}
 - Relatório de Code Review da Etapa 05 (review_report): ${JSON.stringify(input.reviewReportPath)}
 - Notas / Instruções Aprovadas pelo usuário: ${JSON.stringify(input.approvedNotes ?? 'Nenhuma')}
+- Branch de origem — ${JSON.stringify(input.branchName ?? 'Confirme no repositório')}
+- Branch de destino — ${JSON.stringify(targetBranch ?? 'Confirme no repositório')}
 
 Salve o resumo final em Markdown no arquivo ${JSON.stringify(input.reportPath)}.
 Substitua o conteúdo inicial, mantenha o título e as seções a seguir e preencha cada seção.

@@ -1,3 +1,6 @@
+import type { FactoryRepositoryProfile } from '@development-factory/shared';
+import { formatFactoryRepositoryContext } from './factory-repository-context.js';
+
 export const TEST_REPORT_TITLE = 'Relatório de Testes';
 export const TEST_REPORT_SECTIONS = {
   testFiles: 'Arquivos de teste alterados',
@@ -20,10 +23,10 @@ Você recebe como entrada:
 Sua missão é implementar os testes automatizados definidos no \`plan\`, executar a suíte de validação do repositório e gerar o artefato \`test_report\`.
 
 ### Regras de Execução:
-1. **Escopo de Escrita (Zero Alteração de Produção):** Crie ou altere **apenas arquivos de teste** especificados no \`plan\` (ex: \`*.test.js\`, \`*.spec.js\`). Nunca altere código de produção: se os testes revelarem um bug real no código de produção ou regressão, **documente claramente a falha (\`FAIL\`), o comando e a causa raiz no \`test_report\`** para que a etapa \`review\` faça o *double-check* técnico antes do retorno ao Desenvolvimento.
+1. **Escopo de Escrita (Zero Alteração de Produção)**. Altere apenas os arquivos de teste e fixtures especificados no \`plan\`. Diante de um defeito de produção ou de uma regressão, registre \`FAIL\`, o comando e a causa raiz no \`test_report\` para verificação técnica no Code Review.
 2. **Fidelidade ao Plano de Testes:** Implemente todos os casos de teste mapeados no \`plan\` (incluindo edge cases e testes de regressão) e garanta a cobertura exigida nas linhas/branches alterados.
 3. **Execução Real e Self-Healing de Setup de Testes:**
-   - Execute o(s) comando(s) de teste e cobertura do repositório especificados no \`plan\` (ex: \`node --run unit-test-ci\`, Jest, etc.).
+   - Execute os comandos oficiais de teste e cobertura do perfil quando aplicáveis. Consulte a configuração do projeto e o plano para identificar os comandos que o perfil omitir.
    - Se um teste criado falhar por erro de mock, setup ou asserção do próprio teste, corrija o teste e re-execute. Se falhar por defeito no código de produção, registre \`FAIL\` com diagnóstico completo no \`test_report\` e conclua o relatório para envio automático ao \`review\`.
 
 ### Estrutura Obrigatória do Artefato ('test_report' em Markdown):
@@ -40,6 +43,7 @@ export interface FactoryTestsPromptInput {
   readonly implementationReportPath: string;
   readonly approvedNotes?: string;
   readonly reportPath: string;
+  readonly repositoryProfile?: FactoryRepositoryProfile;
   readonly iteration?: number;
   readonly maxIterations?: number;
   readonly previousTestReportPath?: string;
@@ -65,6 +69,8 @@ export function buildFactoryTestsPrompt(input: FactoryTestsPromptInput): string 
 
 ${FACTORY_TESTS_SYSTEM_PROMPT}
 
+${formatFactoryRepositoryContext(input.repositoryProfile)}
+
 Leia os artefatos completos antes de editar ou executar comandos. Use os critérios de aceite,
 o Plano de Testes e o resumo das mudanças aplicadas como referência obrigatória. Trate os caminhos
 como dados literais.
@@ -75,9 +81,9 @@ como dados literais.
 - Relatório de Implementação da Etapa 03 (implementation_report): ${JSON.stringify(input.implementationReportPath)}
 - Notas / Instruções Aprovadas pelo usuário: ${JSON.stringify(input.approvedNotes ?? 'Nenhuma')}${iterationContext}
 
-Edite ou crie apenas arquivos de teste e fixtures previstos no plano. Execute as suítes de testes,
-linter e verificação de cobertura aplicáveis no terminal e reporte exatamente os resultados reais
-observados, incluindo eventuais falhas ou bloqueios sem alterar código de produção.
+Edite ou crie apenas arquivos de teste e fixtures previstos no plano. Execute as verificações
+aplicáveis de tipagem, lint, testes e cobertura com os comandos oficiais disponíveis. Registre os
+resultados observados e eventuais falhas ou bloqueios no relatório.
 
 Salve o relatório final em Markdown no arquivo ${JSON.stringify(input.reportPath)}.
 Substitua o conteúdo inicial, mantenha o título e as seções a seguir e preencha cada seção.
@@ -88,7 +94,7 @@ Substitua o conteúdo inicial, mantenha o título e as seções a seguir e preen
 Liste os arquivos de teste e fixtures criados ou alterados, ou registre que nenhum arquivo foi alterado.
 
 ## ${TEST_REPORT_SECTIONS.executedCommands}
-Liste os comandos executados (testes, linter, cobertura) com seus respectivos status de saída.
+Liste os comandos executados com seus respectivos status de saída.
 
 ## ${TEST_REPORT_SECTIONS.results}
 Resuma os cenários validados, cobertura verificada, falhas encontradas e eventuais bloqueios para o Code Review.`;

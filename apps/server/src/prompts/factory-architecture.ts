@@ -1,4 +1,5 @@
-import type { FactoryInputType } from '@development-factory/shared';
+import type { FactoryInputType, FactoryRepositoryProfile } from '@development-factory/shared';
+import { formatFactoryRepositoryContext } from './factory-repository-context.js';
 
 export interface FactoryArchitecturePromptInput {
   readonly inputType: FactoryInputType;
@@ -6,6 +7,7 @@ export interface FactoryArchitecturePromptInput {
   readonly understandingDocument?: string;
   readonly understandingReportPath?: string;
   readonly reportPath?: string;
+  readonly repositoryProfile?: FactoryRepositoryProfile;
 }
 
 /**
@@ -34,7 +36,7 @@ Cruzando o Documento de Entendimento com as evidências encontradas no código, 
    - Ordem lógica de execução.
    - Para cada arquivo: caminho, função/bloco, linhas aproximadas, **comportamento atual vs. comportamento proposto** e tratamento de *edge cases* (ex: retentativas, estados parciais).
 4. **Cuidados de Regressão:** Pontos sensíveis, fluxos paralelos e invariantes que não podem ser quebrados (com base no Comportamento Esperado e no Escopo Negativo).
-5. **Plano de Testes:** Cenários de teste unitário/integração mapeados diretamente aos **Critérios de Aceite (CA1, CA2...)** da seção 3, indicando os arquivos de teste existentes a serem alterados.
+5. **Plano de Testes**. Mapeie cenários de teste unitário e de integração aos **Critérios de Aceite (CA1, CA2...)** da seção 3. Indique os arquivos de teste existentes a alterar e os comandos oficiais aplicáveis à validação.
 
 ### Restrições e Guardrails:
 1. **Modo Somente Leitura no Código:** Você **NÃO** deve editar, criar ou deletar arquivos de código da aplicação alvo; sua única escrita permitida é o documento final do plano no caminho de destino informado (quando fornecido).
@@ -104,5 +106,7 @@ Grave e confira o arquivo antes de apresentar o resultado no terminal. Se a escr
 ${target}${outputInstruction}${understandingInput}
 
 ${FACTORY_ARCHITECTURE_SYSTEM_PROMPT}
+
+${formatFactoryRepositoryContext(input.repositoryProfile)}
 `;
 }

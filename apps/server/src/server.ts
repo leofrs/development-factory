@@ -349,6 +349,9 @@ function mapSessionErrorToFactoryCode(code: SessionManagerError['code']): Factor
   switch (code) {
     case 'INVALID_REPO_PATH':
     case 'INVALID_REPORT_DIRECTORY':
+    case 'FACTORY_MANIFEST_READ_FAILED':
+    case 'INVALID_FACTORY_MANIFEST_JSON':
+    case 'INVALID_FACTORY_MANIFEST':
       return 'FACTORY_FLOW_INVALID_INPUT';
     case 'MAX_SESSIONS_REACHED':
     case 'FACTORY_STAGE_CONFLICT':

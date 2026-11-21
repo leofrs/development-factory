@@ -1,3 +1,6 @@
+import type { FactoryRepositoryProfile } from '@development-factory/shared';
+import { formatFactoryRepositoryContext } from './factory-repository-context.js';
+
 export const IMPLEMENTATION_REPORT_TITLE = 'Relatório de Implementação';
 export const IMPLEMENTATION_REPORT_SECTIONS = {
   changedFiles: 'Arquivos alterados',
@@ -17,14 +20,14 @@ Sua missão é aplicar exclusivamente as alterações de **código de produção
 
 ### Regras Estritas de Execução:
 1. **Apenas Código de Produção (Zero Testes Agora):**
-   - Implemente apenas os passos referentes ao código da aplicação (ex: 'modules/...').
-   - **NÃO** crie, edite ou execute arquivos de teste ('*.test.js', '*.spec.js', fixtures de teste). A escrita e execução de testes pertencem exclusivamente à **Etapa 04 (Testes)**.
+   - Implemente apenas os passos referentes ao código da aplicação.
+   - **NÃO** crie, edite ou execute arquivos de teste ou fixtures. A escrita e execução de testes pertencem exclusivamente à **Etapa 04 (Testes)**.
 2. **Fidelidade Cirúrgica ao Plano:**
    - Siga rigorosamente os passos e contratos definidos na seção **Plano de Alterações** da Etapa 02.
    - Respeite estritamente a lista **"O que NÃO alterar"** e o **Escopo Negativo**. Não refatore código adjacente fora do escopo.
 3. **Conformidade com Padrões do Repositório:**
-   - Siga exatamente o estilo, convencões e restrições técnicas apontadas no Plano (ex: JavaScript nativo sem 'lodash', strings literais entre aspas duplas com '%s' em 'ApiError' para compatibilidade com ESLint/build.mjs, tratamento de 'try/catch' e 'dumpErrors').
-   - Se houver linter configurado para arquivos individuais, valide a sintaxe/lint apenas dos arquivos modificados.
+   - Siga o estilo, as convenções e as restrições técnicas do perfil do repositório e do Plano.
+   - Revise estaticamente a sintaxe e a conformidade dos arquivos modificados.
 
 ### Estrutura Obrigatória do Artefato de Saída (Relatório de Desenvolvimento):
 1. **Resumo das Alterações Aplicadas:** Lista dos arquivos de produção modificados, linhas aproximadas e o que foi implementado em cada passo.
@@ -38,6 +41,7 @@ interface FactoryDevelopmentPromptInput {
   readonly implementationPlanPath: string;
   readonly approvedNotes?: string;
   readonly reportPath: string;
+  readonly repositoryProfile?: FactoryRepositoryProfile;
   readonly iteration?: number;
   readonly maxIterations?: number;
   readonly previousImplementationReportPath?: string;
@@ -70,6 +74,8 @@ sobre o diff atual já presente no repositório:
   return `Etapa 03 — Desenvolvimento
 
 ${FACTORY_DEVELOPMENT_SYSTEM_PROMPT}
+
+${formatFactoryRepositoryContext(input.repositoryProfile)}
 
 Leia os artefatos completos antes de editar. Use seus critérios de aceite, contratos, escopo
 e passos de implementação como especificação. Trate os caminhos como dados literais.
