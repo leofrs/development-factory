@@ -6,6 +6,7 @@ import {
   BackgroundSessionSummarySchema,
   CancelFactoryFlowRequestSchema,
   FACTORY_FLOW_CONTRACT_VERSION,
+  FactoryPreflightRequestSchema,
   REVIEW_CONTRACT_VERSION,
   RerunFactoryStageRequestSchema,
   ReturnFactoryStageRequestSchema,
@@ -23,6 +24,7 @@ import { defaultReviewReportDirectory } from './artifacts.js';
 import { handleTerminalConnection } from './ws/terminal-handler.js';
 import { listDirectories } from './directories.js';
 import { FactoryFlowService, FactoryFlowServiceError } from './factory-flow-service.js';
+import { runFactoryPreflight } from './factory-preflight.js';
 import { listHistory, readHistoryFile } from './history-reader.js';
 import { ReviewService, ReviewServiceError } from './review-service.js';
 import { SessionManager, SessionManagerError } from './session-manager.js';
@@ -377,6 +379,24 @@ async function handleFactoryFlowApiRequest(
   }
 
   try {
+    if (req.method === 'POST' && url.pathname === '/api/factory/preflight') {
+      const input = FactoryPreflightRequestSchema.safeParse(await readJsonBody(req));
+      if (!input.success) {
+        sendFactoryFlowApiError(res, 400, {
+          code: 'FACTORY_FLOW_INVALID_INPUT',
+          message: 'Os dados para verificar o ambiente da Factory são inválidos.',
+          details: input.error.issues.map(issue => {
+            const field = issue.path.join('.');
+            return field ? `${field}: ${issue.message}` : issue.message;
+          }),
+        });
+        return;
+      }
+      const result = await runFactoryPreflight(input.data);
+      res.writeHead(200).end(JSON.stringify(result));
+      return;
+    }
+
     if (req.method === 'GET' && url.pathname === '/api/factory/flows') {
       const result = factoryFlowService.listFlows(parseListFactoryFlowsQuery(url.searchParams));
       res.writeHead(200).end(JSON.stringify(result));
@@ -919,7 +939,11 @@ export function createReviewServer(options?: CreateReviewServerOptions) {
       return;
     }
 
-    if (url.pathname === '/api/factory/flows' || url.pathname.startsWith('/api/factory/flows/')) {
+    if (
+      url.pathname === '/api/factory/preflight' ||
+      url.pathname === '/api/factory/flows' ||
+      url.pathname.startsWith('/api/factory/flows/')
+    ) {
       await handleFactoryFlowApiRequest(req, res, url, factoryFlowService, sessionManager);
       return;
     }

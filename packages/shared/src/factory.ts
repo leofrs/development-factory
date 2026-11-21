@@ -680,6 +680,32 @@ export const CreateFactoryFlowRequestSchema = z.strictObject({
 });
 export type CreateFactoryFlowRequest = z.infer<typeof CreateFactoryFlowRequestSchema>;
 
+export const FactoryPreflightRequestSchema = z.strictObject({
+  repoPath: repoPathSchema,
+  inputType: FactoryFlowInputTypeSchema,
+  baseBranch: GitBranchNameSchema.optional(),
+});
+export type FactoryPreflightRequest = z.infer<typeof FactoryPreflightRequestSchema>;
+
+const factoryPreflightCheckSchema = z.strictObject({
+  status: z.enum(['ok', 'warning', 'error']),
+  message: text,
+});
+export type FactoryPreflightCheck = z.infer<typeof factoryPreflightCheckSchema>;
+
+export const FactoryPreflightResponseSchema = z.strictObject({
+  contractVersion: version,
+  blocked: z.boolean(),
+  checks: z.strictObject({
+    claude: factoryPreflightCheckSchema,
+    jiraMcp: factoryPreflightCheckSchema,
+    github: factoryPreflightCheckSchema,
+    git: factoryPreflightCheckSchema,
+    profile: factoryPreflightCheckSchema,
+  }),
+});
+export type FactoryPreflightResponse = z.infer<typeof FactoryPreflightResponseSchema>;
+
 export const CreateFactoryFlowResponseSchema = z.strictObject({
   contractVersion: version,
   flow: FactoryFlowSchema,

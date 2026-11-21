@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { chmodSync, existsSync, lstatSync, realpathSync, rmSync } from 'node:fs';
+import { lstat, realpath } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { GitBranchNameSchema } from '@development-factory/shared';
@@ -23,6 +24,7 @@ const JIRA_KEY_PATTERN = /\b([A-Z][A-Z0-9_]*-\d+)\b/i;
 
 export type FactoryWorktreeErrorCode =
   | 'INVALID_GIT_REPOSITORY'
+  | 'GIT_REPOSITORY_LOCKED'
   | 'BASE_BRANCH_NOT_FOUND'
   | 'EMPTY_REPOSITORY'
   | 'WORKTREE_PROVISION_FAILED'
@@ -142,31 +144,48 @@ function withWorktreeLock<T>(worktreePath: string, task: () => Promise<T>): Prom
   return withQueuedLock(worktreeOperationQueues, worktreePath, task);
 }
 
-async function runGit(repoPath: string, args: readonly string[]): Promise<string> {
+async function runGit(
+  repoPath: string,
+  args: readonly string[],
+  signal?: AbortSignal,
+): Promise<string> {
+  signal?.throwIfAborted();
   const { stdout } = await execFileAsync('git', ['-C', repoPath, ...args], {
     timeout: GIT_COMMAND_TIMEOUT_MS,
     maxBuffer: GIT_COMMAND_MAX_BUFFER,
+    ...(signal && { signal, killSignal: 'SIGKILL' }),
     env: {
       ...process.env,
       GIT_TERMINAL_PROMPT: '0',
+      ...(signal && { GIT_OPTIONAL_LOCKS: '0', GIT_ALLOW_PROTOCOL: '' }),
     },
   });
   return stdout.trim();
 }
 
-async function tryRunGit(repoPath: string, args: readonly string[]): Promise<string | null> {
+async function tryRunGit(
+  repoPath: string,
+  args: readonly string[],
+  signal?: AbortSignal,
+): Promise<string | null> {
   try {
-    return await runGit(repoPath, args);
+    return await runGit(repoPath, args, signal);
   } catch {
+    signal?.throwIfAborted();
     return null;
   }
 }
 
-async function gitRefExists(repoRoot: string, fullRef: string): Promise<boolean> {
+async function gitRefExists(
+  repoRoot: string,
+  fullRef: string,
+  signal?: AbortSignal,
+): Promise<boolean> {
   try {
-    await runGit(repoRoot, ['show-ref', '--verify', '--quiet', fullRef]);
+    await runGit(repoRoot, ['show-ref', '--verify', '--quiet', fullRef], signal);
     return true;
   } catch {
+    signal?.throwIfAborted();
     return false;
   }
 }
@@ -249,9 +268,17 @@ async function resolveUniqueBranchName(
   );
 }
 
-async function verifyCommitRef(repoRoot: string, ref: string): Promise<string> {
-  const commitSha = await runGit(repoRoot, ['rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`]);
-  const objectType = await runGit(repoRoot, ['cat-file', '-t', commitSha]);
+async function verifyCommitRef(
+  repoRoot: string,
+  ref: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const commitSha = await runGit(
+    repoRoot,
+    ['rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`],
+    signal,
+  );
+  const objectType = await runGit(repoRoot, ['cat-file', '-t', commitSha], signal);
   if (objectType !== 'commit') {
     throw new FactoryWorktreeError(
       'INVALID_GIT_REPOSITORY',
@@ -264,12 +291,13 @@ async function verifyCommitRef(repoRoot: string, ref: string): Promise<string> {
 async function resolveBaseBranchRef(
   repoRoot: string,
   explicitBaseBranch?: string | null,
+  signal?: AbortSignal,
 ): Promise<{ baseBranch: string; baseRef: string }> {
   if (explicitBaseBranch) {
     const localRef = `refs/heads/${explicitBaseBranch}`;
-    if (await gitRefExists(repoRoot, localRef)) {
+    if (await gitRefExists(repoRoot, localRef, signal)) {
       try {
-        await verifyCommitRef(repoRoot, localRef);
+        await verifyCommitRef(repoRoot, localRef, signal);
       } catch (error) {
         throw new FactoryWorktreeError(
           'INVALID_GIT_REPOSITORY',
@@ -281,9 +309,9 @@ async function resolveBaseBranchRef(
     }
 
     const remoteRef = `refs/remotes/origin/${explicitBaseBranch}`;
-    if (await gitRefExists(repoRoot, remoteRef)) {
+    if (await gitRefExists(repoRoot, remoteRef, signal)) {
       try {
-        await verifyCommitRef(repoRoot, remoteRef);
+        await verifyCommitRef(repoRoot, remoteRef, signal);
       } catch (error) {
         throw new FactoryWorktreeError(
           'INVALID_GIT_REPOSITORY',
@@ -300,17 +328,21 @@ async function resolveBaseBranchRef(
     );
   }
 
-  const currentBranch = await tryRunGit(repoRoot, ['symbolic-ref', '--quiet', '--short', 'HEAD']);
+  const currentBranch = await tryRunGit(
+    repoRoot,
+    ['symbolic-ref', '--quiet', '--short', 'HEAD'],
+    signal,
+  );
   if (currentBranch) {
     const localRef = `refs/heads/${currentBranch}`;
-    if (!(await gitRefExists(repoRoot, localRef))) {
+    if (!(await gitRefExists(repoRoot, localRef, signal))) {
       throw new FactoryWorktreeError(
         'EMPTY_REPOSITORY',
         'O repositório Git precisa ter pelo menos um commit inicial para criar um worktree isolado.',
       );
     }
     try {
-      await verifyCommitRef(repoRoot, localRef);
+      await verifyCommitRef(repoRoot, localRef, signal);
     } catch (error) {
       throw new FactoryWorktreeError(
         'INVALID_GIT_REPOSITORY',
@@ -323,9 +355,9 @@ async function resolveBaseBranchRef(
 
   for (const fallback of ['main', 'master']) {
     const ref = `refs/heads/${fallback}`;
-    if (await gitRefExists(repoRoot, ref)) {
+    if (await gitRefExists(repoRoot, ref, signal)) {
       try {
-        await verifyCommitRef(repoRoot, ref);
+        await verifyCommitRef(repoRoot, ref, signal);
         return { baseBranch: fallback, baseRef: ref };
       } catch {
         // Continua procurando ou falha abaixo se corrompido.
@@ -334,7 +366,7 @@ async function resolveBaseBranchRef(
   }
 
   try {
-    await verifyCommitRef(repoRoot, 'HEAD');
+    await verifyCommitRef(repoRoot, 'HEAD', signal);
     return { baseBranch: 'HEAD', baseRef: 'HEAD' };
   } catch (error) {
     throw new FactoryWorktreeError(
@@ -345,18 +377,21 @@ async function resolveBaseBranchRef(
   }
 }
 
-export async function resolveValidGitRepoRoot(repoPath: string): Promise<string> {
-  let repoTopLevel: string;
+export async function resolveValidGitRepoRoot(
+  repoPath: string,
+  signal?: AbortSignal,
+): Promise<string> {
   try {
-    repoTopLevel = await runGit(repoPath, ['rev-parse', '--show-toplevel']);
-    const isBare = await runGit(repoTopLevel, ['rev-parse', '--is-bare-repository']);
+    const repoTopLevel = await runGit(repoPath, ['rev-parse', '--show-toplevel'], signal);
+    const isBare = await runGit(repoTopLevel, ['rev-parse', '--is-bare-repository'], signal);
     if (isBare === 'true') {
       throw new FactoryWorktreeError(
         'INVALID_GIT_REPOSITORY',
         'Repositórios bare não são suportados para execução isolada da Factory.',
       );
     }
-    await runGit(repoTopLevel, ['rev-parse', '--git-common-dir']);
+    await runGit(repoTopLevel, ['rev-parse', '--git-common-dir'], signal);
+    return await realpath(repoTopLevel);
   } catch (error) {
     if (error instanceof FactoryWorktreeError) {
       throw error;
@@ -367,7 +402,56 @@ export async function resolveValidGitRepoRoot(repoPath: string): Promise<string>
       { cause: error },
     );
   }
-  return realpathSync(repoTopLevel);
+}
+
+export async function verifyFactoryGitRepository(
+  repoRoot: string,
+  requestedBaseBranch: string | null,
+  signal: AbortSignal,
+): Promise<string> {
+  const { baseBranch, baseRef } = await resolveBaseBranchRef(repoRoot, requestedBaseBranch, signal);
+  const lockTargets = new Set([
+    'index',
+    'HEAD',
+    'packed-refs',
+    'config',
+    'config.worktree',
+    'shallow',
+    'reftable/tables.list',
+    baseRef,
+  ]);
+  const locks = await Promise.all(
+    [...lockTargets].map(async target => {
+      const gitPath = await runGit(
+        repoRoot,
+        ['rev-parse', '--path-format=absolute', '--git-path', target],
+        signal,
+      );
+      try {
+        await lstat(`${gitPath}.lock`);
+        return `${target}.lock`;
+      } catch (error) {
+        if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
+          return null;
+        }
+        throw error;
+      }
+    }),
+  );
+  const lock = locks.find(entry => entry !== null);
+  if (lock !== undefined) {
+    throw new FactoryWorktreeError(
+      'GIT_REPOSITORY_LOCKED',
+      `O Git encontrou o lock "${lock}". Aguarde a operação Git em andamento e tente novamente.`,
+    );
+  }
+
+  await runGit(
+    repoRoot,
+    ['-c', 'core.fsmonitor=false', 'fsck', '--no-reflogs', '--no-dangling', '--no-progress'],
+    signal,
+  );
+  return baseBranch;
 }
 
 function cleanupOrphanWorktreeDirectory(worktreePath: string): void {
