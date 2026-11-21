@@ -1,14 +1,16 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import {
   ChevronRight,
   Compass,
   FileText,
   GitPullRequest,
   Loader2,
+  Square,
   Terminal,
   X,
 } from 'lucide-react';
 import {
+  isFinalFactoryFlowState,
   type BackgroundSessionSummary,
   type FactoryFlow,
 } from '@development-factory/shared';
@@ -35,6 +37,8 @@ interface BackgroundTasksPopoverProps {
   onOpenTerminal: (sessionId: string) => void;
   onOpenFlowRoadmap?: (flowId: string) => void;
   onViewReport: (reportPath: string) => void;
+  onStopSession?: (sessionId: string) => Promise<BackgroundSessionSummary>;
+  onCancelFlow?: (flowId: string) => Promise<FactoryFlow>;
   onClose: () => void;
 }
 
@@ -65,8 +69,12 @@ export function BackgroundTasksPopover({
   onOpenTerminal,
   onOpenFlowRoadmap,
   onViewReport,
+  onStopSession,
+  onCancelFlow,
   onClose,
 }: BackgroundTasksPopoverProps) {
+  const [stoppingIds, setStoppingIds] = useState<Set<string>>(() => new Set());
+  const [actionError, setActionError] = useState<string | null>(null);
   const items = useMemo<BackgroundOperationItem[]>(() => {
     const sessionsById = new Map<string, BackgroundSessionSummary>();
     const latestSessionByFlowId = new Map<string, BackgroundSessionSummary>();
@@ -114,8 +122,9 @@ export function BackgroundTasksPopover({
     for (const item of items) {
       if (item.kind === 'flow') {
         if (
-          isFactoryFlowActivelyRunning(item.flow) ||
-          (item.linkedSession ? isSessionActivelyRunning(item.linkedSession) : false)
+          !isFinalFactoryFlowState(item.flow.state) &&
+          (isFactoryFlowActivelyRunning(item.flow) ||
+            (item.linkedSession ? isSessionActivelyRunning(item.linkedSession) : false))
         ) {
           count += 1;
         }
@@ -127,7 +136,36 @@ export function BackgroundTasksPopover({
   }, [items]);
 
   const isLoading = (loadingSessions || loadingFactoryFlows) && items.length === 0;
-  const combinedError = sessionsError ?? factoryFlowsError;
+  const combinedError = actionError ?? sessionsError ?? factoryFlowsError;
+
+  async function runStopOperation(
+    targetId: string,
+    operation: () => Promise<void>,
+    fallbackError: string,
+  ): Promise<void> {
+    if (stoppingIds.has(targetId)) {
+      return;
+    }
+
+    setActionError(null);
+    setStoppingIds(current => {
+      const next = new Set(current);
+      next.add(targetId);
+      return next;
+    });
+
+    try {
+      await operation();
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : fallbackError);
+    } finally {
+      setStoppingIds(current => {
+        const next = new Set(current);
+        next.delete(targetId);
+        return next;
+      });
+    }
+  }
 
   return (
     <section
@@ -185,12 +223,20 @@ export function BackgroundTasksPopover({
                 const stageStep = getFactoryStageStep(flow.currentStage);
                 const stageLabel = getFactoryStageLabel(flow.currentStage);
                 const meta =
-                  linkedSession && linkedSession.status === 'running'
+                  !isFinalFactoryFlowState(flow.state) &&
+                  linkedSession &&
+                  linkedSession.status === 'running'
                     ? getSessionStatusPresentation(linkedSession)
                     : getFactoryFlowStatePresentation(flow.state);
                 const isActive =
                   Boolean(activeSessionId) && linkedSession?.sessionId === activeSessionId;
                 const reportPath = linkedSession?.reportPath ?? null;
+                const canStop =
+                  !isFinalFactoryFlowState(flow.state) &&
+                  meta.label === 'Em execução' &&
+                  (Boolean(onCancelFlow) ||
+                    (linkedSession?.status === 'running' && Boolean(onStopSession)));
+                const isStopping = stoppingIds.has(flow.id);
 
                 return (
                   <li
@@ -219,6 +265,11 @@ export function BackgroundTasksPopover({
                           <span className="inline-flex items-center rounded-md border border-line bg-surface px-1.5 py-0.5 font-mono text-[10px] text-secondary">
                             {stageStep} · {stageLabel}
                           </span>
+                          {flow.iteration > 0 && (
+                            <span className="inline-flex items-center rounded-md border border-accent/25 bg-surface px-1.5 py-0.5 font-mono text-[10px] text-accent">
+                              Iteração {flow.iteration}/{flow.maxIterations}
+                            </span>
+                          )}
                           <span
                             className={`inline-flex items-center gap-1.5 text-[11px] font-medium ${meta.textClass}`}
                           >
@@ -242,19 +293,51 @@ export function BackgroundTasksPopover({
                       <ChevronRight size={15} className="mt-1 shrink-0 text-muted" />
                     </button>
 
-                    {reportPath && (
+                    {(reportPath || canStop) && (
                       <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
-                        <button
-                          type="button"
-                          className="modal-button border-accent/35 px-2.5 py-1.5 text-[11px] text-accent hover:bg-selected"
-                          onClick={() => {
-                            onViewReport(reportPath);
-                            onClose();
-                          }}
-                        >
-                          <FileText size={12} />
-                          <span>{flow.currentStage === 'triage' ? 'Ver plano' : 'Ver artefato'}</span>
-                        </button>
+                        {reportPath && (
+                          <button
+                            type="button"
+                            className="modal-button border-accent/35 px-2.5 py-1.5 text-[11px] text-accent hover:bg-selected"
+                            onClick={() => {
+                              onViewReport(reportPath);
+                              onClose();
+                            }}
+                          >
+                            <FileText size={12} />
+                            <span>{flow.currentStage === 'triage' ? 'Ver plano' : 'Ver artefato'}</span>
+                          </button>
+                        )}
+
+                        {canStop && (
+                          <button
+                            type="button"
+                            disabled={isStopping}
+                            aria-busy={isStopping}
+                            aria-label={`Parar fluxo ${flow.title}`}
+                            className="modal-button ml-auto border-danger/30 px-2.5 py-1.5 text-[11px] text-danger hover:bg-danger/10 disabled:cursor-not-allowed disabled:opacity-60"
+                            onClick={() => {
+                              void runStopOperation(
+                                flow.id,
+                                async () => {
+                                  if (onCancelFlow) {
+                                    await onCancelFlow(flow.id);
+                                  } else if (linkedSession?.status === 'running' && onStopSession) {
+                                    await onStopSession(linkedSession.sessionId);
+                                  }
+                                },
+                                'Não foi possível parar o fluxo da Factory.',
+                              );
+                            }}
+                          >
+                            {isStopping ? (
+                              <Loader2 size={11} className="animate-spin" />
+                            ) : (
+                              <Square size={10} />
+                            )}
+                            <span>{isStopping ? 'Parando...' : 'Parar'}</span>
+                          </button>
+                        )}
                       </div>
                     )}
                   </li>
@@ -269,6 +352,11 @@ export function BackgroundTasksPopover({
                 session.mode === 'factory' || session.historyState === 'saved'
                   ? session.reportPath
                   : null;
+              const canStop =
+                session.status === 'running' &&
+                meta.label === 'Em execução' &&
+                Boolean(onStopSession);
+              const isStopping = stoppingIds.has(session.sessionId);
 
               return (
                 <li
@@ -346,6 +434,32 @@ export function BackgroundTasksPopover({
                       >
                         <FileText size={12} />
                         <span>{isFactory ? 'Ver plano' : 'Ver parecer'}</span>
+                      </button>
+                    )}
+
+                    {canStop && onStopSession && (
+                      <button
+                        type="button"
+                        disabled={isStopping}
+                        aria-busy={isStopping}
+                        aria-label={`Parar execução de ${session.title}`}
+                        className="modal-button ml-auto border-danger/30 px-2.5 py-1.5 text-[11px] text-danger hover:bg-danger/10 disabled:cursor-not-allowed disabled:opacity-60"
+                        onClick={() => {
+                          void runStopOperation(
+                            session.sessionId,
+                            async () => {
+                              await onStopSession(session.sessionId);
+                            },
+                            'Não foi possível parar a operação em background.',
+                          );
+                        }}
+                      >
+                        {isStopping ? (
+                          <Loader2 size={11} className="animate-spin" />
+                        ) : (
+                          <Square size={10} />
+                        )}
+                        <span>{isStopping ? 'Parando...' : 'Parar'}</span>
                       </button>
                     )}
                   </div>

@@ -4,10 +4,12 @@ import { join } from 'node:path';
 import { stripVTControlCharacters } from 'node:util';
 import type { FactoryRequest, FactoryStageName } from '@development-factory/shared';
 import { isImplementationReport } from './factory-development.js';
+import { isPrSummary } from './factory-pr.js';
 import { isReviewReport } from './factory-review.js';
 import { isTestReport } from './factory-tests.js';
 import { maxHistoryBytes } from './history-reader.js';
 import { IMPLEMENTATION_REPORT_TITLE } from './prompts/factory-development.js';
+import { PR_SUMMARY_TITLE } from './prompts/factory-pr.js';
 import { REVIEW_REPORT_TITLE } from './prompts/factory-review.js';
 import { TEST_REPORT_TITLE } from './prompts/factory-tests.js';
 
@@ -151,6 +153,13 @@ const REPORT_STAGE_HISTORY_CONFIG: Partial<
     reportPlaceholderNote: 'Code Review em andamento. O relatório final será salvo aqui.',
     sessionTitle: 'Registro da sessão de code review (Factory)',
     validateReport: isReviewReport,
+  },
+  pr: {
+    prefixSegment: 'factory-pr',
+    reportPlaceholderTitle: PR_SUMMARY_TITLE,
+    reportPlaceholderNote: 'Preparação do Pull Request em andamento. O resumo final será salvo aqui.',
+    sessionTitle: 'Registro da sessão de PR (Factory)',
+    validateReport: isPrSummary,
   },
 };
 

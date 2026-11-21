@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Activity, Code2, Factory, GitPullRequest, History, Loader2, Scale } from 'lucide-react';
-import type { BackgroundSessionSummary, FactoryFlow } from '@development-factory/shared';
+import { isFinalFactoryFlowState, type BackgroundSessionSummary, type FactoryFlow } from '@development-factory/shared';
 import { BackgroundTasksPopover } from './BackgroundTasksPopover';
 import { ThemeToggle } from './ThemeToggle';
 import type { Theme } from '../theme';
@@ -24,6 +24,8 @@ interface FloatingDockProps {
   onOpenTerminal: (sessionId: string) => void;
   onOpenFlowRoadmap?: (flowId: string) => void;
   onViewReport: (reportPath: string) => void;
+  onStopSession?: (sessionId: string) => Promise<BackgroundSessionSummary>;
+  onCancelFlow?: (flowId: string) => Promise<FactoryFlow>;
   theme: Theme;
   onToggleTheme: () => void;
 }
@@ -45,6 +47,8 @@ export function FloatingDock({
   onOpenTerminal,
   onOpenFlowRoadmap,
   onViewReport,
+  onStopSession,
+  onCancelFlow,
   theme,
   onToggleTheme,
 }: FloatingDockProps) {
@@ -63,8 +67,9 @@ export function FloatingDock({
         ? sessionsById.get(flow.currentSessionId)
         : undefined;
       if (
-        isFactoryFlowActivelyRunning(flow) ||
-        (linkedSession ? isSessionActivelyRunning(linkedSession) : false)
+        !isFinalFactoryFlowState(flow.state) &&
+        (isFactoryFlowActivelyRunning(flow) ||
+          (linkedSession ? isSessionActivelyRunning(linkedSession) : false))
       ) {
         running += 1;
       }
@@ -132,6 +137,8 @@ export function FloatingDock({
             onOpenTerminal={onOpenTerminal}
             onOpenFlowRoadmap={onOpenFlowRoadmap}
             onViewReport={onViewReport}
+            onStopSession={onStopSession}
+            onCancelFlow={onCancelFlow}
             onClose={() => setPopoverOpen(false)}
           />
         )}

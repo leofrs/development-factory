@@ -71,6 +71,25 @@ async function waitFor(predicate: () => boolean, timeoutMs = 5000): Promise<void
   }
 }
 
+async function waitForFlowDetails<T>(
+  loadDetails: () => Promise<T>,
+  predicate: (details: T) => boolean,
+  timeoutMs = 5000,
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  let current = await loadDetails();
+  while (!predicate(current)) {
+    if (Date.now() > deadline) {
+      throw new Error('Tempo limite excedido aguardando estado do fluxo da Factory.');
+    }
+    await new Promise(resolve => {
+      setTimeout(resolve, 25);
+    });
+    current = await loadDetails();
+  }
+  return current;
+}
+
 test('API REST /api/factory/flows valida origem, idempotência, filtros e ciclo completo com SSE e PTYs paralelos', { timeout: 30000 }, async context => {
   const rootDir = mkdtempSync(join(tmpdir(), 'df-factory-flows-api-'));
   const binDir = join(rootDir, 'bin');
@@ -655,7 +674,7 @@ test(
     assert.ok(rerun.reportPath);
     const running = sessionManager.getSession(rerun.sessionId);
     assert.ok(running);
-    await waitFor(() => running.buffer.replay().includes('READY:'));
+    await waitFor(() => /READY:[^\n]*\n/.test(running.buffer.replay()));
     const readyLine = running.buffer.replay().split(/\r?\n/).find(line => line.startsWith('READY:'));
     assert.ok(readyLine);
     const { args, cwd } = z.object({ args: z.array(z.string()), cwd: z.string() }).parse(
@@ -688,23 +707,25 @@ test(
       '',
     ].join('\n'));
     sessionManager.writeInput(rerun.sessionId, 'EXIT0');
-    await waitFor(() => sessionManager.getSession(rerun.sessionId)?.status === 'exited');
-    const completedDevelopment = await getDetails();
-    assert.equal(completedDevelopment.flow.state, 'waiting_action');
-    assert.ok(completedDevelopment.artifacts.some(artifact =>
-      artifact.kind === 'implementation_report' && artifact.status === 'ready' &&
-      artifact.path === rerun.reportPath,
-    ));
 
-    const testsApprovedNotes = 'Cobrir refresh token expirado e erro 401.';
-    const testsResponse = await postAction('advance', {
-      startSession: true,
-      approvedNotes: testsApprovedNotes,
-    });
-    assert.equal(testsResponse.status, 200);
-    const testsSession = z.object({ session: BackgroundSessionSummarySchema }).parse(
-      await testsResponse.json(),
-    ).session;
+    // 1. Development (iteração 1) conclui com relatório válido e dispara Tests automaticamente.
+    await waitFor(() =>
+      sessionManager
+        .listSessions()
+        .some(
+          session =>
+            session.flowId === createdOne.flow.id &&
+            session.stage === 'tests' &&
+            session.status === 'running',
+        ),
+    );
+    const autoTestsOneDetails = await getDetails();
+    assert.equal(autoTestsOneDetails.flow.currentStage, 'tests');
+    assert.equal(autoTestsOneDetails.flow.state, 'running');
+    assert.equal(autoTestsOneDetails.flow.iteration, 1);
+    assert.ok(autoTestsOneDetails.flow.currentSessionId);
+    const testsSession = sessionManager.getSessionSummary(autoTestsOneDetails.flow.currentSessionId);
+    assert.ok(testsSession);
     assert.equal(testsSession.stage, 'tests');
     assert.ok(testsSession.reportPath);
     assert.equal((await postAction('advance', { startSession: true })).status, 409);
@@ -722,12 +743,12 @@ test(
     assert.ok(testsPrompt.includes(specOne.path));
     assert.ok(testsPrompt.includes(planPath));
     assert.ok(testsPrompt.includes(rerun.reportPath));
-    assert.ok(testsPrompt.includes(testsApprovedNotes));
     assert.ok(testsSpawn.args.includes('--restricted'));
     assert.equal(testsSpawn.args[testsSpawn.args.indexOf('--tools') + 1], 'Read,Glob,Grep,Edit,Write,Bash');
     assert.match(testsSpawn.args[testsSpawn.args.indexOf('--allowedTools') + 1] ?? '', /Edit\(\*\*\/\*\.test\.\*\)/);
     assert.match(testsSpawn.args[testsSpawn.args.indexOf('--allowedTools') + 1] ?? '', /Bash/);
 
+    // Relatório de testes incompleto pausa em waiting_action para reexecução manual.
     writeFileSync(testsSession.reportPath, '# Relatório de Testes\n\nIncompleto.\n');
     sessionManager.writeInput(testsSession.sessionId, 'EXIT0');
     await waitFor(() => sessionManager.getSession(testsSession.sessionId)?.status === 'exited');
@@ -740,6 +761,7 @@ test(
     );
     assert.equal((await postAction('advance', { startSession: true })).status, 409);
 
+    // 2. Reexecução de Tests reportando FAIL no código de produção: deve avançar automaticamente para Review (double-check).
     const rerunTestsResponse = await postAction('rerun', { stage: 'tests' });
     assert.equal(rerunTestsResponse.status, 200);
     const rerunTests = z.object({ session: BackgroundSessionSummarySchema }).parse(
@@ -754,34 +776,31 @@ test(
         '## Arquivos de teste alterados',
         '- test/jwt.test.ts',
         '## Comandos executados',
-        '- npm test (exit 0)',
+        '- npm test (exit 1)',
         '## Resultados e cobertura',
-        'Todos os cenários do plano passaram.',
+        'FAIL: renovação de token expirado retornou 500 em src/jwt.ts:42.',
         '',
       ].join('\n'),
     );
     sessionManager.writeInput(rerunTests.sessionId, 'EXIT0');
-    await waitFor(() => sessionManager.getSession(rerunTests.sessionId)?.status === 'exited');
-    const completedTests = await getDetails();
-    assert.equal(completedTests.flow.state, 'waiting_action');
-    assert.ok(
-      completedTests.artifacts.some(
-        artifact =>
-          artifact.kind === 'test_report' &&
-          artifact.status === 'ready' &&
-          artifact.path === rerunTests.reportPath,
-      ),
-    );
 
-    const reviewApprovedNotes = 'Validar remoção de logs sensíveis no diff.';
-    const reviewResponse = await postAction('advance', {
-      startSession: true,
-      approvedNotes: reviewApprovedNotes,
-    });
-    assert.equal(reviewResponse.status, 200);
-    const reviewSession = z.object({ session: BackgroundSessionSummarySchema }).parse(
-      await reviewResponse.json(),
-    ).session;
+    await waitFor(() =>
+      sessionManager
+        .listSessions()
+        .some(
+          session =>
+            session.flowId === createdOne.flow.id &&
+            session.stage === 'review' &&
+            session.status === 'running',
+        ),
+    );
+    const autoReviewOneDetails = await getDetails();
+    assert.equal(autoReviewOneDetails.flow.currentStage, 'review');
+    assert.equal(autoReviewOneDetails.flow.state, 'running');
+    assert.equal(autoReviewOneDetails.flow.iteration, 1);
+    assert.ok(autoReviewOneDetails.flow.currentSessionId);
+    const reviewSession = sessionManager.getSessionSummary(autoReviewOneDetails.flow.currentSessionId);
+    assert.ok(reviewSession);
     assert.equal(reviewSession.stage, 'review');
     assert.ok(reviewSession.reportPath);
 
@@ -799,7 +818,6 @@ test(
     assert.ok(reviewPrompt.includes(planPath));
     assert.ok(reviewPrompt.includes(rerun.reportPath));
     assert.ok(reviewPrompt.includes(rerunTests.reportPath));
-    assert.ok(reviewPrompt.includes(reviewApprovedNotes));
     assert.ok(reviewSpawn.args.includes('--restricted'));
     const reviewAllowedTools = reviewSpawn.args[reviewSpawn.args.indexOf('--allowedTools') + 1] ?? '';
     assert.ok(reviewAllowedTools.includes('Bash(git diff*)'));
@@ -807,11 +825,13 @@ test(
     assert.ok(reviewAllowedTools.includes('Bash(git log*)'));
     assert.equal(reviewAllowedTools.includes('Edit(**/*.ts)'), false);
 
+    // Relatório de review sem veredito determinístico falha validação e pausa em waiting_action.
     writeFileSync(reviewSession.reportPath, '# Relatório de Code Review\n\nIncompleto.\n');
     sessionManager.writeInput(reviewSession.sessionId, 'EXIT0');
     await waitFor(() => sessionManager.getSession(reviewSession.sessionId)?.status === 'exited');
     assert.equal((await postAction('advance', { startSession: true })).status, 409);
 
+    // 3. Review confirma falha (REPROVADO / REQUER AJUSTES) e retorna AUTOMATICAMENTE para Development (Iteração 2/3).
     const rerunReviewResponse = await postAction('rerun', { stage: 'review' });
     assert.equal(rerunReviewResponse.status, 200);
     const rerunReview = z.object({ session: BackgroundSessionSummarySchema }).parse(
@@ -819,35 +839,89 @@ test(
     ).session;
     assert.ok(rerunReview.reportPath);
     await waitFor(() => Boolean(sessionManager.getSession(rerunReview.sessionId)?.buffer.replay().includes('READY:')));
-    const validReviewMarkdown = [
+    const rejectedReviewMarkdown = [
       '# Relatório de Code Review',
       '## Resumo Executivo',
-      'Solução aderente ao plano.',
+      'Double-check confirmou o erro 500 reportado pelos testes em src/jwt.ts:42.',
       '## Pontos Encontrados',
-      'Nenhum bloqueador crítico.',
+      '- [BLOQUEANTE] src/jwt.ts:42 lança erro não tratado ao validar token expirado; retornar 401.',
       '## Parecer Final',
-      'Aprovado para PR.',
+      'Veredito: REPROVADO / REQUER AJUSTES',
+      'Corrigir tratamento de token expirado em src/jwt.ts.',
       '',
     ].join('\n');
-    writeFileSync(rerunReview.reportPath, validReviewMarkdown);
+    writeFileSync(rerunReview.reportPath, rejectedReviewMarkdown);
     sessionManager.writeInput(rerunReview.sessionId, 'EXIT0');
-    await waitFor(() => sessionManager.getSession(rerunReview.sessionId)?.status === 'exited');
 
-    // Testa retorno controlado de review -> tests e novo avanço até PR.
-    const returnRes = await postAction('return', {
-      targetStage: 'tests',
-      approvedNotes: 'Adicionar caso extra de token revogado',
-      startSession: true,
+    await waitFor(() => {
+      const sessions = sessionManager.listSessions().filter(
+        session => session.flowId === createdOne.flow.id && session.stage === 'development',
+      );
+      return sessions.some(
+        session =>
+          session.sessionId !== development.sessionId &&
+          session.sessionId !== rerun.sessionId &&
+          session.status === 'running',
+      );
     });
-    assert.equal(returnRes.status, 200);
-    const returnedTestsSession = z.object({ session: BackgroundSessionSummarySchema }).parse(
-      await returnRes.json(),
-    ).session;
-    assert.equal(returnedTestsSession.stage, 'tests');
-    assert.ok(returnedTestsSession.reportPath);
-    await waitFor(() => Boolean(sessionManager.getSession(returnedTestsSession.sessionId)?.buffer.replay().includes('READY:')));
+    const iter2DevDetails = await getDetails();
+    assert.equal(iter2DevDetails.flow.currentStage, 'development');
+    assert.equal(iter2DevDetails.flow.state, 'running');
+    assert.equal(iter2DevDetails.flow.iteration, 2);
+    assert.ok(iter2DevDetails.flow.currentSessionId);
+    const iter2DevSession = sessionManager.getSession(iter2DevDetails.flow.currentSessionId);
+    assert.ok(iter2DevSession && iter2DevSession.reportPath);
+    await waitFor(() => /READY:[^\n]*\n/.test(iter2DevSession.buffer.replay()));
+    const iter2DevReadyLine = iter2DevSession.buffer.replay().split(/\r?\n/).find(line => line.startsWith('READY:'));
+    assert.ok(iter2DevReadyLine);
+    const iter2DevArgs = z.object({ args: z.array(z.string()) }).parse(
+      JSON.parse(iter2DevReadyLine.slice('READY:'.length)) as unknown,
+    ).args;
+    const iter2DevPrompt = iter2DevArgs.at(-1) ?? '';
+    // Na iteração 2+, o prompt de Development recebe os últimos relatórios + notas aprovadas originais.
+    assert.ok(iter2DevPrompt.includes('Iteração 2/3'));
+    assert.ok(iter2DevPrompt.includes(specOne.path));
+    assert.ok(iter2DevPrompt.includes(planPath));
+    assert.ok(iter2DevPrompt.includes(rerun.reportPath));
+    assert.ok(iter2DevPrompt.includes(rerunTests.reportPath));
+    assert.ok(iter2DevPrompt.includes(rerunReview.reportPath));
+    assert.ok(iter2DevPrompt.includes(approvedNotes));
+
+    // Development (Iteração 2) conclui -> dispara Tests (Iteração 2) automaticamente.
+    writeFileSync(iter2DevSession.reportPath, [
+      '# Relatório de Implementação',
+      '## Arquivos alterados',
+      '- src/jwt.ts',
+      '## Resumo das mudanças',
+      'Tratamento de token expirado corrigido para 401.',
+      '## Status dos passos do plano',
+      '| Passo do Plano | Status | Observações |',
+      '| --- | --- | --- |',
+      '| Ajustar JWT | Concluído | Correção aplicada na iteração 2 |',
+      '',
+    ].join('\n'));
+    sessionManager.writeInput(iter2DevSession.sessionId, 'EXIT0');
+
+    await waitFor(() => {
+      const sessions = sessionManager.listSessions().filter(
+        session => session.flowId === createdOne.flow.id && session.stage === 'tests',
+      );
+      return sessions.some(
+        session =>
+          session.sessionId !== testsSession.sessionId &&
+          session.sessionId !== rerunTests.sessionId &&
+          session.status === 'running',
+      );
+    });
+    const iter2TestsDetails = await getDetails();
+    assert.equal(iter2TestsDetails.flow.currentStage, 'tests');
+    assert.equal(iter2TestsDetails.flow.iteration, 2);
+    assert.ok(iter2TestsDetails.flow.currentSessionId);
+    const iter2TestsSession = sessionManager.getSession(iter2TestsDetails.flow.currentSessionId);
+    assert.ok(iter2TestsSession && iter2TestsSession.reportPath);
+    await waitFor(() => iter2TestsSession.buffer.replay().includes('READY:'));
     writeFileSync(
-      returnedTestsSession.reportPath,
+      iter2TestsSession.reportPath,
       [
         '# Relatório de Testes',
         '## Arquivos de teste alterados',
@@ -855,38 +929,99 @@ test(
         '## Comandos executados',
         '- npm test (exit 0)',
         '## Resultados e cobertura',
-        'Caso extra de token revogado validado.',
+        'PASS: todos os testes passaram na iteração 2.',
         '',
       ].join('\n'),
     );
-    sessionManager.writeInput(returnedTestsSession.sessionId, 'EXIT0');
-    await waitFor(() => sessionManager.getSession(returnedTestsSession.sessionId)?.status === 'exited');
+    sessionManager.writeInput(iter2TestsSession.sessionId, 'EXIT0');
 
-    const secondReviewRes = await postAction('advance', { startSession: true });
-    assert.equal(secondReviewRes.status, 200);
-    const secondReview = z.object({ session: BackgroundSessionSummarySchema }).parse(
-      await secondReviewRes.json(),
-    ).session;
-    assert.equal(secondReview.stage, 'review');
-    assert.ok(secondReview.reportPath);
-    await waitFor(() => Boolean(sessionManager.getSession(secondReview.sessionId)?.buffer.replay().includes('READY:')));
-    writeFileSync(secondReview.reportPath, validReviewMarkdown);
-    sessionManager.writeInput(secondReview.sessionId, 'EXIT0');
-    await waitFor(() => sessionManager.getSession(secondReview.sessionId)?.status === 'exited');
+    // Tests (Iteração 2) conclui -> dispara Review (Iteração 2) automaticamente.
+    await waitFor(() => {
+      const sessions = sessionManager.listSessions().filter(
+        session => session.flowId === createdOne.flow.id && session.stage === 'review',
+      );
+      return sessions.some(
+        session =>
+          session.sessionId !== reviewSession.sessionId &&
+          session.sessionId !== rerunReview.sessionId &&
+          session.status === 'running',
+      );
+    });
+    const iter2ReviewDetails = await getDetails();
+    assert.equal(iter2ReviewDetails.flow.currentStage, 'review');
+    assert.equal(iter2ReviewDetails.flow.iteration, 2);
+    assert.ok(iter2ReviewDetails.flow.currentSessionId);
+    const iter2ReviewSession = sessionManager.getSession(iter2ReviewDetails.flow.currentSessionId);
+    assert.ok(iter2ReviewSession && iter2ReviewSession.reportPath);
+    await waitFor(() => iter2ReviewSession.buffer.replay().includes('READY:'));
+    const approvedReviewMarkdown = [
+      '# Relatório de Code Review',
+      '## Resumo Executivo',
+      'Correção confirmada e aderente ao plano.',
+      '## Pontos Encontrados',
+      'Nenhum bloqueador crítico.',
+      '## Parecer Final',
+      'Veredito: APROVADO PARA PR',
+      'Pronto para preparar o Pull Request.',
+      '',
+    ].join('\n');
+    writeFileSync(iter2ReviewSession.reportPath, approvedReviewMarkdown);
+    sessionManager.writeInput(iter2ReviewSession.sessionId, 'EXIT0');
 
-    const prResponse = await postAction('advance', { startSession: true });
-    assert.equal(prResponse.status, 200);
-    const prFlow = TransitionFactoryFlowResponseSchema.parse(await prResponse.json()).flow;
-    assert.equal(prFlow.currentStage, 'pr');
-    assert.equal(prFlow.state, 'waiting_action');
-    assert.equal(prFlow.currentSessionId, null);
-    assert.equal((await postAction('start', { stage: 'pr' })).status, 409);
+    // 4. Review aprovado -> avança para PR e PAUSA em waiting_action (100% manual!).
+    const prPausedDetails = await waitForFlowDetails(
+      getDetails,
+      details => details.flow.currentStage === 'pr' && details.flow.state === 'waiting_action',
+    );
+    assert.equal(prPausedDetails.flow.currentStage, 'pr');
+    assert.equal(prPausedDetails.flow.state, 'waiting_action');
+    assert.equal(prPausedDetails.flow.currentSessionId, null);
+    assert.equal(prPausedDetails.flow.lastReviewVerdict, 'approved');
+    assert.equal(prPausedDetails.flow.iteration, 2);
     assert.ok(!sessionManager.listSessions().some(session => session.stage === 'pr'));
+
+    // Verifica histórico de artefatos por iteração persistido no banco.
+    assert.equal(
+      prPausedDetails.artifacts.filter(
+        artifact => artifact.kind === 'review_report' && artifact.status === 'ready',
+      ).length,
+      2,
+    );
+
+    // 5. Disparo manual da etapa PR via POST /start -> conclui o fluxo ao salvar pr_summary.
+    const startPrRes = await postAction('start', { stage: 'pr' });
+    assert.equal(startPrRes.status, 200);
+    const prSession = z.object({ session: BackgroundSessionSummarySchema }).parse(
+      await startPrRes.json(),
+    ).session;
+    assert.equal(prSession.stage, 'pr');
+    assert.ok(prSession.reportPath);
+    await waitFor(() => Boolean(sessionManager.getSession(prSession.sessionId)?.buffer.replay().includes('READY:')));
+    writeFileSync(
+      prSession.reportPath,
+      [
+        '# Resumo do Pull Request',
+        '## Resumo das Alterações',
+        'Renovação de JWT ajustada.',
+        '## Validação e Evidências',
+        'Testes e Code Review aprovados.',
+        '## Dados do Pull Request',
+        'Branch feat/jwt -> main.',
+        '',
+      ].join('\n'),
+    );
+    sessionManager.writeInput(prSession.sessionId, 'EXIT0');
+    const completedPrDetails = await waitForFlowDetails(
+      getDetails,
+      details => details.flow.state === 'completed',
+    );
+    assert.equal(completedPrDetails.flow.currentStage, 'pr');
+    assert.equal(completedPrDetails.flow.state, 'completed');
 
     const extraAdvanceRes = await postAction('advance', { startSession: false });
     assert.equal(extraAdvanceRes.status, 409);
     const extraAdvanceErr = FactoryFlowApiErrorResponseSchema.parse(await extraAdvanceRes.json());
-    assert.equal(extraAdvanceErr.error.code, 'FACTORY_FLOW_INVALID_STAGE_ADVANCE');
+    assert.equal(extraAdvanceErr.error.code, 'FACTORY_FLOW_INVALID_TRANSITION');
 
     // Confirma que o Fluxo 2 não foi afetado pelas transições do Fluxo 1.
     const checkTwoRes = await fetch(`${baseUrl}/api/factory/flows/${createdTwo.flow.id}`, {
@@ -896,5 +1031,177 @@ test(
     const checkTwo = FactoryFlowDetailsSchema.parse(await checkTwoRes.json());
     assert.equal(checkTwo.flow.currentStage, 'planning');
     assert.equal(checkTwo.flow.state, 'waiting_action');
+  },
+);
+
+test(
+  'circuit breaker pausa o loop autônomo em waiting_action ao atingir MAX_AUTO_ITERATIONS (3/3) sem aprovação',
+  { timeout: 30000 },
+  async context => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'df-factory-circuit-breaker-'));
+    const binDir = join(rootDir, 'bin');
+    const repoDir = join(rootDir, 'repo');
+    const dbPath = join(rootDir, 'reviews.db');
+    mkdirSync(binDir);
+    mkdirSync(repoDir);
+
+    const claudeTarget = join(binDir, 'claude');
+    copyFileSync(new URL('./fixtures/claude.ts', import.meta.url), claudeTarget);
+    chmodSync(claudeTarget, 0o755);
+
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${binDir}:${previousPath ?? ''}`;
+
+    const { server, sessionManager, shutdown } = createReviewServer({ dbPath });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+
+    const address = server.address();
+    assert(address && typeof address !== 'string');
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+
+    context.after(async () => {
+      await shutdown();
+      process.env.PATH = previousPath;
+      rmSync(rootDir, { recursive: true, force: true });
+    });
+
+    const createRes = await fetch(`${baseUrl}/api/factory/flows`, {
+      method: 'POST',
+      headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        task: { inputType: 'title', value: 'Testar circuit breaker', repoPath: repoDir },
+        startSession: true,
+        cols: 100,
+        rows: 30,
+      }),
+    });
+    assert.equal(createRes.status, 201);
+    const created = (await createRes.json()) as {
+      flow: { id: string };
+      session: BackgroundSessionSummary;
+    };
+    const flowId = created.flow.id;
+
+    const getDetails = async () => {
+      const response = await fetch(`${baseUrl}/api/factory/flows/${flowId}`, {
+        headers: { Origin: ALLOWED_ORIGIN },
+      });
+      assert.equal(response.status, 200);
+      return FactoryFlowDetailsSchema.parse(await response.json());
+    };
+
+    const waitForStageSession = async (stage: string, seenSessionIds: Set<string>) => {
+      let match: BackgroundSessionSummary | undefined;
+      await waitFor(() => {
+        match = sessionManager
+          .listSessions()
+          .find(
+            session =>
+              session.flowId === flowId &&
+              session.stage === stage &&
+              session.status === 'running' &&
+              !seenSessionIds.has(session.sessionId),
+          );
+        return Boolean(match);
+      });
+      assert.ok(match);
+      seenSessionIds.add(match.sessionId);
+      await waitFor(() =>
+        /READY:[^\n]*\n/.test(sessionManager.getSession(match!.sessionId)?.buffer.replay() ?? ''),
+      );
+      return match;
+    };
+
+    const seen = new Set<string>([created.session.sessionId]);
+    await waitFor(() =>
+      /READY:[^\n]*\n/.test(sessionManager.getSession(created.session.sessionId)?.buffer.replay() ?? ''),
+    );
+    assert.ok(created.session.reportPath);
+    writeFileSync(created.session.reportPath, '# Especificação\n\nEscopo definido.\n');
+    sessionManager.writeInput(created.session.sessionId, 'EXIT0');
+
+    const planningSession = await waitForStageSession('planning', seen);
+    assert.ok(planningSession.reportPath);
+    writeFileSync(planningSession.reportPath, '# Plano\n\n1. Implementar.\n');
+    sessionManager.writeInput(planningSession.sessionId, 'EXIT0');
+    await waitFor(() => sessionManager.getSession(planningSession.sessionId)?.status === 'exited');
+
+    const approveRes = await fetch(`${baseUrl}/api/factory/flows/${flowId}/advance`, {
+      method: 'POST',
+      headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ startSession: true }),
+    });
+    assert.equal(approveRes.status, 200);
+
+    for (let iteration = 1; iteration <= 3; iteration += 1) {
+      const devSession = await waitForStageSession('development', seen);
+      assert.ok(devSession.reportPath);
+      writeFileSync(
+        devSession.reportPath,
+        [
+          '# Relatório de Implementação',
+          '## Arquivos alterados',
+          '- src/feature.ts',
+          '## Resumo das mudanças',
+          `Tentativa ${iteration}`,
+          '## Status dos passos do plano',
+          '| Passo do Plano | Status | Observações |',
+          '| --- | --- | --- |',
+          `| Passo 1 | Concluído | Iteração ${iteration} |`,
+        ].join('\n'),
+      );
+      sessionManager.writeInput(devSession.sessionId, 'EXIT0');
+
+      const testsSession = await waitForStageSession('tests', seen);
+      assert.ok(testsSession.reportPath);
+      writeFileSync(
+        testsSession.reportPath,
+        [
+          '# Relatório de Testes',
+          '## Arquivos de teste alterados',
+          '- test/feature.test.ts',
+          '## Comandos executados',
+          '- npm test (exit 1)',
+          '## Resultados e cobertura',
+          `FAIL na iteração ${iteration}.`,
+        ].join('\n'),
+      );
+      sessionManager.writeInput(testsSession.sessionId, 'EXIT0');
+
+      const reviewSession = await waitForStageSession('review', seen);
+      assert.ok(reviewSession.reportPath);
+      writeFileSync(
+        reviewSession.reportPath,
+        [
+          '# Relatório de Code Review',
+          '## Resumo Executivo',
+          `Bloqueador persistente na iteração ${iteration}.`,
+          '## Pontos Encontrados',
+          '- [BLOQUEANTE] src/feature.ts:10 ainda falha.',
+          '## Parecer Final',
+          'Veredito: REPROVADO / REQUER AJUSTES',
+          'Ajuste necessário.',
+        ].join('\n'),
+      );
+      sessionManager.writeInput(reviewSession.sessionId, 'EXIT0');
+      await waitFor(() => sessionManager.getSession(reviewSession.sessionId)?.status === 'exited');
+    }
+
+    const pausedDetails = await waitForFlowDetails(
+      getDetails,
+      details =>
+        details.flow.state === 'waiting_action' && details.flow.loopPausedReason !== null,
+    );
+    assert.equal(pausedDetails.flow.currentStage, 'review');
+    assert.equal(pausedDetails.flow.state, 'waiting_action');
+    assert.equal(pausedDetails.flow.iteration, 3);
+    assert.equal(pausedDetails.flow.maxIterations, 3);
+    assert.equal(pausedDetails.flow.lastReviewVerdict, 'changes_requested');
+    assert.match(pausedDetails.flow.loopPausedReason ?? '', /Limite máximo de 3 iterações automáticas/);
+    assert.equal(
+      sessionManager.listSessions().filter(s => s.flowId === flowId && s.stage === 'development').length,
+      3,
+    );
   },
 );

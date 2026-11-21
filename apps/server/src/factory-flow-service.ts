@@ -5,6 +5,7 @@ import {
   AdvanceFactoryStageRequestSchema,
   CreateFactoryFlowRequestSchema,
   FACTORY_FLOW_CONTRACT_VERSION,
+  FACTORY_MAX_AUTO_ITERATIONS,
   FACTORY_STAGE_ORDER,
   FactoryFlowArtifactSchema,
   FactoryFlowDomainError,
@@ -279,6 +280,10 @@ export class FactoryFlowService {
       state: 'queued',
       currentStage: 'triage',
       currentSessionId: null,
+      iteration: 0,
+      maxIterations: FACTORY_MAX_AUTO_ITERATIONS,
+      lastReviewVerdict: null,
+      loopPausedReason: null,
       createdAt,
       updatedAt: createdAt,
       finishedAt: null,
@@ -504,6 +509,8 @@ export class FactoryFlowService {
 
           const at = parsed.data.at ?? this.now();
           const nextState = flow.state === 'running' ? 'waiting_action' : 'running';
+          const nextIteration =
+            nextStage === 'development' && flow.iteration === 0 ? 1 : undefined;
           const advanced = this.repository.saveFlowTransition(
             flowId,
             {
@@ -512,6 +519,8 @@ export class FactoryFlowService {
               at,
               reason: parsed.data.reason ?? `Avanço da etapa ${flow.currentStage} para ${nextStage}`,
               currentSessionId: null,
+              ...(nextIteration !== undefined ? { iteration: nextIteration } : {}),
+              loopPausedReason: null,
             },
             { expectedUpdatedAt: parsed.data.expectedUpdatedAt },
           );
@@ -609,6 +618,7 @@ export class FactoryFlowService {
           }
 
           const at = parsed.data.at ?? this.now();
+          const nextIteration = Math.max(flow.iteration, 1) + 1;
           this.repository.saveFlowTransition(
             flowId,
             {
@@ -617,6 +627,9 @@ export class FactoryFlowService {
               at,
               reason: parsed.data.reason ?? `Retorno da etapa ${flow.currentStage} para ${targetStage}`,
               currentSessionId: null,
+              iteration: nextIteration,
+              lastReviewVerdict: null,
+              loopPausedReason: null,
             },
             { expectedUpdatedAt: parsed.data.expectedUpdatedAt, direction: 'return' },
           );
@@ -765,20 +778,6 @@ export class FactoryFlowService {
     }
 
     const timestamp = parsed.data.at ?? this.now();
-    const artifact = FactoryFlowArtifactSchema.parse({
-      contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
-      id: this.generateId(),
-      flowId,
-      stage: parsed.data.stage,
-      sessionId: parsed.data.sessionId ?? null,
-      kind: parsed.data.kind,
-      format: parsed.data.format,
-      path: parsed.data.path,
-      status: parsed.data.status,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-      error: parsed.data.error ?? null,
-    });
 
     try {
       return await this.repository.withWriteLock(() => {
@@ -790,6 +789,22 @@ export class FactoryFlowService {
             404,
           );
         }
+
+        const artifact = FactoryFlowArtifactSchema.parse({
+          contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+          id: this.generateId(),
+          flowId,
+          stage: parsed.data.stage,
+          sessionId: parsed.data.sessionId ?? null,
+          kind: parsed.data.kind,
+          format: parsed.data.format,
+          path: parsed.data.path,
+          status: parsed.data.status,
+          iteration: parsed.data.iteration ?? flow.iteration,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          error: parsed.data.error ?? null,
+        });
 
         return this.repository.saveArtifact(artifact, options);
       });

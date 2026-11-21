@@ -60,10 +60,12 @@ export default function App() {
     advanceFlowStage,
     rerunFlowStage,
     returnFlowStage,
+    cancelFlow,
     openTerminal,
     openFlowTerminal,
     minimizeTerminal,
     bindActiveSessionId,
+    stopSession,
     dismissNotification,
     clearAllNotifications,
   } = useBackgroundOperations();
@@ -238,6 +240,8 @@ export default function App() {
         onOpenTerminal={openTerminal}
         onOpenFlowRoadmap={flowId => setRoadmapFlowId(flowId)}
         onViewReport={path => setViewingMarkdownPath(path)}
+        onStopSession={stopSession}
+        onCancelFlow={cancelFlow}
         theme={theme}
         onToggleTheme={toggleTheme}
       />
@@ -305,6 +309,9 @@ export default function App() {
               rows: 36,
               approvedNotes,
             });
+          }}
+          onCancelFlow={async flowId => {
+            await cancelFlow(flowId);
           }}
           onViewMarkdown={path => setViewingMarkdownPath(path)}
         />

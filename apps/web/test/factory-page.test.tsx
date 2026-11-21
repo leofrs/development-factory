@@ -4,6 +4,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
   FACTORY_FLOW_CONTRACT_VERSION,
+  FACTORY_MAX_AUTO_ITERATIONS,
   type BackgroundSessionSummary,
   type FactoryFlow,
 } from '@development-factory/shared';
@@ -31,6 +32,10 @@ function createFlow(overrides: Partial<FactoryFlow> = {}): FactoryFlow {
     currentStage: 'triage',
     state: 'running',
     currentSessionId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    iteration: 0,
+    maxIterations: FACTORY_MAX_AUTO_ITERATIONS,
+    lastReviewVerdict: null,
+    loopPausedReason: null,
     createdAt: '2026-11-19T12:00:00.000Z',
     updatedAt: '2026-11-19T12:05:00.000Z',
     finishedAt: null,
@@ -78,8 +83,8 @@ test('FactoryPage exibe apenas seleção de repositório e botão Iniciar fluxo'
   assert.doesNotMatch(html, /Parar/);
 });
 
-test('FactoryFlowRoadmapModal exibe o roadmap completo do fluxo sem botão de terminal ou parar', () => {
-  const flow = createFlow({
+test('FactoryFlowRoadmapModal exibe botão Parar apenas quando o fluxo está Em execução', () => {
+  const waitingFlow = createFlow({
     id: '22222222-2222-4222-8222-222222222222',
     title: 'PAY-202 · Webhook Pix',
     target: {
@@ -94,31 +99,54 @@ test('FactoryFlowRoadmapModal exibe o roadmap completo do fluxo sem botão de te
     updatedAt: '2026-11-19T12:10:00.000Z',
   });
 
-  const html = renderToStaticMarkup(
+  const waitingHtml = renderToStaticMarkup(
     createElement(FactoryFlowRoadmapModal, {
-      flow,
+      flow: waitingFlow,
       onClose: noop,
       onAdvanceFlowStage: noopAsync,
       onRerunFlowStage: noopAsync,
+      onCancelFlow: noopAsync,
       onViewMarkdown: noop,
     }),
   );
 
-  assert.match(html, /PAY-202 · Webhook Pix/);
-  assert.match(html, /\/home\/dev\/repos\/payments-api/);
-  assert.match(html, /Triagem \/ Contexto/);
-  assert.match(html, /Planejamento/);
-  assert.match(html, /Desenvolvimento/);
-  assert.match(html, /Testes/);
-  assert.match(html, /Code Review/);
-  assert.match(html, /PR/);
-  assert.match(html, /Reexecutar/);
-  assert.doesNotMatch(html, /Abrir terminal/);
-  assert.doesNotMatch(html, />Terminal</);
-  assert.doesNotMatch(html, /Parar/);
+  assert.match(waitingHtml, /PAY-202 · Webhook Pix/);
+  assert.match(waitingHtml, /\/home\/dev\/repos\/payments-api/);
+  assert.match(waitingHtml, /Triagem \/ Contexto/);
+  assert.match(waitingHtml, /Planejamento/);
+  assert.match(waitingHtml, /Desenvolvimento/);
+  assert.match(waitingHtml, /Testes/);
+  assert.match(waitingHtml, /Code Review/);
+  assert.match(waitingHtml, /PR/);
+  assert.match(waitingHtml, /Reexecutar/);
+  assert.doesNotMatch(waitingHtml, /Abrir terminal/);
+  assert.doesNotMatch(waitingHtml, />Terminal</);
+  assert.doesNotMatch(waitingHtml, /Parar/);
+
+  const runningFlow = createFlow({
+    id: '22222222-2222-4222-8222-222222222222',
+    title: 'PAY-202 · Webhook Pix',
+    currentStage: 'development',
+    state: 'running',
+  });
+
+  const runningHtml = renderToStaticMarkup(
+    createElement(FactoryFlowRoadmapModal, {
+      flow: runningFlow,
+      onClose: noop,
+      onAdvanceFlowStage: noopAsync,
+      onRerunFlowStage: noopAsync,
+      onCancelFlow: noopAsync,
+      onViewMarkdown: noop,
+    }),
+  );
+
+  assert.match(runningHtml, /Em execução/);
+  assert.match(runningHtml, /Parar fluxo PAY-202 · Webhook Pix/);
+  assert.match(runningHtml, />Parar</);
 });
 
-test('BackgroundTasksPopover exibe múltiplos fluxos da Factory em paralelo com reviews ativos', () => {
+test('BackgroundTasksPopover exibe múltiplos fluxos da Factory em paralelo com botão Parar para itens Em execução', () => {
   const flowA = createFlow({
     id: '11111111-1111-4111-8111-111111111111',
     title: 'AUTH-101 · Login SSO',
@@ -133,6 +161,21 @@ test('BackgroundTasksPopover exibe múltiplos fluxos da Factory em paralelo com 
     state: 'running',
     currentSessionId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
   });
+  const flowC = createFlow({
+    id: '33333333-3333-4333-8333-333333333333',
+    title: 'BILL-303 · Fatura PDF',
+    currentStage: 'planning',
+    state: 'running',
+    currentSessionId: null,
+  });
+  const cancelledFlow = createFlow({
+    id: '44444444-4444-4444-8444-444444444444',
+    title: 'OLD-404 · Fluxo parado',
+    currentStage: 'tests',
+    state: 'cancelled',
+    currentSessionId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+    finishedAt: '2026-11-19T12:06:00.000Z',
+  });
 
   const factorySessionA = createSession({
     sessionId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
@@ -146,7 +189,14 @@ test('BackgroundTasksPopover exibe múltiplos fluxos da Factory em paralelo com 
     flowId: flowB.id,
     stage: 'development',
   });
-  const reviewSession = createSession({
+  const staleCancelledSession = createSession({
+    sessionId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+    flowId: cancelledFlow.id,
+    stage: 'tests',
+    status: 'running',
+    historyState: 'pending',
+  });
+  const reviewSessionSaved = createSession({
     sessionId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
     mode: 'review',
     title: 'Review #42 · Checkout',
@@ -155,29 +205,53 @@ test('BackgroundTasksPopover exibe múltiplos fluxos da Factory em paralelo com 
     historyState: 'saved',
     reportPath: '/tmp/reviews/pr-42.md',
   });
+  const reviewSessionRunning = createSession({
+    sessionId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+    mode: 'review',
+    title: 'Review #99 · Pagamentos',
+    flowId: undefined,
+    stage: undefined,
+    status: 'running',
+    historyState: 'pending',
+  });
 
   const html = renderToStaticMarkup(
     createElement(BackgroundTasksPopover, {
       id: 'bg-popover',
-      sessions: [factorySessionA, factorySessionB, reviewSession],
-      factoryFlows: [flowA, flowB],
+      sessions: [
+        factorySessionA,
+        factorySessionB,
+        staleCancelledSession,
+        reviewSessionSaved,
+        reviewSessionRunning,
+      ],
+      factoryFlows: [flowA, flowB, flowC, cancelledFlow],
       onOpenTerminal: noop,
       onOpenFlowRoadmap: noop,
       onViewReport: noop,
+      onStopSession: async () => reviewSessionRunning,
+      onCancelFlow: async () => flowB,
       onClose: noop,
     }),
   );
 
   assert.match(html, /AUTH-101 · Login SSO/);
   assert.match(html, /PAY-202 · Webhook Pix/);
+  assert.match(html, /BILL-303 · Fatura PDF/);
   assert.match(html, /Review #42 · Checkout/);
+  assert.match(html, /Review #99 · Pagamentos/);
   assert.match(html, /01 · Triagem/);
   assert.match(html, /03 · Desenvolvimento/);
   assert.match(html, /Abrir roadmap do fluxo AUTH-101 · Login SSO/);
   assert.match(html, /Ver plano/);
   assert.match(html, /Ver parecer/);
-  assert.doesNotMatch(html, /Cancelar/);
-  assert.doesNotMatch(html, /Encerrar/);
+  assert.match(html, /Parar fluxo PAY-202 · Webhook Pix/);
+  assert.match(html, /Parar fluxo BILL-303 · Fatura PDF/);
+  assert.match(html, /Parar execução de Review #99 · Pagamentos/);
+  assert.doesNotMatch(html, /Parar fluxo AUTH-101 · Login SSO/);
+  assert.doesNotMatch(html, /Parar fluxo OLD-404 · Fluxo parado/);
+  assert.doesNotMatch(html, /Parar execução de Review #42 · Checkout/);
+  assert.match(html, /4 em execução/);
 });
 
 test('HistoryModal inclui a aba Artefatos de fluxos', () => {
@@ -311,6 +385,8 @@ test('Etapas 04 (tests) e 05 (review) geram notificações e botões de reexecu�
     currentStage: 'pr',
     state: 'waiting_action',
     currentSessionId: null,
+    iteration: 2,
+    lastReviewVerdict: 'approved',
   });
   const prRoadmapHtml = renderToStaticMarkup(
     createElement(FactoryFlowRoadmapModal, {
@@ -322,5 +398,44 @@ test('Etapas 04 (tests) e 05 (review) geram notificações e botões de reexecu�
       onViewMarkdown: noop,
     }),
   );
-  assert.match(prRoadmapHtml, /A abertura de PR será disponibilizada futuramente/);
+  assert.match(prRoadmapHtml, /Executar etapa PR/);
+  assert.match(prRoadmapHtml, /Iteração 2\/3/);
+  assert.match(prRoadmapHtml, /Review: Aprovado para PR/);
+
+  const circuitBreakerFlow = createFlow({
+    id: '55555555-5555-4555-8555-555555555555',
+    currentStage: 'review',
+    state: 'waiting_action',
+    currentSessionId: null,
+    iteration: 3,
+    lastReviewVerdict: 'changes_requested',
+    loopPausedReason:
+      'Limite máximo de 3 iterações automáticas atingido sem aprovação no Code Review. Intervenção humana necessária.',
+  });
+  const circuitBreakerHtml = renderToStaticMarkup(
+    createElement(FactoryFlowRoadmapModal, {
+      flow: circuitBreakerFlow,
+      onClose: noop,
+      onAdvanceFlowStage: noopAsync,
+      onRerunFlowStage: noopAsync,
+      onReturnFlowStage: noopAsync,
+      onViewMarkdown: noop,
+    }),
+  );
+  assert.match(circuitBreakerHtml, /Iteração 3\/3/);
+  assert.match(circuitBreakerHtml, /Review: Requer ajustes/);
+  assert.match(circuitBreakerHtml, /Limite máximo de 3 iterações automáticas/);
+
+  const popoverHtml = renderToStaticMarkup(
+    createElement(BackgroundTasksPopover, {
+      id: 'bg-loop',
+      sessions: [],
+      factoryFlows: [prFlow],
+      onOpenTerminal: noop,
+      onOpenFlowRoadmap: noop,
+      onViewReport: noop,
+      onClose: noop,
+    }),
+  );
+  assert.match(popoverHtml, /Iteração 2\/3/);
 });

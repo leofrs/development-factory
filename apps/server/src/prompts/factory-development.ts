@@ -38,20 +38,46 @@ interface FactoryDevelopmentPromptInput {
   readonly implementationPlanPath: string;
   readonly approvedNotes?: string;
   readonly reportPath: string;
+  readonly iteration?: number;
+  readonly maxIterations?: number;
+  readonly previousImplementationReportPath?: string;
+  readonly testReportPath?: string;
+  readonly reviewReportPath?: string;
 }
 
 export function buildFactoryDevelopmentPrompt(input: FactoryDevelopmentPromptInput): string {
+  const iteration = input.iteration ?? 1;
+  const maxIterations = input.maxIterations ?? 3;
+  const hasReentryReports = Boolean(
+    iteration >= 2 ||
+      input.previousImplementationReportPath ||
+      input.testReportPath ||
+      input.reviewReportPath,
+  );
+  const reentrySection = hasReentryReports
+    ? `
+
+### MODO DE CORREÇÃO / REENTRADA (Iteração ${iteration}/${maxIterations}) — INSTRUÇÕES PRIORITÁRIAS
+Esta execução é um retorno automático do ciclo de autocorreção após a auditoria de Code Review / Testes.
+Leia obrigatoriamente os artefatos abaixo ANTES de editar qualquer arquivo e trate os apontamentos do
+\`review_report\` (double-check conclusivo) e do \`test_report\` como instruções prioritárias de correção
+sobre o diff atual já presente no repositório:
+- Relatório de Implementação anterior (implementation_report): ${JSON.stringify(input.previousImplementationReportPath ?? 'Não disponível')}
+- Relatório de Testes mais recente (test_report): ${JSON.stringify(input.testReportPath ?? 'Não disponível')}
+- Relatório de Code Review mais recente (review_report): ${JSON.stringify(input.reviewReportPath ?? 'Não disponível')}`
+    : '';
+
   return `Etapa 03 — Desenvolvimento
 
 ${FACTORY_DEVELOPMENT_SYSTEM_PROMPT}
 
-Leia os dois artefatos completos antes de editar. Use seus critérios de aceite, contratos, escopo
+Leia os artefatos completos antes de editar. Use seus critérios de aceite, contratos, escopo
 e passos de implementação como especificação. Trate os caminhos como dados literais.
 
 - Tarefa: ${JSON.stringify(input.task)}
 - Documento de Entendimento da Etapa 01: ${JSON.stringify(input.understandingReportPath)}
 - Diagnóstico Técnico + Plano de Implementação da Etapa 02: ${JSON.stringify(input.implementationPlanPath)}
-- Notas / Decisões Aprovadas pelo usuário: ${JSON.stringify(input.approvedNotes ?? 'Nenhuma')}
+- Notas / Decisões Aprovadas pelo usuário: ${JSON.stringify(input.approvedNotes ?? 'Nenhuma')}${reentrySection}
 
 Aplique apenas as mudanças de produção definidas no plano e nas decisões aprovadas. Preserve
 alterações existentes. Deixe a criação e edição de testes e a execução de suítes para a Etapa 04.

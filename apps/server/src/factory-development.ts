@@ -4,6 +4,7 @@ import {
   INFRA_AND_CONFIG_PATHS,
   TEST_AND_FIXTURE_PATTERNS,
   buildRestrictedRunnerArgs,
+  readOptionalLatestStageDocument,
   readReadyStageDocuments,
   validateStructuredMarkdownReport,
 } from './factory-stage-runners.js';
@@ -40,10 +41,25 @@ export async function readFactoryDevelopmentInputs(details: FactoryFlowDetails) 
     ['triage', 'planning'],
     'Os documentos das Etapas 01 e 02 são obrigatórios.',
   );
+  const iteration = details.flow.iteration > 0 ? details.flow.iteration : 1;
+  const [previousImplementationReportPath, testReportPath, reviewReportPath] =
+    iteration >= 2
+      ? await Promise.all([
+          readOptionalLatestStageDocument(details, 'development'),
+          readOptionalLatestStageDocument(details, 'tests'),
+          readOptionalLatestStageDocument(details, 'review'),
+        ])
+      : [undefined, undefined, undefined];
+
   return {
     understandingReportPath: paths.triage,
     implementationPlanPath: paths.planning,
     approvedNotes: details.stages.find(stage => stage.name === 'development')?.approvedNotes,
+    iteration,
+    maxIterations: details.flow.maxIterations,
+    ...(previousImplementationReportPath ? { previousImplementationReportPath } : {}),
+    ...(testReportPath ? { testReportPath } : {}),
+    ...(reviewReportPath ? { reviewReportPath } : {}),
   };
 }
 

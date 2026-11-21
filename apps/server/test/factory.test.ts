@@ -17,11 +17,23 @@ import {
   FACTORY_ARCHITECTURE_SYSTEM_PROMPT,
   buildFactoryArchitecturePrompt,
 } from '../src/prompts/factory-architecture.js';
+import {
+  IMPLEMENTATION_REPORT_SECTIONS,
+  IMPLEMENTATION_REPORT_TITLE,
+  buildFactoryDevelopmentPrompt,
+} from '../src/prompts/factory-development.js';
 import { buildFactoryPlanPrompt } from '../src/prompts/factory-plan.js';
+import {
+  FACTORY_PR_SYSTEM_PROMPT,
+  PR_SUMMARY_SECTIONS,
+  PR_SUMMARY_TITLE,
+  buildFactoryPrPrompt,
+} from '../src/prompts/factory-pr.js';
 import {
   FACTORY_REVIEW_SYSTEM_PROMPT,
   REVIEW_REPORT_SECTIONS,
   REVIEW_REPORT_TITLE,
+  REVIEW_VERDICT_LABELS,
   buildFactoryReviewPrompt,
 } from '../src/prompts/factory-review.js';
 import {
@@ -30,7 +42,8 @@ import {
   TEST_REPORT_TITLE,
   buildFactoryTestsPrompt,
 } from '../src/prompts/factory-tests.js';
-import { buildReviewRunnerArgs, isReviewReport } from '../src/factory-review.js';
+import { buildPrRunnerArgs, isPrSummary } from '../src/factory-pr.js';
+import { buildReviewRunnerArgs, isReviewReport, parseReviewVerdict } from '../src/factory-review.js';
 import { buildTestsRunnerArgs, isTestReport } from '../src/factory-tests.js';
 import { createReviewServer } from '../src/server.js';
 
@@ -215,7 +228,102 @@ test('prompts, runners e validadores das Etapas 04 (tests) e 05 (review) seguem 
     'Aprovado para PR.',
   ].join('\n');
   assert.equal(isReviewReport(validReviewReport), true);
+  assert.equal(parseReviewVerdict(validReviewReport), 'approved');
   assert.equal(isReviewReport(`# ${REVIEW_REPORT_TITLE}\n\nIncompleto.`), false);
+
+  const approvedWithWarningsReport = [
+    `# ${REVIEW_REPORT_TITLE}`,
+    `## ${REVIEW_REPORT_SECTIONS.executiveSummary}`,
+    'Aprovado com pequenas sugestões.',
+    `## ${REVIEW_REPORT_SECTIONS.findings}`,
+    '- [SUGESTÃO] Extrair helper.',
+    `## ${REVIEW_REPORT_SECTIONS.verdict}`,
+    `Veredito: ${REVIEW_VERDICT_LABELS.approvedWithWarnings}`,
+    'Sem bloqueadores críticos.',
+  ].join('\n');
+  assert.equal(isReviewReport(approvedWithWarningsReport), true);
+  assert.equal(parseReviewVerdict(approvedWithWarningsReport), 'approved_with_warnings');
+
+  const rejectedReviewReport = [
+    `# ${REVIEW_REPORT_TITLE}`,
+    `## ${REVIEW_REPORT_SECTIONS.executiveSummary}`,
+    'Falha confirmada no double-check dos testes.',
+    `## ${REVIEW_REPORT_SECTIONS.findings}`,
+    '- [BLOQUEANTE] src/jwt.ts:14 retorna token expirado.',
+    `## ${REVIEW_REPORT_SECTIONS.verdict}`,
+    `Veredito: ${REVIEW_VERDICT_LABELS.changesRequested}`,
+    'Corrigir validação de expiração antes do PR.',
+  ].join('\n');
+  assert.equal(isReviewReport(rejectedReviewReport), true);
+  assert.equal(parseReviewVerdict(rejectedReviewReport), 'changes_requested');
+
+  const ambiguousReviewReport = [
+    `# ${REVIEW_REPORT_TITLE}`,
+    `## ${REVIEW_REPORT_SECTIONS.executiveSummary}`,
+    'Resumo.',
+    `## ${REVIEW_REPORT_SECTIONS.findings}`,
+    'Pontos.',
+    `## ${REVIEW_REPORT_SECTIONS.verdict}`,
+    'Veredito: APROVADO PARA PR ou REPROVADO / REQUER AJUSTES',
+  ].join('\n');
+  assert.equal(parseReviewVerdict(ambiguousReviewReport), null);
+  assert.equal(isReviewReport(ambiguousReviewReport), false);
+
+  const reentryDevPrompt = buildFactoryDevelopmentPrompt({
+    task: 'PROD-1234',
+    understandingReportPath: '/tmp/repo/.code-reviews/spec.md',
+    implementationPlanPath: '/tmp/repo/.code-reviews/plan.md',
+    previousImplementationReportPath: '/tmp/repo/.code-reviews/dev-1.md',
+    testReportPath: '/tmp/repo/.code-reviews/tests-1.md',
+    reviewReportPath: '/tmp/repo/.code-reviews/review-1.md',
+    approvedNotes: 'Preservar assinatura pública',
+    reportPath: '/tmp/repo/.code-reviews/dev-2.md',
+    iteration: 2,
+    maxIterations: 3,
+  });
+  assert(reentryDevPrompt.includes('Iteração 2/3'));
+  assert(reentryDevPrompt.includes('/tmp/repo/.code-reviews/dev-1.md'));
+  assert(reentryDevPrompt.includes('/tmp/repo/.code-reviews/tests-1.md'));
+  assert(reentryDevPrompt.includes('/tmp/repo/.code-reviews/review-1.md'));
+  assert(reentryDevPrompt.includes(`# ${IMPLEMENTATION_REPORT_TITLE}`));
+  for (const heading of Object.values(IMPLEMENTATION_REPORT_SECTIONS)) {
+    assert(reentryDevPrompt.includes(`## ${heading}`));
+  }
+
+  const prPrompt = buildFactoryPrPrompt({
+    task: 'PROD-1234',
+    understandingReportPath: '/tmp/repo/.code-reviews/spec.md',
+    implementationPlanPath: '/tmp/repo/.code-reviews/plan.md',
+    implementationReportPath: '/tmp/repo/.code-reviews/dev-2.md',
+    testReportPath: '/tmp/repo/.code-reviews/tests-2.md',
+    reviewReportPath: '/tmp/repo/.code-reviews/review-2.md',
+    reportPath: '/tmp/repo/.code-reviews/pr-summary.md',
+  });
+  assert(prPrompt.includes(FACTORY_PR_SYSTEM_PROMPT));
+  assert(prPrompt.includes('/tmp/repo/.code-reviews/review-2.md'));
+  assert(prPrompt.includes(`# ${PR_SUMMARY_TITLE}`));
+  for (const heading of Object.values(PR_SUMMARY_SECTIONS)) {
+    assert(prPrompt.includes(`## ${heading}`));
+  }
+
+  const prArgs = buildPrRunnerArgs('/tmp/repo/.code-reviews/pr-summary.md');
+  assert(prArgs.includes('--restricted'));
+  assert.match(prArgs[prArgs.indexOf('--allowedTools') + 1] ?? '', /Edit\(\/\.code-reviews\/pr-summary\.md\)/);
+  assert.equal(
+    isPrSummary(
+      [
+        `# ${PR_SUMMARY_TITLE}`,
+        `## ${PR_SUMMARY_SECTIONS.summary}`,
+        'PR preparado.',
+        `## ${PR_SUMMARY_SECTIONS.validation}`,
+        'Testes e Review aprovados.',
+        `## ${PR_SUMMARY_SECTIONS.prDetails}`,
+        'Branch feat/prod-1234 -> main',
+      ].join('\n'),
+    ),
+    true,
+  );
+  assert.equal(isPrSummary(`# ${PR_SUMMARY_TITLE}\n\nIncompleto.`), false);
 });
 
 test('start_factory executa PTY, salva plano em Markdown e permite leitura formatada via API', { timeout: 30000 }, async context => {

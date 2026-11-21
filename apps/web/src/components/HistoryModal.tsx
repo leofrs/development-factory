@@ -278,6 +278,7 @@ export function HistoryModal({
       kindLabel: string;
       path: string;
       status: FactoryFlowArtifact['status'];
+      iteration: number;
       viewable: boolean;
     }> = [];
 
@@ -296,6 +297,7 @@ export function HistoryModal({
           kindLabel: 'Plano técnico',
           path: stage.reportPath,
           status: 'ready',
+          iteration: 0,
           viewable: true,
         });
       }
@@ -308,6 +310,7 @@ export function HistoryModal({
         kindLabel: getFactoryArtifactKindLabel(artifact.kind),
         path: artifact.path,
         status: artifact.status,
+        iteration: artifact.iteration,
         viewable: artifact.format === 'markdown' && artifact.status !== 'failed',
       })),
       ...stagePlanFallbacks,
@@ -546,6 +549,11 @@ export function HistoryModal({
                                     {getFactoryStageStep(artifact.stage)} ·{' '}
                                     {getFactoryStageLabel(artifact.stage)}
                                   </span>
+                                  {artifact.iteration > 0 && (
+                                    <span className="rounded border border-accent/25 bg-surface px-1.5 py-0.5 font-mono text-[10px] text-accent">
+                                      Iteração {artifact.iteration}
+                                    </span>
+                                  )}
                                   <span className={`font-mono text-[10px] ${statusInfo.textClass}`}>
                                     {statusInfo.label}
                                   </span>
@@ -568,6 +576,11 @@ export function HistoryModal({
                                     {getFactoryStageStep(artifact.stage)} ·{' '}
                                     {getFactoryStageLabel(artifact.stage)}
                                   </span>
+                                  {artifact.iteration > 0 && (
+                                    <span className="rounded border border-accent/25 bg-surface px-1.5 py-0.5 font-mono text-[10px] text-accent">
+                                      Iteração {artifact.iteration}
+                                    </span>
+                                  )}
                                   <span className={`font-mono text-[10px] ${statusInfo.textClass}`}>
                                     {statusInfo.label}
                                   </span>

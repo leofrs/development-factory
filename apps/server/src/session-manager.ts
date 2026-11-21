@@ -8,6 +8,7 @@ import {
   FACTORY_FLOW_CONTRACT_VERSION,
   REVIEW_CONTRACT_VERSION,
   getNextFactoryStage,
+  isFactoryReviewApprovedVerdict,
   isFinalFactoryFlowState,
   type AppEvent,
   type BackgroundSessionSummary,
@@ -15,6 +16,7 @@ import {
   type FactoryFlowDetails,
   type FactoryFlowError,
   type FactoryRequest,
+  type FactoryReviewVerdict,
   type FactoryStageName,
   type ReviewError,
   type ReviewProcess,
@@ -24,13 +26,15 @@ import {
 import { resolveReviewReportDirectory } from './artifacts.js';
 import { buildDevelopmentRunnerArgs, readFactoryDevelopmentInputs } from './factory-development.js';
 import { FactoryFlowServiceError, type FactoryFlowService } from './factory-flow-service.js';
-import { buildReviewRunnerArgs, readFactoryReviewInputs } from './factory-review.js';
+import { buildPrRunnerArgs, readFactoryPrInputs } from './factory-pr.js';
+import { buildReviewRunnerArgs, parseReviewVerdict, readFactoryReviewInputs } from './factory-review.js';
 import { buildTestsRunnerArgs, readFactoryTestsInputs } from './factory-tests.js';
 import { createFactoryHistory } from './history.js';
 import { buildCodeReviewPrompt } from './prompts/code-review.js';
 import { buildFactoryArchitecturePrompt } from './prompts/factory-architecture.js';
 import { buildFactoryDevelopmentPrompt } from './prompts/factory-development.js';
 import { buildFactoryPlanPrompt } from './prompts/factory-plan.js';
+import { buildFactoryPrPrompt } from './prompts/factory-pr.js';
 import { buildFactoryReviewPrompt } from './prompts/factory-review.js';
 import { buildFactoryTestsPrompt } from './prompts/factory-tests.js';
 import { createReviewReportDraft } from './review-report.js';
@@ -126,7 +130,7 @@ const STAGE_ARTIFACT_KIND: Readonly<Record<FactoryStageName, FactoryFlowArtifact
   pr: 'pr_summary',
 };
 
-type RestrictedRunnerStage = 'development' | 'tests' | 'review';
+type RestrictedRunnerStage = 'development' | 'tests' | 'review' | 'pr';
 
 const RESTRICTED_RUNNER_STAGE_CONFIG: Readonly<
   Record<
@@ -167,12 +171,21 @@ const RESTRICTED_RUNNER_STAGE_CONFIG: Readonly<
     incompleteArtifactError:
       'O Claude encerrou sem entregar um Relatório de Code Review válido.',
   },
+  pr: {
+    label: 'PR',
+    previousLabel: 'Code Review',
+    mutatesRepo: false,
+    missingInputsError:
+      'Não foi possível ler os artefatos das Etapas 01 a 05 para preparar o PR.',
+    incompleteArtifactError:
+      'O Claude encerrou sem entregar um Resumo do Pull Request válido.',
+  },
 };
 
 function isRestrictedRunnerStage(
   stage: FactoryStageName | undefined,
 ): stage is RestrictedRunnerStage {
-  return stage === 'development' || stage === 'tests' || stage === 'review';
+  return stage === 'development' || stage === 'tests' || stage === 'review' || stage === 'pr';
 }
 
 function formatReviewTitle(request: ReviewRequest): string {
@@ -574,12 +587,10 @@ export class SessionManager {
     validateRepoPath(input.repoPath);
     this.#assertCapacity();
 
-    if (input.stage === 'pr' || (isRestrictedRunnerStage(input.stage) && !input.flowId)) {
+    if (isRestrictedRunnerStage(input.stage) && !input.flowId) {
       throw new SessionManagerError(
         'FACTORY_STAGE_CONFLICT',
-        input.stage === 'pr'
-          ? 'A execução da Etapa 06 (PR) ainda não está disponível.'
-          : `Avance o fluxo do ${RESTRICTED_RUNNER_STAGE_CONFIG[input.stage].previousLabel} para ${RESTRICTED_RUNNER_STAGE_CONFIG[input.stage].label} antes de iniciar a sessão.`,
+        `Avance o fluxo do ${RESTRICTED_RUNNER_STAGE_CONFIG[input.stage].previousLabel} para ${RESTRICTED_RUNNER_STAGE_CONFIG[input.stage].label} antes de iniciar a sessão.`,
         409,
       );
     }
@@ -630,13 +641,6 @@ export class SessionManager {
     }
 
     const stage = activeFactorySession?.stage ?? input.stage ?? 'triage';
-    if (flowDetails?.flow.currentStage === 'pr') {
-      throw new SessionManagerError(
-        'FACTORY_STAGE_CONFLICT',
-        'A execução da Etapa 06 (PR) ainda não está disponível.',
-        409,
-      );
-    }
     if (!isRestrictedRunnerStage(stage) && !isRestrictedRunnerStage(flowDetails?.flow.currentStage)) {
       return this.#startFactoryRunner(input, stage, activeFactorySession, flowDetails);
     }
@@ -719,10 +723,17 @@ export class SessionManager {
         runnerArgs: buildTestsRunnerArgs(reportPath),
       });
     }
-    const inputs = await readFactoryReviewInputs(flowDetails);
+    if (stage === 'review') {
+      const inputs = await readFactoryReviewInputs(flowDetails);
+      return reportPath => ({
+        prompt: buildFactoryReviewPrompt({ ...inputs, task, reportPath }),
+        runnerArgs: buildReviewRunnerArgs(reportPath),
+      });
+    }
+    const inputs = await readFactoryPrInputs(flowDetails);
     return reportPath => ({
-      prompt: buildFactoryReviewPrompt({ ...inputs, task, reportPath }),
-      runnerArgs: buildReviewRunnerArgs(reportPath),
+      prompt: buildFactoryPrPrompt({ ...inputs, task, reportPath }),
+      runnerArgs: buildPrRunnerArgs(reportPath),
     });
   }
 
@@ -1007,14 +1018,82 @@ export class SessionManager {
     });
   }
 
-  async #autoAdvanceToPlanning(flowId: string, expectedUpdatedAt: string): Promise<void> {
+  async #readReviewVerdictFromReport(reportPath: string | null): Promise<FactoryReviewVerdict | null> {
+    if (!reportPath) {
+      return null;
+    }
+    try {
+      const content = await readFile(reportPath, 'utf8');
+      return parseReviewVerdict(content);
+    } catch {
+      return null;
+    }
+  }
+
+  async #handleAutoTransitionFailure(
+    session: ManagedSession,
+    flowId: string,
+    error: unknown,
+  ): Promise<void> {
+    if (!this.#factoryFlowService) {
+      return;
+    }
+    try {
+      const current = this.#factoryFlowService.getFlow(flowId).flow;
+      if (isFinalFactoryFlowState(current.state) || current.currentSessionId !== null) {
+        return;
+      }
+      const detail = error instanceof Error ? error.message : 'Falha desconhecida';
+      if (current.state === 'running') {
+        const fallback = await this.#factoryFlowService.transitionFlow(flowId, {
+          to: 'waiting_action',
+          stage: current.currentStage,
+          reason: `Não foi possível iniciar automaticamente a etapa ${current.currentStage}: ${detail}`,
+          currentSessionId: null,
+          loopPausedReason: `Transição automática interrompida na etapa ${current.currentStage}: ${detail}`,
+        });
+        this.#emitEvent({
+          type: 'factory_flow.updated',
+          flow: fallback.flow,
+        });
+        broadcast(session, {
+          type: 'factory_flow',
+          flowId,
+          stage: fallback.flow.currentStage,
+          state: fallback.flow.state,
+        });
+        return;
+      }
+
+      this.#emitEvent({
+        type: 'factory_flow.updated',
+        flow: current,
+      });
+      broadcast(session, {
+        type: 'factory_flow',
+        flowId,
+        stage: current.currentStage,
+        state: current.state,
+      });
+    } catch {
+      // Preserva o estado persistido caso o fluxo já tenha sido encerrado.
+    }
+  }
+
+  async #autoAdvanceAndStartStage(
+    session: ManagedSession,
+    flowId: string,
+    targetStage: Exclude<FactoryStageName, 'triage' | 'pr'>,
+    expectedUpdatedAt: string,
+    reason: string,
+  ): Promise<void> {
     if (!this.#factoryFlowService) {
       return;
     }
 
     try {
       const advanced = await this.#factoryFlowService.advanceStage(flowId, {
-        reason: 'Avanço automático da triagem para o planejamento',
+        reason,
         expectedUpdatedAt,
       });
       this.#emitEvent({
@@ -1026,34 +1105,49 @@ export class SessionManager {
         value: advanced.flow.target.value,
         repoPath: advanced.flow.target.repoPath,
         flowId: advanced.flow.id,
-        stage: 'planning',
+        stage: targetStage,
         title: advanced.flow.title,
         cols: 120,
         rows: 36,
       });
     } catch (error) {
-      try {
-        const current = this.#factoryFlowService.getFlow(flowId).flow;
-        if (
-          !isFinalFactoryFlowState(current.state) &&
-          current.state === 'running' &&
-          current.currentSessionId === null
-        ) {
-          const detail = error instanceof Error ? error.message : 'Falha desconhecida';
-          const fallback = await this.#factoryFlowService.transitionFlow(flowId, {
-            to: 'waiting_action',
-            stage: current.currentStage,
-            reason: `Não foi possível iniciar automaticamente a etapa ${current.currentStage}: ${detail}`,
-            currentSessionId: null,
-          });
-          this.#emitEvent({
-            type: 'factory_flow.updated',
-            flow: fallback.flow,
-          });
-        }
-      } catch {
-        // Preserva o estado persistido caso o fluxo já tenha sido encerrado.
-      }
+      await this.#handleAutoTransitionFailure(session, flowId, error);
+    }
+  }
+
+  async #autoReturnToDevelopment(
+    session: ManagedSession,
+    flowId: string,
+    expectedUpdatedAt: string,
+    iteration: number,
+    maxIterations: number,
+  ): Promise<void> {
+    if (!this.#factoryFlowService) {
+      return;
+    }
+
+    try {
+      const returned = await this.#factoryFlowService.returnStage(flowId, {
+        targetStage: 'development',
+        reason: `Code Review reprovou na iteração ${iteration}/${maxIterations}; retornando automaticamente para Desenvolvimento`,
+        expectedUpdatedAt,
+      });
+      this.#emitEvent({
+        type: 'factory_flow.updated',
+        flow: returned.flow,
+      });
+      await this.startFactorySession({
+        inputType: returned.flow.target.inputType,
+        value: returned.flow.target.value,
+        repoPath: returned.flow.target.repoPath,
+        flowId: returned.flow.id,
+        stage: 'development',
+        title: returned.flow.title,
+        cols: 120,
+        rows: 36,
+      });
+    } catch (error) {
+      await this.#handleAutoTransitionFailure(session, flowId, error);
     }
   }
 
@@ -1276,6 +1370,157 @@ export class SessionManager {
         return;
       }
 
+      if (session.historyState === 'saved') {
+        if (stage === 'triage') {
+          const paused = await this.#factoryFlowService.transitionFlow(flowId, {
+            to: 'waiting_action',
+            stage,
+            reason: 'Triagem concluída com especificação salva',
+            currentSessionId: null,
+          });
+          await this.#autoAdvanceAndStartStage(
+            session,
+            flowId,
+            'planning',
+            paused.flow.updatedAt,
+            'Avanço automático da triagem para o planejamento',
+          );
+          return;
+        }
+
+        if (stage === 'development') {
+          const paused = await this.#factoryFlowService.transitionFlow(flowId, {
+            to: 'waiting_action',
+            stage,
+            reason: 'Desenvolvimento concluído com relatório salvo',
+            currentSessionId: null,
+          });
+          await this.#autoAdvanceAndStartStage(
+            session,
+            flowId,
+            'tests',
+            paused.flow.updatedAt,
+            'Desenvolvimento concluído; avançando automaticamente para Testes',
+          );
+          return;
+        }
+
+        if (stage === 'tests') {
+          const paused = await this.#factoryFlowService.transitionFlow(flowId, {
+            to: 'waiting_action',
+            stage,
+            reason: 'Testes concluídos com relatório salvo',
+            currentSessionId: null,
+          });
+          await this.#autoAdvanceAndStartStage(
+            session,
+            flowId,
+            'review',
+            paused.flow.updatedAt,
+            'Testes concluídos; avançando automaticamente para Code Review (double-check)',
+          );
+          return;
+        }
+
+        if (stage === 'review') {
+          const verdict = await this.#readReviewVerdictFromReport(session.reportPath);
+          if (verdict === null) {
+            const paused = await this.#factoryFlowService.transitionFlow(flowId, {
+              to: 'waiting_action',
+              stage,
+              reason: 'Veredito do Code Review não pôde ser determinado com segurança',
+              currentSessionId: null,
+              lastReviewVerdict: null,
+              loopPausedReason:
+                'Veredito do Code Review ausente ou ambíguo. Revise o relatório antes de prosseguir.',
+            });
+            this.#emitEvent({
+              type: 'factory_flow.updated',
+              flow: paused.flow,
+            });
+            broadcast(session, {
+              type: 'factory_flow',
+              flowId,
+              stage,
+              state: paused.flow.state,
+            });
+            return;
+          }
+
+          if (isFactoryReviewApprovedVerdict(verdict)) {
+            const paused = await this.#factoryFlowService.transitionFlow(flowId, {
+              to: 'waiting_action',
+              stage,
+              reason: 'Code Review aprovado no loop autônomo',
+              currentSessionId: null,
+              lastReviewVerdict: verdict,
+              loopPausedReason: null,
+            });
+            try {
+              const advancedToPr = await this.#factoryFlowService.advanceStage(flowId, {
+                reason: 'Code Review aprovado; aguardando disparo manual da etapa PR',
+                expectedUpdatedAt: paused.flow.updatedAt,
+              });
+              this.#emitEvent({
+                type: 'factory_flow.updated',
+                flow: advancedToPr.flow,
+              });
+              broadcast(session, {
+                type: 'factory_flow',
+                flowId,
+                stage: advancedToPr.flow.currentStage,
+                state: advancedToPr.flow.state,
+              });
+            } catch (error) {
+              await this.#handleAutoTransitionFailure(session, flowId, error);
+            }
+            return;
+          }
+
+          const iteration = currentFlow.iteration > 0 ? currentFlow.iteration : 1;
+          const maxIterations = currentFlow.maxIterations;
+          if (iteration >= maxIterations) {
+            const circuitBreakerMessage = `Limite máximo de ${maxIterations} iterações automáticas atingido sem aprovação no Code Review. Intervenção humana necessária.`;
+            const paused = await this.#factoryFlowService.transitionFlow(flowId, {
+              to: 'waiting_action',
+              stage,
+              reason: circuitBreakerMessage,
+              currentSessionId: null,
+              lastReviewVerdict: verdict,
+              loopPausedReason: circuitBreakerMessage,
+            });
+            this.#emitEvent({
+              type: 'factory_flow.updated',
+              flow: paused.flow,
+            });
+            broadcast(session, {
+              type: 'factory_flow',
+              flowId,
+              stage,
+              state: paused.flow.state,
+            });
+            return;
+          }
+
+          const paused = await this.#factoryFlowService.transitionFlow(flowId, {
+            to: 'waiting_action',
+            stage,
+            reason: `Code Review solicitou ajustes na iteração ${iteration}/${maxIterations}`,
+            currentSessionId: null,
+            lastReviewVerdict: verdict,
+            loopPausedReason: null,
+          });
+          await this.#autoReturnToDevelopment(
+            session,
+            flowId,
+            paused.flow.updatedAt,
+            iteration,
+            maxIterations,
+          );
+          return;
+        }
+      }
+
       const nextState =
         session.historyState === 'saved' && getNextFactoryStage(stage) === null
           ? 'completed'
@@ -1302,10 +1547,6 @@ export class SessionManager {
         stage,
         state: transitioned.flow.state,
       });
-
-      if (stage === 'triage' && session.historyState === 'saved') {
-        await this.#autoAdvanceToPlanning(flowId, transitioned.flow.updatedAt);
-      }
       return;
     }
 

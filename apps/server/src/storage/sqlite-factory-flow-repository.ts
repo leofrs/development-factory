@@ -73,6 +73,10 @@ interface FactoryFlowRow {
   state: string;
   current_stage: string;
   current_session_id: string | null;
+  iteration: number;
+  max_iterations: number;
+  last_review_verdict: string | null;
+  loop_paused_reason: string | null;
   created_at: string;
   updated_at: string;
   finished_at: string | null;
@@ -107,6 +111,7 @@ interface FactoryArtifactRow {
   format: string;
   path: string;
   status: string;
+  iteration: number;
   created_at: string;
   updated_at: string;
   error_json: string | null;
@@ -142,6 +147,10 @@ function rowToFlow(row: FactoryFlowRow): FactoryFlow {
     state: row.state,
     currentStage: row.current_stage,
     currentSessionId: row.current_session_id,
+    iteration: row.iteration,
+    maxIterations: row.max_iterations,
+    lastReviewVerdict: row.last_review_verdict,
+    loopPausedReason: row.loop_paused_reason,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     finishedAt: row.finished_at,
@@ -196,6 +205,7 @@ function rowToArtifact(row: FactoryArtifactRow): FactoryFlowArtifact {
     format: row.format,
     path: row.path,
     status: row.status,
+    iteration: row.iteration,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     error: row.error_json === null ? null : parseJson(row.error_json, `erro do artefato ${row.id}`),
@@ -505,6 +515,10 @@ export class SqliteFactoryFlowRepository {
            SET state = ?,
                current_stage = ?,
                current_session_id = ?,
+               iteration = ?,
+               max_iterations = ?,
+               last_review_verdict = ?,
+               loop_paused_reason = ?,
                updated_at = ?,
                finished_at = ?,
                transitions_json = ?,
@@ -515,6 +529,10 @@ export class SqliteFactoryFlowRepository {
           updated.state,
           updated.currentStage,
           updated.currentSessionId,
+          updated.iteration,
+          updated.maxIterations,
+          updated.lastReviewVerdict,
+          updated.loopPausedReason,
           updated.updatedAt,
           updated.finishedAt,
           JSON.stringify(updated.transitions),
@@ -664,10 +682,11 @@ export class SqliteFactoryFlowRepository {
               format,
               path,
               status,
+              iteration,
               created_at,
               updated_at,
               error_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .run(
             parsed.data.id,
@@ -679,6 +698,7 @@ export class SqliteFactoryFlowRepository {
             parsed.data.format,
             parsed.data.path,
             parsed.data.status,
+            parsed.data.iteration,
             parsed.data.createdAt,
             parsed.data.updatedAt,
             parsed.data.error ? JSON.stringify(parsed.data.error) : null,
@@ -727,11 +747,13 @@ export class SqliteFactoryFlowRepository {
     const rows = stage
       ? (this.db
           .prepare(
-            'SELECT * FROM factory_flow_artifacts WHERE flow_id = ? AND stage = ? ORDER BY created_at ASC',
+            'SELECT * FROM factory_flow_artifacts WHERE flow_id = ? AND stage = ? ORDER BY created_at ASC, rowid ASC',
           )
           .all(flowId, stage) as unknown as FactoryArtifactRow[])
       : (this.db
-          .prepare('SELECT * FROM factory_flow_artifacts WHERE flow_id = ? ORDER BY created_at ASC')
+          .prepare(
+            'SELECT * FROM factory_flow_artifacts WHERE flow_id = ? ORDER BY created_at ASC, rowid ASC',
+          )
           .all(flowId) as unknown as FactoryArtifactRow[]);
 
     return rows.map(rowToArtifact);
@@ -832,12 +854,16 @@ export class SqliteFactoryFlowRepository {
           state,
           current_stage,
           current_session_id,
+          iteration,
+          max_iterations,
+          last_review_verdict,
+          loop_paused_reason,
           created_at,
           updated_at,
           finished_at,
           transitions_json,
           error_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         flow.id,
@@ -849,6 +875,10 @@ export class SqliteFactoryFlowRepository {
         flow.state,
         flow.currentStage,
         flow.currentSessionId,
+        flow.iteration,
+        flow.maxIterations,
+        flow.lastReviewVerdict,
+        flow.loopPausedReason,
         flow.createdAt,
         flow.updatedAt,
         flow.finishedAt,

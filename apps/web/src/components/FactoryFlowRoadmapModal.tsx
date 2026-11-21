@@ -1,6 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
+  AlertTriangle,
   ArrowDown,
   ArrowRight,
   CheckCircle2,
@@ -14,11 +15,13 @@ import {
   Loader2,
   RotateCcw,
   ScanSearch,
+  Square,
   X,
 } from 'lucide-react';
 import {
   FACTORY_APPROVED_NOTES_MAX_LENGTH,
   FACTORY_STAGE_ORDER,
+  getLatestReadyFactoryStageArtifact,
   getNextFactoryStage,
   getReadyFactoryStageArtifact,
   type FactoryFlow,
@@ -32,6 +35,7 @@ import {
 import { fetchFactoryFlowDetails } from '../api/factory-flows';
 import {
   getFactoryFlowStatePresentation,
+  getFactoryReviewVerdictPresentation,
   getFactoryStageLabel,
   getFactoryStageStatePresentation,
   getFactoryStageStep,
@@ -47,6 +51,7 @@ interface FactoryFlowRoadmapModalProps {
     targetStage: ReturnFactoryTargetStage,
     approvedNotes?: string,
   ) => Promise<void>;
+  onCancelFlow?: (flowId: string) => Promise<void>;
   onViewMarkdown: (filePath: string) => void;
 }
 
@@ -54,6 +59,7 @@ const VALIDATED_REPORT_KIND_BY_STAGE: Partial<Record<FactoryStageName, FactoryFl
   development: 'implementation_report',
   tests: 'test_report',
   review: 'review_report',
+  pr: 'pr_summary',
 };
 
 const roadmapStages = [
@@ -206,6 +212,7 @@ export function FactoryFlowRoadmapModal({
   onAdvanceFlowStage,
   onRerunFlowStage,
   onReturnFlowStage,
+  onCancelFlow,
   onViewMarkdown,
 }: FactoryFlowRoadmapModalProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
@@ -213,7 +220,7 @@ export function FactoryFlowRoadmapModal({
   const [loadingDetails, setLoadingDetails] = useState(true);
   const [detailsError, setDetailsError] = useState<string | null>(null);
   const [detailsRefreshTick, setDetailsRefreshTick] = useState(0);
-  const [busyAction, setBusyAction] = useState<'advance' | 'rerun' | 'return' | null>(null);
+  const [busyAction, setBusyAction] = useState<'advance' | 'rerun' | 'return' | 'cancel' | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [approvedNotes, setApprovedNotes] = useState('');
 
@@ -259,7 +266,7 @@ export function FactoryFlowRoadmapModal({
 
   const runAction = useCallback(
     async (
-      action: 'advance' | 'rerun' | 'return',
+      action: 'advance' | 'rerun' | 'return' | 'cancel',
       operation: () => Promise<void>,
       fallbackError: string,
       clearNotes = false,
@@ -329,17 +336,34 @@ export function FactoryFlowRoadmapModal({
   const reviewReport = currentDetails
     ? getReadyFactoryStageArtifact(currentDetails, 'review')
     : undefined;
+  const prReport = currentDetails
+    ? getReadyFactoryStageArtifact(currentDetails, 'pr')
+    : undefined;
+
+  const latestDevelopmentReport = currentDetails
+    ? getLatestReadyFactoryStageArtifact(currentDetails, 'development')
+    : undefined;
+  const latestTestsReport = currentDetails
+    ? getLatestReadyFactoryStageArtifact(currentDetails, 'tests')
+    : undefined;
+  const latestReviewReport = currentDetails
+    ? getLatestReadyFactoryStageArtifact(currentDetails, 'review')
+    : undefined;
 
   const canStartDevelopment = Boolean(triageReport && planningReport);
   const canStartTests = Boolean(canStartDevelopment && developmentReport);
   const canStartReview = Boolean(canStartTests && testsReport);
   const canAdvanceToPr = Boolean(canStartReview && reviewReport);
   const validatedReports: Partial<Record<FactoryStageName, FactoryFlowArtifact | undefined>> = {
-    development: developmentReport,
-    tests: testsReport,
-    review: reviewReport,
+    development: latestDevelopmentReport ?? developmentReport,
+    tests: latestTestsReport ?? testsReport,
+    review: latestReviewReport ?? reviewReport,
+    pr: prReport,
   };
   const flowPresentation = getFactoryFlowStatePresentation(flow.state);
+  const reviewVerdictPresentation = flow.lastReviewVerdict
+    ? getFactoryReviewVerdictPresentation(flow.lastReviewVerdict)
+    : null;
 
   return (
     <dialog
@@ -372,6 +396,19 @@ export function FactoryFlowRoadmapModal({
                 <span className={`size-1.5 rounded-full ${flowPresentation.dotClass}`} />
                 {flowPresentation.label}
               </span>
+              {flow.iteration > 0 && (
+                <span className="inline-flex items-center gap-1.5 rounded-full border border-accent/30 bg-selected px-2.5 py-0.5 font-mono text-[10px] font-medium text-accent">
+                  Iteração {flow.iteration}/{flow.maxIterations}
+                </span>
+              )}
+              {reviewVerdictPresentation && (
+                <span
+                  className={`inline-flex items-center gap-1.5 rounded-full border border-line bg-page px-2.5 py-0.5 text-[10px] font-medium ${reviewVerdictPresentation.textClass}`}
+                >
+                  <span className={`size-1.5 rounded-full ${reviewVerdictPresentation.dotClass}`} />
+                  Review: {reviewVerdictPresentation.label}
+                </span>
+              )}
               {loadingDetails && (
                 <span className="inline-flex items-center gap-1.5 font-mono text-[11px] text-muted">
                   <Loader2 size={12} className="animate-spin text-accent" />
@@ -398,6 +435,16 @@ export function FactoryFlowRoadmapModal({
         </header>
 
         <div className="min-h-0 flex-1 overflow-y-auto bg-page p-5 sm:p-6">
+          {flow.loopPausedReason && (
+            <div
+              role="alert"
+              className="mb-5 flex items-center gap-2 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-xs text-warning"
+            >
+              <AlertTriangle size={15} className="shrink-0" />
+              <span>{flow.loopPausedReason}</span>
+            </div>
+          )}
+
           {flow.error && (
             <div
               role="alert"
@@ -443,16 +490,16 @@ export function FactoryFlowRoadmapModal({
                       const isCurrentStage = flow.currentStage === stage.id;
                       const stagePresentation = getFactoryStageStatePresentation(stageState);
                       const stageArtifacts = artifactsByStage.get(stage.id) ?? [];
+                      const stageReportHistory = stageArtifacts.filter(
+                        item =>
+                          item.kind !== 'session_log' &&
+                          item.format === 'markdown' &&
+                          item.status !== 'failed',
+                      );
                       const validatedKind = VALIDATED_REPORT_KIND_BY_STAGE[stage.id];
                       const stageMarkdownPath = validatedKind
                         ? validatedReports[stage.id]?.path
-                        : (stageRecord?.reportPath ??
-                          stageArtifacts.find(
-                            item =>
-                              item.kind !== 'session_log' &&
-                              item.format === 'markdown' &&
-                              item.status !== 'failed',
-                          )?.path);
+                        : (stageRecord?.reportPath ?? stageReportHistory[0]?.path);
                       const stageArtifactError = validatedKind
                         ? stageArtifacts.find(
                             artifact =>
@@ -460,6 +507,10 @@ export function FactoryFlowRoadmapModal({
                               artifact.path === stageRecord?.reportPath,
                           )?.error
                         : undefined;
+                      const canTriggerManualPr =
+                        isCurrentStage &&
+                        stage.id === 'pr' &&
+                        flow.state === 'waiting_action';
                       const canRerunCurrent =
                         isCurrentStage &&
                         stage.id !== 'pr' &&
@@ -485,6 +536,8 @@ export function FactoryFlowRoadmapModal({
                             nextStage === 'tests' ||
                             nextStage === 'review')) ||
                         canReturnFromReview;
+                      const canStopCurrent =
+                        isCurrentStage && flow.state === 'running' && Boolean(onCancelFlow);
 
                       return (
                         <Fragment key={stage.id}>
@@ -527,16 +580,19 @@ export function FactoryFlowRoadmapModal({
                                 isCurrentStage &&
                                 flow.state === 'waiting_action' && (
                                   <p className="mt-2 text-xs text-muted">
-                                    Etapa preparada. A abertura de PR será disponibilizada
-                                    futuramente.
+                                    Code Review aprovado. Dispare manualmente a preparação/abertura
+                                    do Pull Request quando desejar.
                                   </p>
                                 )}
                             </div>
 
                             {(stageMarkdownPath ||
+                              stageReportHistory.length > 0 ||
+                              canTriggerManualPr ||
                               canRerunCurrent ||
                               canAdvanceCurrent ||
-                              canReturnFromReview) && (
+                              canReturnFromReview ||
+                              canStopCurrent) && (
                               <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-line-subtle pt-3">
                                 {stageMarkdownPath && (
                                   <button
@@ -546,6 +602,53 @@ export function FactoryFlowRoadmapModal({
                                   >
                                     <FileText size={11} />
                                     Ver artefato
+                                  </button>
+                                )}
+
+                                {stageReportHistory.length > 1 && (
+                                  <div
+                                    className="flex w-full flex-wrap items-center gap-1.5"
+                                    aria-label={`Histórico de ciclos da etapa ${stage.title}`}
+                                  >
+                                    {stageReportHistory.map((artifact, artifactIndex) => (
+                                      <button
+                                        key={artifact.id}
+                                        type="button"
+                                        onClick={() => onViewMarkdown(artifact.path)}
+                                        className={`rounded-md border px-2 py-0.5 font-mono text-[10px] transition ${
+                                          artifact.status === 'ready'
+                                            ? 'border-accent/30 bg-page text-accent hover:bg-selected'
+                                            : 'border-warning/30 bg-page text-warning hover:bg-warning/10'
+                                        }`}
+                                      >
+                                        {artifact.iteration > 0
+                                          ? `Ciclo ${artifact.iteration}`
+                                          : `Execução ${artifactIndex + 1}`}
+                                      </button>
+                                    ))}
+                                  </div>
+                                )}
+
+                                {canTriggerManualPr && (
+                                  <button
+                                    type="button"
+                                    disabled={busyAction !== null}
+                                    aria-busy={busyAction === 'rerun'}
+                                    onClick={() => {
+                                      void runAction(
+                                        'rerun',
+                                        () => onRerunFlowStage(flow.id, 'pr'),
+                                        'Não foi possível executar a etapa PR.',
+                                      );
+                                    }}
+                                    className="modal-button border-accent/40 bg-selected/60 px-2.5 py-1 text-[11px] text-accent hover:bg-selected disabled:opacity-60"
+                                  >
+                                    {busyAction === 'rerun' ? (
+                                      <Loader2 size={11} className="animate-spin" />
+                                    ) : (
+                                      <GitPullRequest size={11} />
+                                    )}
+                                    Executar etapa PR
                                   </button>
                                 )}
 
@@ -675,7 +778,33 @@ export function FactoryFlowRoadmapModal({
                                     ) : (
                                       <ArrowRight size={11} />
                                     )}
-                                    Avançar para {getFactoryStageLabel(nextStage)}
+                                    {stage.id === 'planning' && nextStage === 'development'
+                                      ? 'Aprovar e Iniciar Desenvolvimento'
+                                      : `Avançar para ${getFactoryStageLabel(nextStage)}`}
+                                  </button>
+                                )}
+
+                                {canStopCurrent && onCancelFlow && (
+                                  <button
+                                    type="button"
+                                    disabled={busyAction !== null}
+                                    aria-busy={busyAction === 'cancel'}
+                                    aria-label={`Parar fluxo ${flow.title}`}
+                                    onClick={() => {
+                                      void runAction(
+                                        'cancel',
+                                        () => onCancelFlow(flow.id),
+                                        'Não foi possível parar o fluxo.',
+                                      );
+                                    }}
+                                    className="modal-button border-danger/35 px-2.5 py-1 text-[11px] text-danger hover:bg-danger/10 disabled:opacity-60"
+                                  >
+                                    {busyAction === 'cancel' ? (
+                                      <Loader2 size={11} className="animate-spin" />
+                                    ) : (
+                                      <Square size={11} />
+                                    )}
+                                    {busyAction === 'cancel' ? 'Parando...' : 'Parar'}
                                   </button>
                                 )}
                               </div>
@@ -705,7 +834,9 @@ export function FactoryFlowRoadmapModal({
                     <span className="h-px flex-1 bg-line-subtle" />
                     <span className="inline-flex items-center gap-1.5 rounded-full border border-line bg-surface px-3 py-1 font-mono text-[10px] text-muted">
                       <ArrowDown size={12} className="text-accent" />
-                      Próxima fase (03 → 04)
+                      {flow.iteration > 0
+                        ? `Loop autônomo · Iteração ${flow.iteration}/${flow.maxIterations}`
+                        : 'Próxima fase (03 → 04)'}
                     </span>
                     <span className="h-px flex-1 bg-line-subtle" />
                   </li>

@@ -1,5 +1,8 @@
 import { basename, dirname } from 'node:path';
-import { getReadyFactoryStageArtifact } from '@development-factory/shared';
+import {
+  getLatestReadyFactoryStageArtifact,
+  getReadyFactoryStageArtifact,
+} from '@development-factory/shared';
 import type { FactoryFlowDetails } from '@development-factory/shared';
 import { readHistoryFile } from './history-reader.js';
 
@@ -96,6 +99,23 @@ export async function readReadyStageDocuments<const Stages extends readonly Hand
     result[stage as Stages[number]] = filePath;
   }
   return result;
+}
+
+/** Lê o artefato pronto mais recente de uma etapa (se existir e estiver legível no disco). */
+export async function readOptionalLatestStageDocument(
+  details: FactoryFlowDetails,
+  stage: HandoffArtifactStage,
+): Promise<string | undefined> {
+  const artifact = getLatestReadyFactoryStageArtifact(details, stage);
+  if (!artifact) {
+    return undefined;
+  }
+  try {
+    const document = await readHistoryFile(dirname(artifact.path), basename(artifact.path));
+    return document.content.trim() ? document.path : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Valida título e seções obrigatórias de um relatório Markdown gerado por um runner da Factory. */

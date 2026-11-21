@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   FACTORY_FLOW_CONTRACT_VERSION,
+  FACTORY_MAX_AUTO_ITERATIONS,
   FACTORY_STAGE_ORDER,
   type FactoryFlow,
   type FactoryFlowStage,
@@ -41,6 +42,10 @@ function makeFlow(overrides: Partial<FactoryFlow> = {}): FactoryFlow {
     currentStage: 'triage',
     state: 'running',
     currentSessionId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    iteration: 0,
+    maxIterations: FACTORY_MAX_AUTO_ITERATIONS,
+    lastReviewVerdict: null,
+    loopPausedReason: null,
     createdAt: '2026-11-19T12:00:00.000Z',
     updatedAt: '2026-11-19T12:00:00.000Z',
     finishedAt: null,

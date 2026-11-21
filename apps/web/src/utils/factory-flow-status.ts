@@ -4,6 +4,7 @@ import type {
   FactoryFlowArtifactStatus,
   FactoryFlowInputType,
   FactoryFlowState,
+  FactoryReviewVerdict,
   FactoryStageName,
   FactoryStageState,
 } from '@development-factory/shared';
@@ -190,6 +191,32 @@ export function getFactoryArtifactStatusPresentation(
         label: 'Falhou',
         dotClass: 'bg-danger',
         textClass: 'text-danger',
+      };
+  }
+}
+
+/** Resolve rótulo e classes visuais para o último veredito do Code Review. */
+export function getFactoryReviewVerdictPresentation(
+  verdict: FactoryReviewVerdict,
+): SessionStatusPresentation {
+  switch (verdict) {
+    case 'approved':
+      return {
+        label: 'Aprovado para PR',
+        dotClass: 'bg-accent',
+        textClass: 'text-accent',
+      };
+    case 'approved_with_warnings':
+      return {
+        label: 'Aprovado com ressalvas',
+        dotClass: 'bg-accent',
+        textClass: 'text-accent',
+      };
+    case 'changes_requested':
+      return {
+        label: 'Requer ajustes',
+        dotClass: 'bg-warning',
+        textClass: 'text-warning',
       };
   }
 }

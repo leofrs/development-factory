@@ -134,6 +134,10 @@ const REPORT_STAGE_NOTIFICATION_LABELS: Partial<
     saved: 'Relatório de code review salvo',
     completed: 'Code review concluído',
   },
+  pr: {
+    saved: 'Resumo do PR salvo',
+    completed: 'Etapa PR concluída',
+  },
 };
 
 export function buildNotification(
@@ -467,6 +471,65 @@ export function useBackgroundOperations(): BackgroundOperationsState {
     setNotifications((current) => [notification, ...current]);
   }, []);
 
+  const maybeNotifyFlowAttention = useCallback((flow: FactoryFlow) => {
+    if (flow.state !== 'waiting_action') {
+      return;
+    }
+
+    if (flow.loopPausedReason) {
+      const milestoneKey = `flow:${flow.id}:loop_paused:${flow.iteration}:${flow.updatedAt}`;
+      if (notifiedMilestonesRef.current.has(milestoneKey)) {
+        return;
+      }
+      notifiedMilestonesRef.current.add(milestoneKey);
+      setNotifications((current) => [
+        {
+          id: milestoneKey,
+          sessionId: null,
+          flowId: flow.id,
+          stage: flow.currentStage,
+          mode: 'factory',
+          title: flow.title,
+          kind: 'finished',
+          status: 'exited',
+          historyState: 'saved',
+          reportPath: null,
+          message: flow.loopPausedReason ?? 'Loop automático pausado para intervenção humana',
+          severity: 'warning',
+          createdAt: flow.updatedAt,
+        },
+        ...current,
+      ]);
+      return;
+    }
+
+    if (flow.currentStage === 'pr') {
+      const milestoneKey = `flow:${flow.id}:ready_for_pr:${flow.updatedAt}`;
+      if (notifiedMilestonesRef.current.has(milestoneKey)) {
+        return;
+      }
+      notifiedMilestonesRef.current.add(milestoneKey);
+      setNotifications((current) => [
+        {
+          id: milestoneKey,
+          sessionId: null,
+          flowId: flow.id,
+          stage: 'pr',
+          mode: 'factory',
+          title: flow.title,
+          kind: 'finished',
+          status: 'exited',
+          historyState: 'saved',
+          reportPath: null,
+          message: 'Code Review aprovado; etapa PR pronta para disparo manual',
+          severity: 'success',
+          createdAt: flow.updatedAt,
+        },
+        ...current,
+      ]);
+    }
+  }, []);
+
   const handleAppEvent = useCallback(
     (event: AppEvent) => {
       if (
@@ -475,6 +538,9 @@ export function useBackgroundOperations(): BackgroundOperationsState {
         event.type === 'factory_flow.finished'
       ) {
         upsertFactoryFlow(event.flow);
+        if (event.type === 'factory_flow.updated') {
+          maybeNotifyFlowAttention(event.flow);
+        }
         if (event.type === 'factory_flow.finished') {
           maybeNotifyFlowFinished(event.flow);
         }
@@ -509,7 +575,7 @@ export function useBackgroundOperations(): BackgroundOperationsState {
         maybeNotify(session, 'finished');
       }
     },
-    [maybeNotify, maybeNotifyFlowFinished, upsertFactoryFlow, upsertSession],
+    [maybeNotify, maybeNotifyFlowAttention, maybeNotifyFlowFinished, upsertFactoryFlow, upsertSession],
   );
 
   useEffect(() => {

@@ -191,6 +191,19 @@ export const REVIEW_MIGRATIONS: readonly Migration[] = [
       db.exec('ALTER TABLE factory_flow_stages ADD COLUMN approved_notes TEXT;');
     },
   },
+  {
+    version: 6,
+    name: 'add_factory_flow_loop_iterations',
+    up(db) {
+      db.exec(`
+        ALTER TABLE factory_flows ADD COLUMN iteration INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE factory_flows ADD COLUMN max_iterations INTEGER NOT NULL DEFAULT 3;
+        ALTER TABLE factory_flows ADD COLUMN last_review_verdict TEXT;
+        ALTER TABLE factory_flows ADD COLUMN loop_paused_reason TEXT;
+        ALTER TABLE factory_flow_artifacts ADD COLUMN iteration INTEGER NOT NULL DEFAULT 0;
+      `);
+    },
+  },
 ];
 
 function validateMigrations(migrations: readonly Migration[]): void {

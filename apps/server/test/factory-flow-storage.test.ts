@@ -36,7 +36,7 @@ test('SqliteFactoryFlowRepository aplica migrations e persiste múltiplos fluxos
     const applied = repo1.getAppliedMigrations();
     assert.equal(applied.length, REVIEW_MIGRATIONS.length);
     assert.ok(applied.some(migration => migration.name === 'add_factory_flows'));
-    assert.equal(applied.at(-1)?.name, 'add_factory_development_approved_notes');
+    assert.equal(applied.at(-1)?.name, 'add_factory_flow_loop_iterations');
 
     const service1 = new FactoryFlowService(repo1, { now: createClock() });
 
@@ -396,6 +396,7 @@ test('FactoryFlowService valida retorno de review para development/tests e reini
     });
 
     await service.advanceStage(created.flow.id, { approvedNotes: 'Notas dev' });
+    assert.equal(service.getFlow(created.flow.id).flow.iteration, 1);
     await service.registerArtifact(created.flow.id, {
       stage: 'development',
       kind: 'implementation_report',
@@ -415,6 +416,7 @@ test('FactoryFlowService valida retorno de review para development/tests e reini
     const beforeReturn = service.getFlow(created.flow.id);
     assert.equal(beforeReturn.flow.currentStage, 'review');
     assert.equal(beforeReturn.flow.state, 'waiting_action');
+    assert.equal(beforeReturn.flow.iteration, 1);
 
     const returned = await service.returnStage(created.flow.id, {
       targetStage: 'development',
@@ -422,8 +424,13 @@ test('FactoryFlowService valida retorno de review para development/tests e reini
     });
     assert.equal(returned.flow.currentStage, 'development');
     assert.equal(returned.flow.state, 'waiting_action');
+    assert.equal(returned.flow.iteration, 2);
 
     const afterReturn = service.getFlow(created.flow.id);
+    assert.equal(
+      afterReturn.artifacts.find(artifact => artifact.kind === 'implementation_report')?.iteration,
+      1,
+    );
     const devStage = afterReturn.stages.find(stage => stage.name === 'development');
     const testsStage = afterReturn.stages.find(stage => stage.name === 'tests');
     const reviewStage = afterReturn.stages.find(stage => stage.name === 'review');

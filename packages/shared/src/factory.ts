@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 export const FACTORY_FLOW_CONTRACT_VERSION = 1 as const;
 export const FACTORY_APPROVED_NOTES_MAX_LENGTH = 4000;
+export const FACTORY_MAX_AUTO_ITERATIONS = 3 as const;
 const version = z.literal(FACTORY_FLOW_CONTRACT_VERSION);
 const id = z.string().uuid();
 const timestamp = z.iso.datetime();
@@ -253,6 +254,17 @@ export type FactoryFlowArtifactFormat = z.infer<typeof FactoryFlowArtifactFormat
 export const FactoryFlowArtifactStatusSchema = z.enum(['pending', 'ready', 'incomplete', 'failed']);
 export type FactoryFlowArtifactStatus = z.infer<typeof FactoryFlowArtifactStatusSchema>;
 
+export const FactoryReviewVerdictSchema = z.enum([
+  'approved',
+  'approved_with_warnings',
+  'changes_requested',
+]);
+export type FactoryReviewVerdict = z.infer<typeof FactoryReviewVerdictSchema>;
+
+export function isFactoryReviewApprovedVerdict(verdict: FactoryReviewVerdict): boolean {
+  return verdict === 'approved' || verdict === 'approved_with_warnings';
+}
+
 export const FactoryFlowArtifactSchema = z
   .strictObject({
     contractVersion: version,
@@ -264,6 +276,7 @@ export const FactoryFlowArtifactSchema = z
     format: FactoryFlowArtifactFormatSchema,
     path: artifactPathSchema,
     status: FactoryFlowArtifactStatusSchema,
+    iteration: z.number().int().nonnegative().default(0),
     createdAt: timestamp,
     updatedAt: timestamp,
     error: FactoryFlowErrorSchema.nullable(),
@@ -306,6 +319,10 @@ export const FactoryFlowSchema = z
     state: FactoryFlowStateSchema,
     currentStage: FactoryStageNameSchema,
     currentSessionId: id.nullable(),
+    iteration: z.number().int().nonnegative().default(0),
+    maxIterations: z.number().int().positive().default(FACTORY_MAX_AUTO_ITERATIONS),
+    lastReviewVerdict: FactoryReviewVerdictSchema.nullable().default(null),
+    loopPausedReason: text.nullable().default(null),
     createdAt: timestamp,
     updatedAt: timestamp,
     finishedAt: timestamp.nullable(),
@@ -378,6 +395,9 @@ export const FactoryFlowTransitionCommandSchema = z.strictObject({
   at: timestamp,
   reason: text,
   currentSessionId: id.nullable().optional(),
+  iteration: z.number().int().nonnegative().optional(),
+  lastReviewVerdict: FactoryReviewVerdictSchema.nullable().optional(),
+  loopPausedReason: text.nullable().optional(),
   error: FactoryFlowErrorSchema.nullable().optional(),
 });
 export type FactoryFlowTransitionCommand = z.infer<typeof FactoryFlowTransitionCommandSchema>;
@@ -446,6 +466,15 @@ function applyFactoryFlowTransition(
       next.data.currentSessionId !== undefined
         ? next.data.currentSessionId
         : current.data.currentSessionId,
+    iteration: next.data.iteration !== undefined ? next.data.iteration : current.data.iteration,
+    lastReviewVerdict:
+      next.data.lastReviewVerdict !== undefined
+        ? next.data.lastReviewVerdict
+        : current.data.lastReviewVerdict,
+    loopPausedReason:
+      next.data.loopPausedReason !== undefined
+        ? next.data.loopPausedReason
+        : current.data.loopPausedReason,
     updatedAt: next.data.at,
     finishedAt: isFinalFactoryFlowState(next.data.to) ? next.data.at : null,
     error: next.data.error !== undefined ? next.data.error : current.data.error,
@@ -520,6 +549,7 @@ const HANDOFF_ARTIFACT_KINDS = {
   development: 'implementation_report',
   tests: 'test_report',
   review: 'review_report',
+  pr: 'pr_summary',
 } as const;
 
 export function getReadyFactoryStageArtifact(
@@ -537,12 +567,35 @@ export function getReadyFactoryStageArtifact(
   );
 }
 
+/** Retorna o artefato pronto mais recente de uma etapa (preservando histórico entre iterações). */
+export function getLatestReadyFactoryStageArtifact(
+  details: Pick<FactoryFlowDetails, 'artifacts'>,
+  stage: keyof typeof HANDOFF_ARTIFACT_KINDS,
+): FactoryFlowArtifact | undefined {
+  for (let index = details.artifacts.length - 1; index >= 0; index -= 1) {
+    const artifact = details.artifacts[index];
+    if (
+      artifact &&
+      artifact.stage === stage &&
+      artifact.kind === HANDOFF_ARTIFACT_KINDS[stage] &&
+      artifact.format === 'markdown' &&
+      artifact.status === 'ready'
+    ) {
+      return artifact;
+    }
+  }
+  return undefined;
+}
+
 export const TransitionFactoryFlowRequestSchema = z.strictObject({
   to: FactoryFlowStateSchema,
   stage: FactoryStageNameSchema.optional(),
   at: timestamp.optional(),
   reason: text,
   currentSessionId: id.nullable().optional(),
+  iteration: z.number().int().nonnegative().optional(),
+  lastReviewVerdict: FactoryReviewVerdictSchema.nullable().optional(),
+  loopPausedReason: text.nullable().optional(),
   error: FactoryFlowErrorSchema.nullable().optional(),
   expectedUpdatedAt: timestamp.optional(),
 });
@@ -597,6 +650,7 @@ export const RegisterFactoryFlowArtifactRequestSchema = z.strictObject({
   format: FactoryFlowArtifactFormatSchema.default('markdown'),
   path: artifactPathSchema,
   status: FactoryFlowArtifactStatusSchema.default('pending'),
+  iteration: z.number().int().nonnegative().optional(),
   error: FactoryFlowErrorSchema.nullable().optional(),
   at: timestamp.optional(),
 });
