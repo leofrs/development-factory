@@ -41,6 +41,7 @@ import {
   type FactoryFlowListResponse,
   type FactoryFlowStage,
   type FactoryFlowState,
+  type FactoryFlowTraceabilityMatrix,
   type FactoryFlowTransitionCommand,
   type FactoryPlanningApproval,
   type FactoryPlanningApprovalInput,
@@ -54,6 +55,7 @@ import {
 } from '@development-factory/shared';
 import { getFactoryDevelopmentChecksError } from './factory-development-checks.js';
 import { readFactoryIterationComparison } from './factory-flow-iterations.js';
+import { readFactoryTraceabilityMatrix } from './factory-traceability.js';
 import {
   FactoryStageArtifactError,
   formatArtifactIssue,
@@ -805,6 +807,18 @@ export class FactoryFlowService {
       );
     }
     return readFactoryIterationComparison(details, parsed.data.fromIteration);
+  }
+
+  async getFlowTraceability(
+    flowIdInput: string,
+    signal: AbortSignal,
+  ): Promise<FactoryFlowTraceabilityMatrix> {
+    const details = this.getFlow(flowIdInput);
+    try {
+      return await readFactoryTraceabilityMatrix(details, signal);
+    } catch (error) {
+      throw mapUnexpectedError(error);
+    }
   }
 
   listFlows(filterInput: unknown = {}): FactoryFlowListResponse {

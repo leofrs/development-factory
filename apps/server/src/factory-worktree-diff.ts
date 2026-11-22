@@ -320,6 +320,74 @@ function buildPatch(output: GitOutput): FactoryFlowDiffPatch {
   };
 }
 
+export const FACTORY_TRACEABILITY_MAX_WORKTREE_FILES = 200;
+
+async function openWorktreeGitReader(
+  options: { repoPath: string; worktreePath: string; flowId: string; range: DiffRange },
+  signal: AbortSignal,
+  deadline: AbortSignal,
+): Promise<{ repo: GitReader; revisions: string[] }> {
+  const path = assertExternalManagedWorktree(options.repoPath, options.worktreePath);
+  if (basename(path) !== options.flowId || !(await lstat(join(path, '.git'))).isFile()) {
+    throw new FactoryWorktreeError('WORKTREE_INVALID', 'O worktree isolado do fluxo é inválido.');
+  }
+  const env = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')),
+  );
+  const repo: GitReader = {
+    path,
+    signal: AbortSignal.any([signal, deadline]),
+    env: {
+      ...env,
+      LC_ALL: 'C',
+      GIT_OPTIONAL_LOCKS: '0',
+      GIT_ALLOW_PROTOCOL: '',
+      GIT_NO_LAZY_FETCH: '1',
+      GIT_NO_REPLACE_OBJECTS: '1',
+      GIT_TERMINAL_PROMPT: '0',
+    },
+  };
+  const root = await readGit(repo, ['rev-parse', '--show-toplevel']);
+  if (root.stdout.toString('utf8') !== `${path}\n`) {
+    throw new FactoryWorktreeError('WORKTREE_INVALID', 'O worktree isolado do fluxo é inválido.');
+  }
+
+  const revisions = await resolveDiffRevisions(repo, options.range);
+  return { repo, revisions };
+}
+
+function toDiffReadError(error: unknown, deadline: AbortSignal): FactoryWorktreeError {
+  if (error instanceof FactoryWorktreeError) {
+    return error;
+  }
+  return new FactoryWorktreeError(
+    'WORKTREE_DIFF_FAILED',
+    deadline.aborted
+      ? 'A leitura do diff excedeu o tempo limite.'
+      : 'Não foi possível ler o diff do worktree isolado do fluxo.',
+    { cause: error },
+  );
+}
+
+export async function readFactoryWorktreeChangedFiles(
+  options: { repoPath: string; worktreePath: string; flowId: string; range: DiffRange },
+  signal: AbortSignal,
+): Promise<{ files: FactoryDiffFile[]; truncated: boolean }> {
+  const deadline = AbortSignal.timeout(DIFF_TIMEOUT_MS);
+  try {
+    const { repo, revisions } = await openWorktreeGitReader(options, signal, deadline);
+    const { entries, truncated } = await listEntries(repo, revisions);
+    const limited = entries.slice(0, FACTORY_TRACEABILITY_MAX_WORKTREE_FILES);
+    const files = await readPageStats(repo, revisions, limited);
+    return {
+      files,
+      truncated: truncated || entries.length > FACTORY_TRACEABILITY_MAX_WORKTREE_FILES,
+    };
+  } catch (error) {
+    throw toDiffReadError(error, deadline);
+  }
+}
+
 export async function readFactoryWorktreeDiff(
   options: { repoPath: string; worktreePath: string; flowId: string; range: DiffRange },
   query: FactoryFlowDiffQuery,
@@ -327,32 +395,7 @@ export async function readFactoryWorktreeDiff(
 ): Promise<FactoryFlowDiffPage | FactoryFlowDiffPatch | null> {
   const deadline = AbortSignal.timeout(DIFF_TIMEOUT_MS);
   try {
-    const path = assertExternalManagedWorktree(options.repoPath, options.worktreePath);
-    if (basename(path) !== options.flowId || !(await lstat(join(path, '.git'))).isFile()) {
-      throw new FactoryWorktreeError('WORKTREE_INVALID', 'O worktree isolado do fluxo é inválido.');
-    }
-    const env = Object.fromEntries(
-      Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')),
-    );
-    const repo: GitReader = {
-      path,
-      signal: AbortSignal.any([signal, deadline]),
-      env: {
-        ...env,
-        LC_ALL: 'C',
-        GIT_OPTIONAL_LOCKS: '0',
-        GIT_ALLOW_PROTOCOL: '',
-        GIT_NO_LAZY_FETCH: '1',
-        GIT_NO_REPLACE_OBJECTS: '1',
-        GIT_TERMINAL_PROMPT: '0',
-      },
-    };
-    const root = await readGit(repo, ['rev-parse', '--show-toplevel']);
-    if (root.stdout.toString('utf8') !== `${path}\n`) {
-      throw new FactoryWorktreeError('WORKTREE_INVALID', 'O worktree isolado do fluxo é inválido.');
-    }
-
-    const revisions = await resolveDiffRevisions(repo, options.range);
+    const { repo, revisions } = await openWorktreeGitReader(options, signal, deadline);
     const { entries, truncated } = await listEntries(repo, revisions, query.file, query.untracked);
     if (query.file !== undefined) {
       const entry = entries.find(
@@ -381,15 +424,6 @@ export async function readFactoryWorktreeDiff(
       truncated,
     };
   } catch (error) {
-    if (error instanceof FactoryWorktreeError) {
-      throw error;
-    }
-    throw new FactoryWorktreeError(
-      'WORKTREE_DIFF_FAILED',
-      deadline.aborted
-        ? 'A leitura do diff excedeu o tempo limite.'
-        : 'Não foi possível ler o diff do worktree isolado do fluxo.',
-      { cause: error },
-    );
+    throw toDiffReadError(error, deadline);
   }
 }

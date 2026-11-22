@@ -4,6 +4,7 @@ const tabs = [
   { id: 'roadmap', label: 'Roadmap' },
   { id: 'diff', label: 'Diff Real' },
   { id: 'iterations', label: 'Histórico Comparativo de Iterações' },
+  { id: 'traceability', label: 'Matriz de Rastreabilidade' },
 ] as const;
 
 export type FactoryFlowDetailTab = (typeof tabs)[number]['id'];

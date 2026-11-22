@@ -8,6 +8,7 @@ import {
   FactoryFlowListResponseSchema,
   FactoryFlowSchema,
   FactoryFlowStageSchema,
+  FactoryFlowTraceabilityMatrixSchema,
   FactoryPreflightResponseSchema,
   RollbackFactoryFlowCheckpointResponseSchema,
   TransitionFactoryFlowResponseSchema,
@@ -263,16 +264,18 @@ export interface FactoryDiffComparison {
 
 async function fetchFactoryFlowInspection<T>(
   flowId: string,
-  resource: 'diff' | 'iterations',
+  resource: 'diff' | 'iterations' | 'traceability',
   query: Record<string, string>,
   schema: { safeParse: (input: unknown) => { success: true; data: T } | { success: false } },
   signal: AbortSignal,
 ): Promise<T> {
   const params = new URLSearchParams(query);
+  const queryString = params.toString();
+  const suffix = queryString ? `?${queryString}` : '';
   const fallback = 'Não foi possível consultar a comparação do fluxo da Factory.';
   try {
     const response = await fetch(
-      `${API_BASE_URL}/api/factory/flows/${encodeURIComponent(flowId)}/${resource}?${params}`,
+      `${API_BASE_URL}/api/factory/flows/${encodeURIComponent(flowId)}/${resource}${suffix}`,
       { method: 'GET', cache: 'no-store', signal },
     );
     const payload = await parseJsonResponse(response);
@@ -334,6 +337,16 @@ export function fetchFactoryFlowIterationComparison(
     'iterations',
     { fromIteration: String(fromIteration) },
     FactoryFlowIterationComparisonSchema,
+    signal,
+  );
+}
+
+export function fetchFactoryFlowTraceability(flowId: string, signal: AbortSignal) {
+  return fetchFactoryFlowInspection(
+    flowId,
+    'traceability',
+    {},
+    FactoryFlowTraceabilityMatrixSchema,
     signal,
   );
 }

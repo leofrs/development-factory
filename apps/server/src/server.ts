@@ -451,7 +451,8 @@ async function handleFactoryFlowApiRequest(
       return;
     }
 
-    const flowIdMatch = /^\/api\/factory\/flows\/([^/]+)(?:\/(diff|iterations))?$/.exec(url.pathname);
+    const flowIdMatch =
+      /^\/api\/factory\/flows\/([^/]+)(?:\/(diff|iterations|traceability))?$/.exec(url.pathname);
     if (req.method === 'GET' && flowIdMatch?.[1] !== undefined) {
       const flowId = decodeRouteParam(flowIdMatch[1]);
       if (flowId === null) {
@@ -461,16 +462,19 @@ async function handleFactoryFlowApiRequest(
         });
         return;
       }
-      if (flowIdMatch[2] === 'diff') {
+      if (flowIdMatch[2] === 'diff' || flowIdMatch[2] === 'traceability') {
         const abort = new AbortController();
         res.once('close', () => abort.abort());
-        const diff = await factoryFlowService.getFlowDiff(
-          flowId,
-          Object.fromEntries(url.searchParams),
-          abort.signal,
-        );
+        const result =
+          flowIdMatch[2] === 'diff'
+            ? await factoryFlowService.getFlowDiff(
+                flowId,
+                Object.fromEntries(url.searchParams),
+                abort.signal,
+              )
+            : await factoryFlowService.getFlowTraceability(flowId, abort.signal);
         if (!abort.signal.aborted) {
-          res.writeHead(200).end(JSON.stringify(diff));
+          res.writeHead(200).end(JSON.stringify(result));
         }
         return;
       }

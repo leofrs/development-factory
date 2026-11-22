@@ -10,6 +10,7 @@ import { ReviewReportDirectoryPathSchema, ReviewStateSchema } from './review.js'
 export * from './review.js';
 export * from './factory.js';
 export * from './factory-flow-inspection.js';
+export * from './factory-traceability.js';
 
 export const TargetTypeSchema = z.enum(['pr', 'branch']);
 export type TargetType = z.infer<typeof TargetTypeSchema>;

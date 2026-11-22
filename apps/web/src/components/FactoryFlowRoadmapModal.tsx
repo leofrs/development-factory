@@ -47,6 +47,7 @@ import { FactoryFlowDetailTabs } from './FactoryFlowDetailTabs.js';
 import type { FactoryFlowDetailTab } from './FactoryFlowDetailTabs.js';
 import { FactoryFlowDiffPanel } from './FactoryFlowDiffPanel.js';
 import { FactoryFlowIterationsPanel } from './FactoryFlowIterationsPanel.js';
+import { FactoryFlowTraceabilityPanel } from './FactoryFlowTraceabilityPanel.js';
 import { FactoryLiveTerminalButton } from './FactoryLiveTerminalButton.js';
 import {
   FactoryPlanningGatePanel,
@@ -1251,6 +1252,23 @@ export function FactoryFlowRoadmapModal({
                 Tentar novamente
               </button>
             </div>
+          )}
+        </div>
+
+        <div
+          id={`${tabId}-traceability-panel`}
+          role="tabpanel"
+          aria-labelledby={`${tabId}-traceability-tab`}
+          tabIndex={0}
+          hidden={activeTab !== 'traceability'}
+          className="min-h-0 flex-1 overflow-y-auto bg-page p-5 sm:p-6"
+        >
+          {activeTab === 'traceability' && (
+            <FactoryFlowTraceabilityPanel
+              key={flow.id}
+              flowId={flow.id}
+              updatedAt={flow.updatedAt}
+            />
           )}
         </div>
       </div>

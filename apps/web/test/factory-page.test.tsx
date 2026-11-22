@@ -6,8 +6,10 @@ import { createRoot } from 'react-dom/client';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { parseHTML } from 'linkedom';
 import {
+  buildFactoryTraceabilityMatrix,
   FACTORY_FLOW_CONTRACT_VERSION,
   FACTORY_MAX_AUTO_ITERATIONS,
+  FACTORY_STAGE_SIDECAR_CONTRACT_VERSION,
 } from '@development-factory/shared';
 import type {
   AppEvent,
@@ -18,6 +20,7 @@ import type {
 } from '@development-factory/shared';
 import { BackgroundTasksPopover } from '../src/components/BackgroundTasksPopover';
 import { FactoryFlowRoadmapModal } from '../src/components/FactoryFlowRoadmapModal';
+import { FactoryFlowTraceabilityPanel } from '../src/components/FactoryFlowTraceabilityPanel.js';
 import { FactoryPage } from '../src/components/FactoryPage.js';
 import {
   createPlanningGateDrafts,
@@ -216,6 +219,88 @@ test('Roadmap navega pelo diff paginado e compara evidências e checkpoints de c
   context.mock.method(globalThis, 'fetch', (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(input instanceof Request ? input.url : input);
     seen.push(url);
+    if (url.pathname.endsWith('/traceability')) {
+      return Promise.resolve(
+        Response.json(
+          buildFactoryTraceabilityMatrix({
+            triage: {
+              contractVersion: FACTORY_STAGE_SIDECAR_CONTRACT_VERSION,
+              stage: 'triage',
+              acceptanceCriteria: [
+                { id: 'CA1', description: 'Validar sessão JWT em src/auth.ts.' },
+                { id: 'CA2', description: 'Gerar relatório sem arquivo nem teste.' },
+              ],
+              negativeScope: [],
+              blockers: [],
+              jiraContext: null,
+              technicalContext: 'Investigar src/auth.ts.',
+            },
+            planning: {
+              contractVersion: FACTORY_STAGE_SIDECAR_CONTRACT_VERSION,
+              stage: 'planning',
+              pendingDecisions: [],
+              plannedFiles: ['src/auth.ts'],
+              testPlan: ['CA1: Testar src/auth.ts.'],
+            },
+            planningApproval: {
+              approvedAt: '2026-11-19T12:00:00.000Z',
+              decisions: [],
+              acceptanceCriteria: [
+                { id: 'CA1', description: 'Validar sessão JWT em src/auth.ts.', approved: true },
+                { id: 'CA2', description: 'Gerar relatório sem arquivo nem teste.', approved: true },
+              ],
+            },
+            development: {
+              contractVersion: FACTORY_STAGE_SIDECAR_CONTRACT_VERSION,
+              stage: 'development',
+              changedFiles: ['src/auth.ts'],
+              summary: 'Sessão validada.',
+              deviations: [],
+            },
+            tests: {
+              contractVersion: FACTORY_STAGE_SIDECAR_CONTRACT_VERSION,
+              stage: 'tests',
+              status: 'passed',
+              executedCommands: [{ command: ['npm', 'test'], exitCode: 0 }],
+              testCases: [
+                {
+                  id: 'T1',
+                  description: 'Valida a sessão.',
+                  acceptanceCriteriaIds: ['CA1'],
+                  status: 'passed',
+                },
+              ],
+              coverage: null,
+            },
+            review: {
+              contractVersion: FACTORY_STAGE_SIDECAR_CONTRACT_VERSION,
+              stage: 'review',
+              verdict: 'approved_with_warnings',
+              returnTarget: null,
+              findings: [
+                {
+                  severity: 'SUGESTÃO',
+                  file: 'src/auth.ts',
+                  line: 4,
+                  explanation: 'Adicionar comentário sobre expiração.',
+                },
+              ],
+            },
+            worktreeAvailable: true,
+            worktreeFiles: [
+              {
+                path: 'src/auth.ts',
+                change: 'modified',
+                untracked: false,
+                additions: 1,
+                deletions: 1,
+                binary: false,
+              },
+            ],
+          }),
+        ),
+      );
+    }
     if (url.pathname.endsWith('/iterations')) {
       const from = Number(url.searchParams.get('fromIteration'));
       return Promise.resolve(Response.json({
@@ -329,6 +414,18 @@ test('Roadmap navega pelo diff paginado e compara evidências e checkpoints de c
     ));
     await clickButton('src/auth.ts');
     assert.match(visiblePanel().querySelector('pre')?.textContent ?? '', /linha antiga/);
+
+    await clickButton('Matriz de Rastreabilidade', tabs);
+    assert.equal(tabs.querySelector('[aria-selected="true"]')?.textContent, 'Matriz de Rastreabilidade');
+    assert.match(visiblePanel().textContent ?? '', /1\/2 cobertos/);
+    assert.match(visiblePanel().textContent ?? '', /CA1.*src\/auth\.ts.*T1.*Passou.*Adicionar comentário sobre expiração\./);
+    assert.match(visiblePanel().textContent ?? '', /CA2.*Nenhum arquivo alterado vinculado a este critério/);
+    await clickButton('Com lacunas (1)');
+    assert.doesNotMatch(visiblePanel().textContent ?? '', /Validar sessão JWT/);
+    assert.match(visiblePanel().textContent ?? '', /Gerar relatório sem arquivo nem teste/);
+    await clickButton('Sem lacunas (1)');
+    assert.match(visiblePanel().textContent ?? '', /Validar sessão JWT/);
+    assert.doesNotMatch(visiblePanel().textContent ?? '', /Gerar relatório sem arquivo nem teste/);
   } finally {
     await act(() => root.unmount());
   }
@@ -1533,4 +1630,95 @@ test('FactoryFlowRoadmapModal exibe portão humano estruturado do Bloco 02 e man
     }),
   );
   assert.match(popoverHtml, /Planejamento aprovado: 2 decisões · 1 CAs/);
+});
+
+test('FactoryFlowTraceabilityPanel exibe conexões completas, lacunas e itens sem vínculo', () => {
+  const matrix = buildFactoryTraceabilityMatrix({
+    triage: {
+      contractVersion: FACTORY_STAGE_SIDECAR_CONTRACT_VERSION,
+      stage: 'triage',
+      acceptanceCriteria: [
+        { id: 'CA1', description: 'Autenticar usuário em src/login.ts.' },
+        { id: 'CA2', description: 'Enviar webhook assinado.' },
+      ],
+      negativeScope: [],
+      blockers: [],
+      jiraContext: null,
+      technicalContext: 'Investigar login e webhook.',
+    },
+    planning: {
+      contractVersion: FACTORY_STAGE_SIDECAR_CONTRACT_VERSION,
+      stage: 'planning',
+      pendingDecisions: [],
+      plannedFiles: ['src/login.ts', 'src/webhook.ts'],
+      testPlan: ['CA1: Testar src/login.ts.', 'CA2: Testar src/webhook.ts.'],
+    },
+    planningApproval: {
+      approvedAt: '2026-11-22T10:00:00.000Z',
+      decisions: [],
+      acceptanceCriteria: [
+        { id: 'CA1', description: 'Autenticar usuário em src/login.ts.', approved: true },
+        { id: 'CA2', description: 'Enviar webhook assinado.', approved: true },
+      ],
+    },
+    development: {
+      contractVersion: FACTORY_STAGE_SIDECAR_CONTRACT_VERSION,
+      stage: 'development',
+      changedFiles: ['src/login.ts', 'src/extra-orphan.ts'],
+      summary: 'Login implementado.',
+      deviations: [],
+    },
+    tests: {
+      contractVersion: FACTORY_STAGE_SIDECAR_CONTRACT_VERSION,
+      stage: 'tests',
+      status: 'passed',
+      executedCommands: [{ command: ['npm', 'test'], exitCode: 0 }],
+      testCases: [
+        {
+          id: 'T1',
+          description: 'Valida autenticação em src/login.ts.',
+          acceptanceCriteriaIds: ['CA1'],
+          status: 'passed',
+        },
+      ],
+      coverage: null,
+    },
+    review: {
+      contractVersion: FACTORY_STAGE_SIDECAR_CONTRACT_VERSION,
+      stage: 'review',
+      verdict: 'changes_requested',
+      returnTarget: 'development',
+      findings: [
+        {
+          severity: 'BLOQUEANTE',
+          file: 'src/login.ts',
+          line: 18,
+          explanation: 'Validar expiração do token.',
+          category: 'seguranca',
+          signature: 'token-exp',
+        },
+      ],
+    },
+    worktreeAvailable: false,
+    worktreeFiles: [],
+  });
+
+  const html = renderToStaticMarkup(
+    createElement(FactoryFlowTraceabilityPanel, {
+      flowId: '11111111-1111-4111-8111-111111111111',
+      initialMatrix: matrix,
+    }),
+  );
+
+  assert.match(html, /Matriz de Rastreabilidade/);
+  assert.match(html, /CA1/);
+  assert.match(html, /src\/login\.ts/);
+  assert.match(html, /T1/);
+  assert.match(html, /BLOQUEANTE/);
+  assert.match(html, /Validar expiração do token\./);
+  assert.match(html, /CA2/);
+  assert.match(html, /Planejado · sem alteração/);
+  assert.match(html, /Sem teste vinculado/);
+  assert.match(html, /Itens sem critério de aceite vinculado/);
+  assert.match(html, /src\/extra-orphan\.ts/);
 });
