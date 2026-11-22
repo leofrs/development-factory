@@ -13,6 +13,8 @@ import {
   ReviewDestinationSchema,
   RollbackFactoryFlowCheckpointRequestSchema,
   RollbackFactoryFlowCheckpointResponseSchema,
+  SaveFactoryReviewTriageRequestSchema,
+  SaveFactoryReviewTriageResponseSchema,
   isFinalFactoryFlowState,
   type AppEvent,
   type FactoryFlowApiErrorCode,
@@ -808,6 +810,46 @@ async function handleFactoryFlowApiRequest(
       res
         .writeHead(200)
         .end(JSON.stringify(RollbackFactoryFlowCheckpointResponseSchema.parse(rolledBack)));
+      return;
+    }
+
+    const reviewTriageMatch = /^\/api\/factory\/flows\/([^/]+)\/review-triage$/.exec(url.pathname);
+    if (req.method === 'POST' && reviewTriageMatch?.[1] !== undefined) {
+      const flowId = decodeRouteParam(reviewTriageMatch[1]);
+      if (flowId === null) {
+        sendFactoryFlowApiError(res, 400, {
+          code: 'FACTORY_FLOW_INVALID_INPUT',
+          message: 'Identificador de fluxo inválido.',
+        });
+        return;
+      }
+      const body = await readJsonBody(req);
+      const parsedBody = SaveFactoryReviewTriageRequestSchema.safeParse(body);
+      if (!parsedBody.success) {
+        sendFactoryFlowApiError(res, 400, {
+          code: 'FACTORY_FLOW_INVALID_INPUT',
+          message: 'Os dados para triagem de apontamentos do Code Review são inválidos.',
+          details: parsedBody.error.issues.map(issue => issue.message),
+        });
+        return;
+      }
+      const currentDetails = factoryFlowService.getFlow(flowId);
+      if (
+        currentDetails.flow.currentSessionId &&
+        sessionManager.getSession(currentDetails.flow.currentSessionId)?.status === 'running'
+      ) {
+        sendFactoryFlowApiError(res, 409, {
+          code: 'FACTORY_FLOW_CONFLICT',
+          message: 'Encerre a sessão em execução antes de triar os apontamentos do Code Review.',
+        });
+        return;
+      }
+      const saved = await factoryFlowService.saveReviewTriage(flowId, parsedBody.data);
+      sessionManager.emitAppEvent({
+        type: 'factory_flow.updated',
+        flow: saved.flow,
+      });
+      res.writeHead(200).end(JSON.stringify(SaveFactoryReviewTriageResponseSchema.parse(saved)));
       return;
     }
 

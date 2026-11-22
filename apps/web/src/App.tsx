@@ -62,6 +62,7 @@ export default function App() {
     advanceFlowStage,
     rerunFlowStage,
     returnFlowStage,
+    saveReviewTriage,
     cancelFlow,
     openTerminal,
     openFlowTerminal,
@@ -355,6 +356,7 @@ export default function App() {
               approvedNotes,
             });
           }}
+          onSaveReviewTriage={saveReviewTriage}
           onCancelFlow={async flowId => {
             await cancelFlow(flowId);
           }}

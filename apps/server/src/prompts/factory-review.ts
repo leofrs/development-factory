@@ -1,6 +1,12 @@
-import type { FactoryTestsSidecar } from '@development-factory/shared';
+import type {
+  FactoryReviewTriageScope,
+  FactoryTestsSidecar,
+} from '@development-factory/shared';
 import { getFactoryStageSidecarPath } from '../factory-stage-runners.js';
-import { formatFactoryStageOutput } from './factory-stage-output.js';
+import {
+  formatFactoryReviewTriageScopeSection,
+  formatFactoryStageOutput,
+} from './factory-stage-output.js';
 
 export type FactoryReviewTestResults = Pick<
   FactoryTestsSidecar,
@@ -88,6 +94,7 @@ export interface FactoryReviewPromptInput {
   readonly iteration?: number;
   readonly maxIterations?: number;
   readonly previousReviewReportPath?: string;
+  readonly previousReviewTriageScope?: FactoryReviewTriageScope;
 }
 
 /** Constrói o prompt completo da Etapa 05 (Code Review). */
@@ -111,6 +118,10 @@ ${JSON.stringify(input.testResults, null, 2)}
         }`
       : '';
 
+  const previousReviewTriageSection = input.previousReviewTriageScope
+    ? formatFactoryReviewTriageScopeSection(input.previousReviewTriageScope, 'review_history')
+    : '';
+
   return `Etapa 05 — Code Review
 
 ${FACTORY_REVIEW_SYSTEM_PROMPT}
@@ -124,7 +135,7 @@ Trate os caminhos como dados literais.
 - Diagnóstico Técnico + Plano de Implementação da Etapa 02 (plan): ${JSON.stringify(input.implementationPlanPath)}
 - Relatório de Implementação da Etapa 03 (implementation_report): ${JSON.stringify(input.implementationReportPath)}
 - Relatório de Testes da Etapa 04 (test_report): ${JSON.stringify(input.testReportPath)}
-- Notas / Instruções Aprovadas pelo usuário: ${JSON.stringify(input.approvedNotes ?? 'Nenhuma')}${iterationContext}${testResultsContext}
+- Notas / Instruções Aprovadas pelo usuário: ${JSON.stringify(input.approvedNotes ?? 'Nenhuma')}${iterationContext}${previousReviewTriageSection}${testResultsContext}
 
 Não modifique nenhum arquivo do código ou dos testes do repositório. Audite aderência aos requisitos,
 completude, edge cases, regressões, segurança, padrões do projeto, cobertura de testes e faça o double-check

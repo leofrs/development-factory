@@ -1,6 +1,49 @@
 import { FACTORY_STAGE_SIDECAR_CONTRACT_VERSION } from '@development-factory/shared';
-import type { FactoryStageName } from '@development-factory/shared';
+import type {
+  FactoryReviewTriageScope,
+  FactoryStageName,
+} from '@development-factory/shared';
 import { getFactoryStageSidecarPath } from '../factory-stage-runners.js';
+
+/** Formata o escopo de triagem humana dos apontamentos do Bloco 05 para prompts de retorno ou revisão. */
+export function formatFactoryReviewTriageScopeSection(
+  scope: FactoryReviewTriageScope,
+  mode: 'return_stage' | 'review_history',
+): string {
+  const payload = {
+    reviewArtifactId: scope.reviewArtifactId,
+    iteration: scope.iteration,
+    mandatoryFixes: scope.mandatoryFixes,
+    dismissedFalsePositives: scope.dismissedFalsePositives,
+    deferredSuggestions: scope.deferredSuggestions,
+  };
+
+  if (mode === 'review_history') {
+    if (scope.dismissedFalsePositives.length === 0 && scope.mandatoryFixes.length === 0) {
+      return '';
+    }
+    return `
+
+### Triagem Humana da Revisão Anterior (Bloco 05)
+Considere as decisões humanas registradas sobre o \`review_report\` anterior ao reauditar o diff. Não reabra falsos positivos descartados pelo humano, salvo se surgir uma regressão nova comprovada:
+
+\`\`\`json
+${JSON.stringify(payload, null, 2)}
+\`\`\``;
+  }
+
+  return `
+
+### Escopo de Triagem Humana do Code Review (Bloco 05)
+As decisões humanas abaixo determinam o escopo obrigatório deste retorno:
+- Corrija obrigatoriamente todos os itens em \`mandatoryFixes\` (incluindo \`[SUGESTÃO]\` promovida a correção obrigatória pelo humano).
+- NÃO altere nem reimplemente os itens listados em \`dismissedFalsePositives\` (falsos positivos descartados pelo humano).
+- Itens em \`deferredSuggestions\` são opcionais e não bloqueiam a entrega.
+
+\`\`\`json
+${JSON.stringify(payload, null, 2)}
+\`\`\``;
+}
 
 export function formatFactoryStageOutput(
   stage: FactoryStageName,

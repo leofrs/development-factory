@@ -20,6 +20,7 @@ import {
   fetchFactoryPreflight,
   returnFactoryFlowStage,
   rollbackFactoryFlowCheckpoint,
+  saveFactoryReviewTriage,
 } from '../src/api/factory-flows';
 import { parseAppEventMessage } from '../src/api/sessions';
 import {
@@ -134,6 +135,109 @@ test('parseAppEventMessage valida eventos de fluxo da Factory via SSE', () => {
 
   assert.equal(parseAppEventMessage('{invalid-json'), null);
   assert.equal(parseAppEventMessage(JSON.stringify({ type: 'unknown' })), null);
+});
+
+test('cliente HTTP saveFactoryReviewTriage envia decisões e valida resposta Zod', async context => {
+  const flow = makeFlow({
+    currentStage: 'review',
+    state: 'waiting_action',
+    currentSessionId: null,
+    transitions: [
+      {
+        from: 'queued',
+        to: 'running',
+        stage: 'triage',
+        at: '2026-11-19T12:00:00.000Z',
+        reason: 'Sessão iniciada',
+      },
+      {
+        from: 'running',
+        to: 'waiting_action',
+        stage: 'review',
+        at: '2026-11-19T12:00:00.000Z',
+        reason: 'Code Review concluído',
+      },
+    ],
+  });
+  const reviewArtifactId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+  const expectedResponse = {
+    contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+    flow: {
+      ...flow,
+      reviewTriage: {
+        reviewArtifactId,
+        iteration: 1,
+        decisions: [
+          {
+            findingId: 'F1',
+            action: 'dismiss_false_positive' as const,
+            justification: 'Já validado na fronteira.',
+          },
+        ],
+        updatedAt: '2026-11-22T12:10:00.000Z',
+      },
+    },
+    reviewGate: {
+      reviewArtifactId,
+      reviewReportPath: '/tmp/artifacts/review.md',
+      iteration: 1,
+      verdict: 'changes_requested' as const,
+      returnTarget: 'development' as const,
+      findings: [
+        {
+          id: 'F1',
+          index: 0,
+          severity: 'BLOQUEANTE' as const,
+          file: 'src/auth.ts',
+          line: 14,
+          explanation: 'Validar token.',
+          action: 'dismiss_false_positive' as const,
+          justification: 'Já validado na fronteira.',
+          effectiveSeverity: 'DISCARDED' as const,
+          isActiveBlocker: false,
+          includedInReturnScope: false,
+        },
+      ],
+      counts: {
+        total: 1,
+        blocking: 1,
+        suggestion: 0,
+        nit: 0,
+        activeBlockers: 0,
+        approvedForFix: 0,
+        promotedMandatory: 0,
+        dismissed: 1,
+        pending: 0,
+      },
+      canAdvanceToPr: true,
+    },
+  };
+
+  const fetchMock = context.mock.method(
+    globalThis,
+    'fetch',
+    async (url: string | URL | Request, init?: RequestInit) => {
+      assert.equal(
+        url,
+        `http://127.0.0.1:3001/api/factory/flows/${encodeURIComponent(flow.id)}/review-triage`,
+      );
+      assert.equal(init?.method, 'POST');
+      return Response.json(expectedResponse);
+    },
+  );
+
+  const result = await saveFactoryReviewTriage(flow.id, {
+    decisions: [
+      {
+        findingId: 'F1',
+        action: 'dismiss_false_positive',
+        justification: 'Já validado na fronteira.',
+      },
+    ],
+  });
+  assert.equal(fetchMock.mock.callCount(), 1);
+  assert.equal(result.reviewGate.canAdvanceToPr, true);
+  assert.equal(result.flow.reviewTriage?.decisions[0]?.findingId, 'F1');
 });
 
 test('cliente HTTP envia o preflight e preserva os resultados aprovado e bloqueado', async context => {

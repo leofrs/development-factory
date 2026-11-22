@@ -1,5 +1,6 @@
 import { dirname } from 'node:path';
 import type { FactoryFlowDetails, FactoryRepositoryProfile } from '@development-factory/shared';
+import { readFactoryReviewTriageScope } from './factory-review.js';
 import {
   GIT_WRITE_DENIED_BASH_TOOLS,
   INFRA_AND_CONFIG_PATHS,
@@ -112,11 +113,14 @@ export async function readFactoryTestsInputs(details: FactoryFlowDetails) {
         ])
       : [undefined, undefined];
 
+  const reviewTriageScope = readFactoryReviewTriageScope(details);
+
   return {
     understandingReportPath: paths.triage,
     implementationPlanPath: paths.planning,
     implementationReportPath: paths.development,
     ...(developmentChecks ? { developmentChecks } : {}),
+    ...(reviewTriageScope ? { reviewTriageScope } : {}),
     approvedNotes: details.stages.find(stage => stage.name === 'tests')?.approvedNotes,
     iteration,
     maxIterations: details.flow.maxIterations,

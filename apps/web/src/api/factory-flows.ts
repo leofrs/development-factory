@@ -11,6 +11,7 @@ import {
   FactoryFlowTraceabilityMatrixSchema,
   FactoryPreflightResponseSchema,
   RollbackFactoryFlowCheckpointResponseSchema,
+  SaveFactoryReviewTriageResponseSchema,
   TransitionFactoryFlowResponseSchema,
 } from '@development-factory/shared';
 import type {
@@ -29,6 +30,8 @@ import type {
   ReturnFactoryStageRequest,
   RollbackFactoryFlowCheckpointRequest,
   RollbackFactoryFlowCheckpointResponse,
+  SaveFactoryReviewTriageRequest,
+  SaveFactoryReviewTriageResponse,
 } from '@development-factory/shared';
 
 const API_BASE_URL = 'http://127.0.0.1:3001';
@@ -647,5 +650,46 @@ export async function rollbackFactoryFlowCheckpoint(
       error,
       'Não foi possível reverter o worktree para o checkpoint anterior.',
     );
+  }
+}
+
+/** Persiste as decisões humanas de triagem dos apontamentos do Code Review (Bloco 05). */
+export async function saveFactoryReviewTriage(
+  flowId: string,
+  request: SaveFactoryReviewTriageRequest,
+  signal?: AbortSignal,
+): Promise<SaveFactoryReviewTriageResponse> {
+  const fallbackMessage = 'Não foi possível salvar a triagem dos apontamentos do Code Review.';
+  try {
+    const response = await fetch(
+      `${API_BASE_URL}/api/factory/flows/${encodeURIComponent(flowId)}/review-triage`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(request),
+        cache: 'no-store',
+        signal,
+      },
+    );
+    const payload = await parseJsonResponse(response);
+    if (!response.ok) {
+      throw extractApiError(payload, response.status, fallbackMessage);
+    }
+
+    const parsed = SaveFactoryReviewTriageResponseSchema.safeParse(payload);
+    if (!parsed.success) {
+      throw new FactoryFlowApiError(
+        'Formato inesperado ao salvar a triagem dos apontamentos do Code Review.',
+        'FACTORY_FLOW_INVALID_RESPONSE',
+        response.status,
+      );
+    }
+
+    return parsed.data;
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw error;
+    }
+    throw toFactoryFlowRequestError(error, fallbackMessage);
   }
 }

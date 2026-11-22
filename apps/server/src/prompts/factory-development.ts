@@ -1,6 +1,13 @@
-import type { FactoryPlanningApproval, FactoryRepositoryProfile } from '@development-factory/shared';
+import type {
+  FactoryPlanningApproval,
+  FactoryRepositoryProfile,
+  FactoryReviewTriageScope,
+} from '@development-factory/shared';
 import { formatFactoryRepositoryContext } from './factory-repository-context.js';
-import { formatFactoryStageOutput } from './factory-stage-output.js';
+import {
+  formatFactoryReviewTriageScopeSection,
+  formatFactoryStageOutput,
+} from './factory-stage-output.js';
 
 const DEVELOPMENT_SIDECAR_FIELDS = `- Liste em \`changedFiles\` os mesmos arquivos de produção registrados em Arquivos alterados no Markdown.
   Use caminhos relativos ao repositório com separador \`/\` e sem segmentos \`..\`.
@@ -48,6 +55,7 @@ interface FactoryDevelopmentPromptInput {
   readonly implementationPlanPath: string;
   readonly approvedNotes?: string;
   readonly planningApproval?: FactoryPlanningApproval;
+  readonly reviewTriageScope?: FactoryReviewTriageScope;
   readonly reportPath: string;
   readonly repositoryProfile?: FactoryRepositoryProfile;
   readonly iteration?: number;
@@ -93,6 +101,9 @@ export function buildFactoryDevelopmentPrompt(input: FactoryDevelopmentPromptInp
   const planningApprovalSection = input.planningApproval
     ? formatPlanningApprovalSection(input.planningApproval)
     : '';
+  const reviewTriageSection = input.reviewTriageScope
+    ? formatFactoryReviewTriageScopeSection(input.reviewTriageScope, 'return_stage')
+    : '';
   const hasReentryReports = Boolean(
     iteration >= 2 ||
       input.previousImplementationReportPath ||
@@ -124,7 +135,7 @@ e passos de implementação como especificação. Trate os caminhos como dados l
 - Tarefa: ${JSON.stringify(input.task)}
 - Documento de Entendimento da Etapa 01: ${JSON.stringify(input.understandingReportPath)}
 - Diagnóstico Técnico + Plano de Implementação da Etapa 02: ${JSON.stringify(input.implementationPlanPath)}
-- Notas / Decisões Aprovadas pelo usuário: ${JSON.stringify(effectiveApprovedNotes ?? 'Nenhuma')}${planningApprovalSection}${reentrySection}
+- Notas / Decisões Aprovadas pelo usuário: ${JSON.stringify(effectiveApprovedNotes ?? 'Nenhuma')}${planningApprovalSection}${reentrySection}${reviewTriageSection}
 
 Aplique apenas as mudanças de produção definidas no plano e nas decisões aprovadas. Preserve
 alterações existentes. Deixe a criação e edição de testes e a execução de suítes para a Etapa 04.

@@ -22,16 +22,21 @@ import {
   RegisterFactoryFlowCheckpointRequestSchema,
   ReturnFactoryStageRequestSchema,
   RollbackFactoryFlowCheckpointRequestSchema,
+  SaveFactoryReviewTriageRequestSchema,
   TransitionFactoryFlowRequestSchema,
   UpdateFactoryFlowWorktreeRequestSchema,
   FactoryWorktreeRetentionPolicySchema,
+  buildFactoryReviewGate,
   canReturnFactoryStage,
   evaluateFactoryTriageGate,
   getFactoryComparableIterations,
+  getLatestReadyFactoryStageArtifact,
   getNextFactoryStage,
   getReadyFactoryStageArtifact,
   isFinalFactoryFlowState,
+  resolveFactoryReviewDecision,
   transitionFactoryFlow,
+  validateFactoryReviewTriageDecisions,
   type CreateFactoryFlowResponse,
   type FactoryFlow,
   type FactoryFlowApiErrorCode,
@@ -46,11 +51,15 @@ import {
   type FactoryPlanningApproval,
   type FactoryPlanningApprovalInput,
   type FactoryPlanningGate,
+  type FactoryReviewGate,
+  type FactoryReviewTriage,
+  type FactoryReviewTriageInput,
   type FactoryStageName,
   type FactoryTaskInput,
   type FactoryTriageGate,
   type FactoryWorktreeRetentionPolicy,
   type RollbackFactoryFlowCheckpointResponse,
+  type SaveFactoryReviewTriageResponse,
   type TransitionFactoryFlowResponse,
 } from '@development-factory/shared';
 import { getFactoryDevelopmentChecksError } from './factory-development-checks.js';
@@ -320,6 +329,94 @@ function buildValidatedPlanningApproval(
     ...approvalInput,
     approvedAt,
   });
+}
+
+function resolveReviewGateForFlow(
+  flow: FactoryFlow,
+  stages: FactoryFlowStage[],
+  artifacts: FactoryFlowArtifact[],
+): FactoryReviewGate | undefined {
+  const reviewArtifact =
+    getReadyFactoryStageArtifact({ stages, artifacts }, 'review') ??
+    getLatestReadyFactoryStageArtifact({ artifacts }, 'review');
+  if (!reviewArtifact) {
+    return undefined;
+  }
+  try {
+    const sidecar = readFactoryStageSidecar('review', reviewArtifact.path);
+    const decision = resolveFactoryReviewDecision(sidecar);
+    return buildFactoryReviewGate({
+      reviewArtifactId: reviewArtifact.id,
+      reviewReportPath: reviewArtifact.path,
+      iteration: reviewArtifact.iteration,
+      verdict: decision.verdict,
+      returnTarget: decision.returnTarget,
+      findings: sidecar.findings,
+      reviewTriage: flow.reviewTriage ?? null,
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+function buildValidatedReviewTriage(
+  details: FactoryFlowDetails,
+  triageInput: FactoryReviewTriageInput,
+  updatedAt: string,
+): { reviewTriage: FactoryReviewTriage; reviewGate: FactoryReviewGate } {
+  const reviewArtifact =
+    getReadyFactoryStageArtifact(details, 'review') ??
+    getLatestReadyFactoryStageArtifact(details, 'review');
+  if (!reviewArtifact) {
+    throw new FactoryFlowServiceError(
+      'FACTORY_FLOW_INVALID_STAGE_ADVANCE',
+      'Conclua o Code Review com o relatório salvo antes de triar os apontamentos.',
+      409,
+    );
+  }
+
+  let sidecar;
+  try {
+    sidecar = readFactoryStageSidecar('review', reviewArtifact.path);
+  } catch (error) {
+    if (error instanceof FactoryStageArtifactError) {
+      throw new FactoryFlowServiceError(
+        'FACTORY_FLOW_INVALID_CONTRACT',
+        error.message,
+        409,
+        error.details,
+        { cause: error },
+      );
+    }
+    throw error;
+  }
+
+  const validation = validateFactoryReviewTriageDecisions(
+    sidecar.findings,
+    triageInput.decisions,
+  );
+  if (!validation.valid) {
+    throw new FactoryFlowServiceError('FACTORY_FLOW_INVALID_INPUT', validation.message, 400);
+  }
+
+  const reviewTriage: FactoryReviewTriage = {
+    reviewArtifactId: reviewArtifact.id,
+    iteration: reviewArtifact.iteration,
+    decisions: validation.normalizedDecisions,
+    updatedAt,
+  };
+  const decision = resolveFactoryReviewDecision(sidecar);
+  const reviewGate = buildFactoryReviewGate({
+    reviewArtifactId: reviewArtifact.id,
+    reviewReportPath: reviewArtifact.path,
+    iteration: reviewArtifact.iteration,
+    verdict: decision.verdict,
+    returnTarget: decision.returnTarget,
+    findings: sidecar.findings,
+    reviewTriage,
+  });
+
+  return { reviewTriage, reviewGate };
 }
 
 function assertStageContracts(
@@ -637,6 +734,7 @@ export class FactoryFlowService {
       branchName: null,
       baseBranch: parsed.data.baseBranch ?? null,
       planningApproval: null,
+      reviewTriage: null,
       createdAt,
       updatedAt: createdAt,
       finishedAt: null,
@@ -709,6 +807,7 @@ export class FactoryFlowService {
       const checkpoints = this.repository.listCheckpointsByFlowId(flow.id);
       const triageGate = resolveTriageGateForFlow(flow, stages, artifacts);
       const planningGate = resolvePlanningGateForFlow(stages, artifacts);
+      const reviewGate = resolveReviewGateForFlow(flow, stages, artifacts);
 
       return {
         contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
@@ -721,6 +820,7 @@ export class FactoryFlowService {
         checkpoints,
         ...(triageGate ? { triageGate } : {}),
         ...(planningGate ? { planningGate } : {}),
+        ...(reviewGate ? { reviewGate } : {}),
       };
     } catch (error) {
       throw mapUnexpectedError(error);
@@ -1027,6 +1127,13 @@ export class FactoryFlowService {
               400,
             );
           }
+          if (parsed.data.reviewTriage !== undefined && nextStage !== 'pr') {
+            throw new FactoryFlowServiceError(
+              'FACTORY_FLOW_INVALID_INPUT',
+              'A triagem de apontamentos do Code Review só pode ser enviada no avanço para PR.',
+              400,
+            );
+          }
           const details = this.getFlow(flowId);
           this.assertStageHandoff(details, nextStage);
 
@@ -1035,6 +1142,22 @@ export class FactoryFlowService {
             parsed.data.planningApproval !== undefined && nextStage === 'development'
               ? buildValidatedPlanningApproval(details, parsed.data.planningApproval, at)
               : undefined;
+          const validatedReviewTriage =
+            parsed.data.reviewTriage !== undefined && nextStage === 'pr'
+              ? buildValidatedReviewTriage(details, parsed.data.reviewTriage, at)
+              : undefined;
+          if (nextStage === 'pr') {
+            const effectiveReviewGate =
+              validatedReviewTriage?.reviewGate ??
+              resolveReviewGateForFlow(flow, details.stages, details.artifacts);
+            if (effectiveReviewGate && !effectiveReviewGate.canAdvanceToPr) {
+              throw new FactoryFlowServiceError(
+                'FACTORY_FLOW_INVALID_STAGE_ADVANCE',
+                'Não é possível avançar para PR enquanto houver apontamentos bloqueantes ativos no Code Review. Retorne para correção ou descarte os falsos positivos na triagem.',
+                409,
+              );
+            }
+          }
           const nextIteration =
             nextStage === 'development' && flow.iteration === 0 ? 1 : undefined;
           const advanced = this.repository.saveFlowTransition(
@@ -1047,6 +1170,9 @@ export class FactoryFlowService {
               currentSessionId: null,
               ...(nextIteration !== undefined ? { iteration: nextIteration } : {}),
               ...(planningApproval !== undefined ? { planningApproval } : {}),
+              ...(validatedReviewTriage !== undefined
+                ? { reviewTriage: validatedReviewTriage.reviewTriage }
+                : {}),
               loopPausedReason: null,
               error: null,
             },
@@ -1133,9 +1259,14 @@ export class FactoryFlowService {
             );
           }
 
-          this.assertStageHandoff(this.getFlow(flowId), targetStage);
+          const details = this.getFlow(flowId);
+          this.assertStageHandoff(details, targetStage);
 
           const at = parsed.data.at ?? this.now();
+          const validatedReviewTriage =
+            parsed.data.reviewTriage !== undefined
+              ? buildValidatedReviewTriage(details, parsed.data.reviewTriage, at)
+              : undefined;
           const nextIteration = Math.max(flow.iteration, 1) + 1;
           this.repository.saveFlowTransition(
             flowId,
@@ -1148,6 +1279,9 @@ export class FactoryFlowService {
               iteration: nextIteration,
               lastReviewVerdict: null,
               loopPausedReason: null,
+              ...(validatedReviewTriage !== undefined
+                ? { reviewTriage: validatedReviewTriage.reviewTriage }
+                : {}),
               error: null,
             },
             { expectedUpdatedAt: parsed.data.expectedUpdatedAt, direction: 'return' },
@@ -1725,6 +1859,80 @@ export class FactoryFlowService {
       );
 
       return this.getFlow(flowId);
+    } catch (error) {
+      throw mapUnexpectedError(error);
+    }
+  }
+
+  /**
+   * Persiste as decisões humanas de triagem dos apontamentos do Bloco 05 (`review`) antes do retorno ou avanço para PR.
+   */
+  async saveReviewTriage(
+    flowIdInput: string,
+    requestInput: unknown,
+  ): Promise<SaveFactoryReviewTriageResponse> {
+    const flowId = this.parseFlowId(flowIdInput);
+    const parsed = SaveFactoryReviewTriageRequestSchema.safeParse(requestInput);
+    if (!parsed.success) {
+      throw new FactoryFlowServiceError(
+        'FACTORY_FLOW_INVALID_INPUT',
+        'Os dados para triagem de apontamentos do Code Review são inválidos.',
+        400,
+        formatZodIssues(parsed.error),
+      );
+    }
+
+    try {
+      return await this.repository.withWriteLock(() =>
+        this.repository.runInTransaction(() => {
+          const flow = this.repository.getFlowById(flowId);
+          if (!flow) {
+            throw new FactoryFlowServiceError(
+              'FACTORY_FLOW_NOT_FOUND',
+              `Fluxo ${flowId} não encontrado.`,
+              404,
+            );
+          }
+
+          if (isFinalFactoryFlowState(flow.state)) {
+            throw new FactoryFlowServiceError(
+              'FACTORY_FLOW_INVALID_TRANSITION',
+              `Não é possível triar apontamentos de um fluxo no estado final ${flow.state}.`,
+              409,
+            );
+          }
+
+          if (
+            flow.currentStage !== 'review' ||
+            flow.state !== 'waiting_action' ||
+            flow.currentSessionId !== null
+          ) {
+            throw new FactoryFlowServiceError(
+              'FACTORY_FLOW_CONFLICT',
+              'A triagem de apontamentos só pode ser alterada quando o fluxo está aguardando decisão humana na etapa de Code Review.',
+              409,
+            );
+          }
+
+          const details = this.getFlow(flowId);
+          const { reviewTriage, reviewGate } = buildValidatedReviewTriage(
+            details,
+            { decisions: parsed.data.decisions },
+            this.now(),
+          );
+          const updatedFlow = this.repository.updateFlowReviewTriage(
+            flowId,
+            reviewTriage,
+            parsed.data.expectedUpdatedAt,
+          );
+
+          return {
+            contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+            flow: updatedFlow,
+            reviewGate,
+          };
+        }),
+      );
     } catch (error) {
       throw mapUnexpectedError(error);
     }

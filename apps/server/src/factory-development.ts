@@ -1,5 +1,6 @@
 import { dirname } from 'node:path';
 import type { FactoryFlowDetails } from '@development-factory/shared';
+import { readFactoryReviewTriageScope } from './factory-review.js';
 import {
   INFRA_AND_CONFIG_PATHS,
   TEST_AND_FIXTURE_PATTERNS,
@@ -58,12 +59,14 @@ export async function readFactoryDevelopmentInputs(details: FactoryFlowDetails) 
 
   const approvedNotes = details.stages.find(stage => stage.name === 'development')?.approvedNotes;
   const planningApproval = details.flow.planningApproval ?? undefined;
+  const reviewTriageScope = readFactoryReviewTriageScope(details);
 
   return {
     understandingReportPath: paths.triage,
     implementationPlanPath: paths.planning,
     approvedNotes,
     ...(planningApproval ? { planningApproval } : {}),
+    ...(reviewTriageScope ? { reviewTriageScope } : {}),
     iteration,
     maxIterations: details.flow.maxIterations,
     ...(previousImplementationReportPath ? { previousImplementationReportPath } : {}),

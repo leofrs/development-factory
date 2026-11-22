@@ -46,7 +46,7 @@ test('SqliteFactoryFlowRepository aplica migrations e persiste múltiplos fluxos
     const applied = repo1.getAppliedMigrations();
     assert.equal(applied.length, REVIEW_MIGRATIONS.length);
     assert.ok(applied.some(migration => migration.name === 'add_factory_flows'));
-    assert.equal(applied.at(-1)?.name, 'add_factory_planning_approval');
+    assert.equal(applied.at(-1)?.name, 'add_factory_review_triage');
 
     const service1 = new FactoryFlowService(repo1, { now: createClock() });
 

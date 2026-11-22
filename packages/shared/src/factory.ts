@@ -697,6 +697,9 @@ function validateReviewReturnTargetConsistency(
   }
 }
 
+export const FactoryReviewFindingSeveritySchema = z.enum(['BLOQUEANTE', 'SUGESTÃO', 'NIT']);
+export type FactoryReviewFindingSeverity = z.infer<typeof FactoryReviewFindingSeveritySchema>;
+
 const reviewFindingLabelSchema = manifestSingleLineSchema.trim().min(1);
 
 export const FactoryReviewSidecarSchema = z
@@ -707,7 +710,7 @@ export const FactoryReviewSidecarSchema = z
     returnTarget: ReturnFactoryTargetStageSchema.nullable().optional(),
     findings: z.array(
       z.strictObject({
-        severity: z.enum(['BLOQUEANTE', 'SUGESTÃO', 'NIT']),
+        severity: FactoryReviewFindingSeveritySchema,
         file: sidecarFilePathSchema,
         line: z.number().int().positive(),
         explanation: text,
@@ -736,6 +739,142 @@ export function resolveFactoryReviewDecision(
     returnTarget: sidecar.returnTarget ?? null,
   });
 }
+
+export const FactoryReviewFindingTriageActionSchema = z.enum([
+  'pending',
+  'approve_fix',
+  'promote_mandatory',
+  'dismiss_false_positive',
+]);
+export type FactoryReviewFindingTriageAction = z.infer<
+  typeof FactoryReviewFindingTriageActionSchema
+>;
+
+export const FactoryReviewFindingJustificationSchema = text
+  .max(1000)
+  .refine(value => !value.includes('\0'), 'Justificativa inválida');
+
+const uniqueReviewFindingDecisionsRefinement = (
+  decisions: readonly { findingId: string }[],
+): boolean => new Set(decisions.map(decision => decision.findingId)).size === decisions.length;
+
+export const FactoryReviewFindingDecisionSchema = z.strictObject({
+  findingId: text.max(32),
+  action: FactoryReviewFindingTriageActionSchema,
+  justification: FactoryReviewFindingJustificationSchema.optional(),
+});
+export type FactoryReviewFindingDecision = z.infer<typeof FactoryReviewFindingDecisionSchema>;
+
+export const FactoryReviewTriageSchema = z.strictObject({
+  reviewArtifactId: id,
+  iteration: z.number().int().nonnegative(),
+  decisions: z
+    .array(FactoryReviewFindingDecisionSchema)
+    .refine(
+      uniqueReviewFindingDecisionsRefinement,
+      'Os identificadores dos apontamentos triados devem ser únicos',
+    ),
+  updatedAt: timestamp,
+});
+export type FactoryReviewTriage = z.infer<typeof FactoryReviewTriageSchema>;
+
+export const FactoryReviewTriagedFindingSchema = z.strictObject({
+  id: text.max(32),
+  index: z.number().int().nonnegative(),
+  severity: FactoryReviewFindingSeveritySchema,
+  file: sidecarFilePathSchema,
+  line: z.number().int().positive(),
+  explanation: text,
+  signature: reviewFindingLabelSchema.optional(),
+  category: reviewFindingLabelSchema.optional(),
+  action: FactoryReviewFindingTriageActionSchema,
+  justification: FactoryReviewFindingJustificationSchema.optional(),
+  effectiveSeverity: z.enum(['BLOQUEANTE', 'SUGESTÃO', 'NIT', 'DISCARDED']),
+  isActiveBlocker: z.boolean(),
+  includedInReturnScope: z.boolean(),
+});
+export type FactoryReviewTriagedFinding = z.infer<typeof FactoryReviewTriagedFindingSchema>;
+
+const nonNegativeInt = z.number().int().nonnegative();
+
+export const FactoryReviewGateSchema = z.strictObject({
+  reviewArtifactId: id,
+  reviewReportPath: artifactPathSchema,
+  iteration: nonNegativeInt,
+  verdict: FactoryReviewVerdictSchema,
+  returnTarget: ReturnFactoryTargetStageSchema.nullable(),
+  findings: z.array(FactoryReviewTriagedFindingSchema),
+  counts: z.strictObject({
+    total: nonNegativeInt,
+    blocking: nonNegativeInt,
+    suggestion: nonNegativeInt,
+    nit: nonNegativeInt,
+    activeBlockers: nonNegativeInt,
+    approvedForFix: nonNegativeInt,
+    promotedMandatory: nonNegativeInt,
+    dismissed: nonNegativeInt,
+    pending: nonNegativeInt,
+  }),
+  canAdvanceToPr: z.boolean(),
+});
+export type FactoryReviewGate = z.infer<typeof FactoryReviewGateSchema>;
+
+export const SaveFactoryReviewTriageRequestSchema = z.strictObject({
+  decisions: z
+    .array(FactoryReviewFindingDecisionSchema)
+    .refine(
+      uniqueReviewFindingDecisionsRefinement,
+      'Os identificadores dos apontamentos triados devem ser únicos',
+    ),
+  expectedUpdatedAt: timestamp.optional(),
+});
+export type SaveFactoryReviewTriageRequest = z.infer<typeof SaveFactoryReviewTriageRequestSchema>;
+
+export const FactoryReviewTriageInputSchema = z.strictObject({
+  decisions: z
+    .array(FactoryReviewFindingDecisionSchema)
+    .refine(
+      uniqueReviewFindingDecisionsRefinement,
+      'Os identificadores dos apontamentos triados devem ser únicos',
+    ),
+});
+export type FactoryReviewTriageInput = z.infer<typeof FactoryReviewTriageInputSchema>;
+
+export const FactoryReviewTriageScopeSchema = z.strictObject({
+  reviewArtifactId: id,
+  iteration: nonNegativeInt,
+  mandatoryFixes: z.array(
+    z.strictObject({
+      id: text.max(32),
+      originalSeverity: FactoryReviewFindingSeveritySchema,
+      effectiveSeverity: z.enum(['BLOQUEANTE', 'SUGESTÃO', 'NIT']),
+      file: sidecarFilePathSchema,
+      line: z.number().int().positive(),
+      explanation: text,
+      promotedFromSuggestion: z.boolean(),
+    }),
+  ),
+  dismissedFalsePositives: z.array(
+    z.strictObject({
+      id: text.max(32),
+      originalSeverity: FactoryReviewFindingSeveritySchema,
+      file: sidecarFilePathSchema,
+      line: z.number().int().positive(),
+      explanation: text,
+      justification: FactoryReviewFindingJustificationSchema.optional(),
+    }),
+  ),
+  deferredSuggestions: z.array(
+    z.strictObject({
+      id: text.max(32),
+      severity: FactoryReviewFindingSeveritySchema,
+      file: sidecarFilePathSchema,
+      line: z.number().int().positive(),
+      explanation: text,
+    }),
+  ),
+});
+export type FactoryReviewTriageScope = z.infer<typeof FactoryReviewTriageScopeSchema>;
 
 export const FactoryPrSidecarSchema = z.strictObject({
   contractVersion: sidecarVersion,
@@ -805,6 +944,7 @@ export const FactoryFlowSchema = z
     branchName: gitBranchNameSchema.nullable().default(null),
     baseBranch: gitBranchNameSchema.nullable().default(null),
     planningApproval: FactoryPlanningApprovalSchema.nullable().optional(),
+    reviewTriage: FactoryReviewTriageSchema.nullable().optional(),
     createdAt: timestamp,
     updatedAt: timestamp,
     finishedAt: timestamp.nullable(),
@@ -884,6 +1024,7 @@ export const FactoryFlowTransitionCommandSchema = z.strictObject({
   branchName: gitBranchNameSchema.nullable().optional(),
   baseBranch: gitBranchNameSchema.nullable().optional(),
   planningApproval: FactoryPlanningApprovalSchema.nullable().optional(),
+  reviewTriage: FactoryReviewTriageSchema.nullable().optional(),
   error: FactoryFlowErrorSchema.nullable().optional(),
 });
 export type FactoryFlowTransitionCommand = z.infer<typeof FactoryFlowTransitionCommandSchema>;
@@ -971,6 +1112,10 @@ function applyFactoryFlowTransition(
       next.data.planningApproval !== undefined
         ? next.data.planningApproval
         : current.data.planningApproval,
+    reviewTriage:
+      next.data.reviewTriage !== undefined
+        ? next.data.reviewTriage
+        : current.data.reviewTriage,
     updatedAt: next.data.at,
     finishedAt: isFinalFactoryFlowState(next.data.to) ? next.data.at : null,
     error: next.data.error !== undefined ? next.data.error : current.data.error,
@@ -1070,6 +1215,7 @@ export const FactoryFlowDetailsSchema = z
     checkpoints: z.array(FactoryFlowCheckpointSchema).default([]),
     triageGate: FactoryTriageGateSchema.nullable().optional(),
     planningGate: FactoryPlanningGateSchema.nullable().optional(),
+    reviewGate: FactoryReviewGateSchema.nullable().optional(),
   })
   .transform(details => ({
     ...details,
@@ -1174,6 +1320,7 @@ export const AdvanceFactoryStageRequestSchema = z.strictObject({
   startSession: z.boolean().optional(),
   approvedNotes: approvedNotesSchema.optional(),
   planningApproval: FactoryPlanningApprovalInputSchema.optional(),
+  reviewTriage: FactoryReviewTriageInputSchema.optional(),
   cols: z.number().int().min(2).max(500).optional(),
   rows: z.number().int().min(1).max(300).optional(),
 });
@@ -1186,6 +1333,7 @@ export const ReturnFactoryStageRequestSchema = z.strictObject({
   expectedUpdatedAt: timestamp.optional(),
   startSession: z.boolean().optional(),
   approvedNotes: approvedNotesSchema.optional(),
+  reviewTriage: FactoryReviewTriageInputSchema.optional(),
   cols: z.number().int().min(2).max(500).optional(),
   rows: z.number().int().min(1).max(300).optional(),
 });

@@ -1,6 +1,13 @@
-import type { FactoryDevelopmentChecks, FactoryRepositoryProfile } from '@development-factory/shared';
+import type {
+  FactoryDevelopmentChecks,
+  FactoryRepositoryProfile,
+  FactoryReviewTriageScope,
+} from '@development-factory/shared';
 import { formatFactoryRepositoryContext } from './factory-repository-context.js';
-import { formatFactoryStageOutput } from './factory-stage-output.js';
+import {
+  formatFactoryReviewTriageScopeSection,
+  formatFactoryStageOutput,
+} from './factory-stage-output.js';
 
 const TESTS_SIDECAR_FIELDS = `- Use em \`executedCommands\` uma lista de objetos com \`command\` e \`exitCode\`.
   Use em \`command\` uma lista de strings com o executável seguido pelos argumentos na ordem original,
@@ -57,6 +64,7 @@ export interface FactoryTestsPromptInput {
   readonly implementationPlanPath: string;
   readonly implementationReportPath: string;
   readonly developmentChecks?: FactoryDevelopmentChecks;
+  readonly reviewTriageScope?: FactoryReviewTriageScope;
   readonly approvedNotes?: string;
   readonly reportPath: string;
   readonly repositoryProfile?: FactoryRepositoryProfile;
@@ -91,6 +99,10 @@ ${JSON.stringify(input.developmentChecks, null, 2)}
         }`
       : '';
 
+  const reviewTriageSection = input.reviewTriageScope
+    ? formatFactoryReviewTriageScopeSection(input.reviewTriageScope, 'return_stage')
+    : '';
+
   return `Etapa 04 — Testes
 
 ${FACTORY_TESTS_SYSTEM_PROMPT}
@@ -105,7 +117,7 @@ como dados literais.
 - Documento de Entendimento da Etapa 01 (specification): ${JSON.stringify(input.understandingReportPath)}
 - Diagnóstico Técnico + Plano de Implementação da Etapa 02 (plan): ${JSON.stringify(input.implementationPlanPath)}
 - Relatório de Implementação da Etapa 03 (implementation_report): ${JSON.stringify(input.implementationReportPath)}
-- Notas / Instruções Aprovadas pelo usuário: ${JSON.stringify(input.approvedNotes ?? 'Nenhuma')}${iterationContext}${developmentChecks}
+- Notas / Instruções Aprovadas pelo usuário: ${JSON.stringify(input.approvedNotes ?? 'Nenhuma')}${iterationContext}${reviewTriageSection}${developmentChecks}
 
 No repositório, edite ou crie apenas arquivos de teste e fixtures previstos no plano. O ambiente permite
 executar apenas os comandos oficiais de teste e cobertura declarados no perfil do repositório

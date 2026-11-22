@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { FACTORY_DIFF_PAGE_SIZE } from '@development-factory/shared';
 import type { FactoryDiffFile } from '@development-factory/shared';
 import { fetchFactoryFlowDiffPage, fetchFactoryFlowDiffPatch } from '../api/factory-flows.js';
@@ -11,6 +11,14 @@ const changeLabels: Record<FactoryDiffFile['change'], string> = {
   deleted: 'Removido',
 };
 
+const HUNK_HEADER_PATTERN = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
+
+export interface FactoryDiffFocusTarget {
+  readonly path: string;
+  readonly line?: number;
+  readonly requestId: number;
+}
+
 interface DiffSource {
   flowId: string;
   updatedAt?: string;
@@ -21,8 +29,72 @@ function fileKey(file: FactoryDiffFile): string {
   return `${file.untracked}:${file.path}`;
 }
 
-function PatchLines({ patch, path }: { patch: string; path: string }) {
+function parsePatchLinesWithLineNumbers(patch: string): Array<{
+  readonly text: string;
+  readonly tone: string;
+  readonly lineNumber: number | null;
+}> {
   let inHunk = false;
+  let currentNewLine: number | null = null;
+
+  return patch.split('\n').map(line => {
+    if (line.startsWith('diff --git ')) {
+      inHunk = false;
+      currentNewLine = null;
+    } else if (line.startsWith('@@ ')) {
+      inHunk = true;
+      const match = HUNK_HEADER_PATTERN.exec(line);
+      currentNewLine = match?.[1] !== undefined ? Number(match[1]) : null;
+    }
+
+    let tone = 'text-muted';
+    let lineNumber: number | null = null;
+
+    if (line.startsWith('@@ ')) {
+      tone = 'bg-selected text-secondary';
+    } else if (inHunk && line.startsWith('+')) {
+      tone = 'bg-accent/10 text-accent';
+      if (currentNewLine !== null) {
+        lineNumber = currentNewLine;
+        currentNewLine += 1;
+      }
+    } else if (inHunk && line.startsWith('-')) {
+      tone = 'bg-danger/10 text-danger';
+    } else if (inHunk && !line.startsWith('\\')) {
+      if (currentNewLine !== null) {
+        lineNumber = currentNewLine;
+        currentNewLine += 1;
+      }
+    }
+
+    return { text: line, tone, lineNumber };
+  });
+}
+
+function PatchLines({
+  patch,
+  path,
+  focusLine,
+}: {
+  patch: string;
+  path: string;
+  focusLine?: number;
+}) {
+  const focusLineRef = useRef<HTMLSpanElement | null>(null);
+  const parsedLines = parsePatchLinesWithLineNumbers(patch);
+
+  useEffect(() => {
+    if (focusLine === undefined) {
+      return;
+    }
+    const target = focusLineRef.current;
+    if (target && typeof target.scrollIntoView === 'function') {
+      target.scrollIntoView({ block: 'center' });
+    }
+  }, [focusLine, patch]);
+
+  let matchedFocus = false;
+
   return (
     <pre
       aria-label={`Diff linha a linha de ${path}`}
@@ -30,23 +102,30 @@ function PatchLines({ patch, path }: { patch: string; path: string }) {
       className="max-h-[55vh] overflow-auto rounded-lg border border-line bg-surface py-2 text-xs leading-relaxed focus-visible:outline-2 focus-visible:outline-accent"
     >
       <code className="block w-max min-w-full">
-        {patch.split('\n').map((line, index) => {
-          if (line.startsWith('diff --git ')) {
-            inHunk = false;
-          } else if (line.startsWith('@@ ')) {
-            inHunk = true;
-          }
-          let tone = 'text-muted';
-          if (inHunk && line.startsWith('+')) {
-            tone = 'bg-accent/10 text-accent';
-          } else if (inHunk && line.startsWith('-')) {
-            tone = 'bg-danger/10 text-danger';
-          } else if (line.startsWith('@@ ')) {
-            tone = 'bg-selected text-secondary';
+        {parsedLines.map((entry, index) => {
+          const isFocusLine =
+            !matchedFocus && focusLine !== undefined && entry.lineNumber === focusLine;
+          if (isFocusLine) {
+            matchedFocus = true;
           }
           return (
-            <span key={index} className={`block min-h-[1em] px-3 ${tone}`}>
-              {line}
+            <span
+              key={index}
+              ref={isFocusLine ? focusLineRef : undefined}
+              data-line={entry.lineNumber ?? undefined}
+              aria-current={isFocusLine ? 'location' : undefined}
+              className={`block min-h-[1em] px-3 ${entry.tone} ${
+                isFocusLine ? 'bg-warning/20 text-primary ring-1 ring-inset ring-warning/60' : ''
+              }`}
+            >
+              {entry.lineNumber !== null ? (
+                <span className="mr-3 inline-block w-10 select-none text-right font-mono text-[10px] text-muted">
+                  {entry.lineNumber}
+                </span>
+              ) : (
+                <span className="mr-3 inline-block w-10 select-none" aria-hidden="true" />
+              )}
+              {entry.text}
             </span>
           );
         })}
@@ -59,7 +138,8 @@ function FactoryFlowFilePatch({
   flowId,
   comparison,
   file,
-}: Omit<DiffSource, 'updatedAt'> & { file: FactoryDiffFile }) {
+  focusLine,
+}: Omit<DiffSource, 'updatedAt'> & { file: FactoryDiffFile; focusLine?: number }) {
   const { path, untracked } = file;
   const request = useCallback(
     (signal: AbortSignal) =>
@@ -89,11 +169,18 @@ function FactoryFlowFilePatch({
   }
   return (
     <div className="min-w-0 space-y-2">
-      <h3 className="break-all whitespace-pre-wrap font-mono text-xs font-semibold">
-        <bdi>{path}</bdi>
-      </h3>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="break-all whitespace-pre-wrap font-mono text-xs font-semibold">
+          <bdi>{path}</bdi>
+        </h3>
+        {focusLine !== undefined && (
+          <span className="rounded-md border border-warning/40 bg-warning/10 px-2 py-0.5 font-mono text-[10px] text-warning">
+            Linha {focusLine}
+          </span>
+        )}
+      </div>
       {result.data.patch ? (
-        <PatchLines patch={result.data.patch} path={path} />
+        <PatchLines patch={result.data.patch} path={path} focusLine={focusLine} />
       ) : (
         <p className="text-xs text-muted">Nenhuma diferença disponível para este arquivo.</p>
       )}
@@ -111,21 +198,56 @@ export function FactoryFlowDiffPanel({
   updatedAt,
   comparison,
   baseBranch,
-}: DiffSource & { baseBranch?: string | null }) {
+  focusTarget,
+}: DiffSource & {
+  baseBranch?: string | null;
+  focusTarget?: FactoryDiffFocusTarget | null;
+}) {
   const [offset, setOffset] = useState(0);
-  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [selection, setSelection] = useState<{
+    focusRequestId: number | null;
+    key: string | null;
+  }>({ focusRequestId: null, key: null });
   const requestPage = useCallback(
     (signal: AbortSignal) => fetchFactoryFlowDiffPage(flowId, offset, comparison, signal),
     [flowId, offset, comparison],
   );
   const { result, reload } = useFactoryInspection(requestPage, updatedAt);
   const page = result && 'data' in result ? result.data : null;
-  const selected = page?.files.find(file => fileKey(file) === selectedKey);
+  const activeFocus =
+    focusTarget && selection.focusRequestId !== focusTarget.requestId ? focusTarget : null;
+  const selectedKey = activeFocus
+    ? fileKey(
+        page?.files.find(file => file.path === activeFocus.path) ?? {
+          path: activeFocus.path,
+          change: 'modified',
+          untracked: false,
+          additions: null,
+          deletions: null,
+          binary: false,
+        },
+      )
+    : selection.key;
+  const selectedFromPage = page?.files.find(file => fileKey(file) === selectedKey);
+  const selected: FactoryDiffFile | undefined =
+    selectedFromPage ??
+    (activeFocus
+      ? {
+          path: activeFocus.path,
+          change: 'modified',
+          untracked: false,
+          additions: null,
+          deletions: null,
+          binary: false,
+        }
+      : undefined);
+  const focusLine =
+    selected && focusTarget && selected.path === focusTarget.path ? focusTarget.line : undefined;
   const nextOffset = page?.nextOffset ?? null;
 
   function goToPage(next: number) {
     setOffset(next);
-    setSelectedKey(null);
+    setSelection({ focusRequestId: focusTarget?.requestId ?? null, key: null });
   }
 
   return (
@@ -175,7 +297,12 @@ export function FactoryFlowDiffPanel({
                   <button
                     type="button"
                     aria-pressed={selectedKey === key}
-                    onClick={() => setSelectedKey(value => (value === key ? null : key))}
+                    onClick={() =>
+                      setSelection({
+                        focusRequestId: focusTarget?.requestId ?? null,
+                        key: selectedKey === key ? null : key,
+                      })
+                    }
                     className="w-full rounded-lg border border-line bg-surface px-3 py-2 text-left hover:bg-hover aria-pressed:border-accent aria-pressed:bg-selected"
                   >
                     <bdi className="block break-all whitespace-pre-wrap font-mono text-xs text-primary">
@@ -201,10 +328,11 @@ export function FactoryFlowDiffPanel({
           </ul>
           {selected ? (
             <FactoryFlowFilePatch
-              key={fileKey(selected)}
+              key={`${fileKey(selected)}:${focusLine ?? 'none'}`}
               flowId={flowId}
               comparison={comparison}
               file={selected}
+              focusLine={focusLine}
             />
           ) : (
             <p className="px-1 pt-2 text-xs text-muted">Selecione um arquivo para ver o diff.</p>

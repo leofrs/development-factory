@@ -1722,3 +1722,467 @@ test('FactoryFlowTraceabilityPanel exibe conexões completas, lacunas e itens se
   assert.match(html, /Itens sem critério de aceite vinculado/);
   assert.match(html, /src\/extra-orphan\.ts/);
 });
+
+test('FactoryFlowRoadmapModal filtra findings por severidade, salta para linha no diff e persiste triagem condicional', async context => {
+  const window = parseHTML('<!doctype html><html><body><div id="findings-root"></div></body></html>');
+  const { document } = window;
+  const originalFetch = globalThis.fetch;
+  const overrides: Array<[object, string, unknown]> = [
+    [globalThis, 'window', window],
+    [globalThis, 'document', document],
+    [globalThis, 'HTMLElement', window.HTMLElement],
+    [globalThis, 'IS_REACT_ACT_ENVIRONMENT', true],
+    [window.HTMLElement.prototype, 'showModal', function (this: HTMLElement) {
+      this.setAttribute('open', '');
+    }],
+    [window.HTMLElement.prototype, 'close', function (this: HTMLElement) {
+      this.removeAttribute('open');
+    }],
+  ];
+  for (const [target, name, value] of overrides) {
+    const original = Object.getOwnPropertyDescriptor(target, name);
+    Object.defineProperty(target, name, { configurable: true, value, writable: true });
+    context.after(() => {
+      if (original) {
+        Object.defineProperty(target, name, original);
+      } else {
+        Reflect.deleteProperty(target, name);
+      }
+    });
+  }
+  context.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  context.mock.method(window.HTMLElement.prototype, 'focus', () => undefined);
+
+  const flowId = 'aaaaaaaa-2222-4222-8222-222222222222';
+  const reviewArtifactId = 'bbbbbbbb-2222-4222-8222-222222222222';
+  const baseFlow = createFlow({
+    id: flowId,
+    title: 'REV-65 · Triagem de Findings',
+    currentStage: 'review',
+    state: 'waiting_action',
+    currentSessionId: null,
+    iteration: 1,
+    lastReviewVerdict: 'changes_requested',
+    worktreePath: '/tmp/worktree-rev-65',
+    branchName: 'factory/rev-65',
+    baseBranch: 'main',
+  });
+
+  const makeGate = (
+    decisions: Array<{
+      findingId: string;
+      action: 'pending' | 'approve_fix' | 'promote_mandatory' | 'dismiss_false_positive';
+      justification?: string;
+    }>,
+  ) => {
+    const map = new Map(decisions.map(item => [item.findingId, item]));
+    const f1Action = map.get('F1')?.action ?? 'pending';
+    const f2Action = map.get('F2')?.action ?? 'pending';
+    const f3Action = map.get('F3')?.action ?? 'pending';
+    const activeBlockers =
+      (f1Action !== 'dismiss_false_positive' ? 1 : 0) +
+      (f2Action === 'promote_mandatory' ? 1 : 0);
+
+    return {
+      reviewArtifactId,
+      reviewReportPath: '/tmp/artifacts/review.md',
+      iteration: 1,
+      verdict: 'changes_requested' as const,
+      returnTarget: 'development' as const,
+      findings: [
+        {
+          id: 'F1',
+          index: 0,
+          severity: 'BLOQUEANTE' as const,
+          file: 'src/auth.ts',
+          line: 14,
+          explanation: 'Token expirado retorna HTTP 500.',
+          action: f1Action,
+          ...(map.get('F1')?.justification ? { justification: map.get('F1')?.justification } : {}),
+          effectiveSeverity: f1Action === 'dismiss_false_positive' ? ('DISCARDED' as const) : ('BLOQUEANTE' as const),
+          isActiveBlocker: f1Action !== 'dismiss_false_positive',
+          includedInReturnScope: f1Action !== 'dismiss_false_positive',
+        },
+        {
+          id: 'F2',
+          index: 1,
+          severity: 'SUGESTÃO' as const,
+          file: 'src/auth.ts',
+          line: 22,
+          explanation: 'Extrair validação do header.',
+          action: f2Action,
+          effectiveSeverity: f2Action === 'promote_mandatory' ? ('BLOQUEANTE' as const) : f2Action === 'dismiss_false_positive' ? ('DISCARDED' as const) : ('SUGESTÃO' as const),
+          isActiveBlocker: f2Action === 'promote_mandatory',
+          includedInReturnScope: f2Action === 'promote_mandatory' || f2Action === 'approve_fix',
+        },
+        {
+          id: 'F3',
+          index: 2,
+          severity: 'NIT' as const,
+          file: 'src/auth.ts',
+          line: 30,
+          explanation: 'Padronizar nome da variável local.',
+          action: f3Action,
+          effectiveSeverity: f3Action === 'dismiss_false_positive' ? ('DISCARDED' as const) : ('NIT' as const),
+          isActiveBlocker: false,
+          includedInReturnScope: f3Action === 'approve_fix',
+        },
+      ],
+      counts: {
+        total: 3,
+        blocking: 1,
+        suggestion: 1,
+        nit: 1,
+        activeBlockers,
+        approvedForFix: [f1Action, f2Action, f3Action].filter(a => a === 'approve_fix').length,
+        promotedMandatory: f2Action === 'promote_mandatory' ? 1 : 0,
+        dismissed: [f1Action, f2Action, f3Action].filter(a => a === 'dismiss_false_positive').length,
+        pending: [f1Action, f2Action, f3Action].filter(a => a === 'pending').length,
+      },
+      canAdvanceToPr: activeBlockers === 0,
+    };
+  };
+
+  let currentDetails: FactoryFlowDetails = {
+    contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+    flow: baseFlow,
+    stages: [
+      {
+        contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+        id: 'cccccccc-2222-4222-8222-222222222201',
+        flowId,
+        name: 'triage',
+        state: 'completed',
+        sessionId: null,
+        reportPath: '/tmp/artifacts/spec.md',
+        sessionPath: null,
+        createdAt: '2026-11-19T12:00:00.000Z',
+        updatedAt: '2026-11-19T12:01:00.000Z',
+        startedAt: '2026-11-19T12:00:00.000Z',
+        finishedAt: '2026-11-19T12:01:00.000Z',
+        error: null,
+      },
+      {
+        contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+        id: 'cccccccc-2222-4222-8222-222222222202',
+        flowId,
+        name: 'planning',
+        state: 'completed',
+        sessionId: null,
+        reportPath: '/tmp/artifacts/plan.md',
+        sessionPath: null,
+        createdAt: '2026-11-19T12:01:00.000Z',
+        updatedAt: '2026-11-19T12:02:00.000Z',
+        startedAt: '2026-11-19T12:01:00.000Z',
+        finishedAt: '2026-11-19T12:02:00.000Z',
+        error: null,
+      },
+      {
+        contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+        id: 'cccccccc-2222-4222-8222-222222222203',
+        flowId,
+        name: 'development',
+        state: 'completed',
+        sessionId: null,
+        reportPath: '/tmp/artifacts/dev.md',
+        sessionPath: null,
+        createdAt: '2026-11-19T12:02:00.000Z',
+        updatedAt: '2026-11-19T12:03:00.000Z',
+        startedAt: '2026-11-19T12:02:00.000Z',
+        finishedAt: '2026-11-19T12:03:00.000Z',
+        error: null,
+      },
+      {
+        contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+        id: 'cccccccc-2222-4222-8222-222222222204',
+        flowId,
+        name: 'tests',
+        state: 'completed',
+        sessionId: null,
+        reportPath: '/tmp/artifacts/tests.md',
+        sessionPath: null,
+        createdAt: '2026-11-19T12:03:00.000Z',
+        updatedAt: '2026-11-19T12:04:00.000Z',
+        startedAt: '2026-11-19T12:03:00.000Z',
+        finishedAt: '2026-11-19T12:04:00.000Z',
+        error: null,
+      },
+      {
+        contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+        id: 'cccccccc-2222-4222-8222-222222222205',
+        flowId,
+        name: 'review',
+        state: 'waiting_action',
+        sessionId: null,
+        reportPath: '/tmp/artifacts/review.md',
+        sessionPath: null,
+        createdAt: '2026-11-19T12:04:00.000Z',
+        updatedAt: '2026-11-19T12:05:00.000Z',
+        startedAt: '2026-11-19T12:04:00.000Z',
+        finishedAt: null,
+        error: null,
+      },
+    ],
+    artifacts: [
+      {
+        contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+        id: 'dddddddd-2222-4222-8222-222222222201',
+        flowId,
+        stage: 'triage',
+        sessionId: null,
+        kind: 'specification',
+        format: 'markdown',
+        path: '/tmp/artifacts/spec.md',
+        status: 'ready',
+        iteration: 0,
+        createdAt: '2026-11-19T12:01:00.000Z',
+        updatedAt: '2026-11-19T12:01:00.000Z',
+        error: null,
+      },
+      {
+        contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+        id: 'dddddddd-2222-4222-8222-222222222202',
+        flowId,
+        stage: 'planning',
+        sessionId: null,
+        kind: 'plan',
+        format: 'markdown',
+        path: '/tmp/artifacts/plan.md',
+        status: 'ready',
+        iteration: 0,
+        createdAt: '2026-11-19T12:02:00.000Z',
+        updatedAt: '2026-11-19T12:02:00.000Z',
+        error: null,
+      },
+      {
+        contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+        id: 'dddddddd-2222-4222-8222-222222222203',
+        flowId,
+        stage: 'development',
+        sessionId: null,
+        kind: 'implementation_report',
+        format: 'markdown',
+        path: '/tmp/artifacts/dev.md',
+        status: 'ready',
+        iteration: 1,
+        createdAt: '2026-11-19T12:03:00.000Z',
+        updatedAt: '2026-11-19T12:03:00.000Z',
+        error: null,
+      },
+      {
+        contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+        id: 'dddddddd-2222-4222-8222-222222222204',
+        flowId,
+        stage: 'tests',
+        sessionId: null,
+        kind: 'test_report',
+        format: 'markdown',
+        path: '/tmp/artifacts/tests.md',
+        status: 'ready',
+        iteration: 1,
+        createdAt: '2026-11-19T12:04:00.000Z',
+        updatedAt: '2026-11-19T12:04:00.000Z',
+        error: null,
+      },
+      {
+        contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+        id: reviewArtifactId,
+        flowId,
+        stage: 'review',
+        sessionId: null,
+        kind: 'review_report',
+        format: 'markdown',
+        path: '/tmp/artifacts/review.md',
+        status: 'ready',
+        iteration: 1,
+        createdAt: '2026-11-19T12:05:00.000Z',
+        updatedAt: '2026-11-19T12:05:00.000Z',
+        error: null,
+      },
+    ],
+    worktreePath: '/tmp/worktree-rev-65',
+    branchName: 'factory/rev-65',
+    baseBranch: 'main',
+    checkpoints: [],
+    reviewGate: makeGate([]),
+  };
+
+  const savedCalls: Array<unknown> = [];
+  let advancedCount = 0;
+
+  globalThis.fetch = (input => {
+    const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url);
+    if (url.pathname.endsWith('/diff')) {
+      const file = url.searchParams.get('file');
+      if (file === 'src/auth.ts') {
+        return Promise.resolve(
+          Response.json({
+            contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+            kind: 'patch',
+            patch: '@@ -12,2 +13,3 @@\n export function check() {\n+  return throwExpired();\n }',
+            truncated: false,
+          }),
+        );
+      }
+      return Promise.resolve(
+        Response.json({
+          contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+          kind: 'page',
+          files: [
+            {
+              path: 'src/auth.ts',
+              change: 'modified',
+              untracked: false,
+              additions: 1,
+              deletions: 0,
+              binary: false,
+            },
+          ],
+          totalFiles: 1,
+          nextOffset: null,
+          truncated: false,
+        }),
+      );
+    }
+    return Promise.resolve(Response.json(currentDetails));
+  });
+
+  const container = document.getElementById('findings-root');
+  assert(container);
+  const root = createRoot(container);
+  const visiblePanel = () => {
+    const panel = container.querySelector('[role="tabpanel"]:not([hidden])');
+    assert(panel);
+    return panel;
+  };
+  const clickButton = async (label: string, within: ParentNode = visiblePanel()) => {
+    const button = [...within.querySelectorAll<HTMLButtonElement>('button')].find(
+      item => item.textContent?.trim().startsWith(label),
+    );
+    assert(button, `Botão ausente: ${label}`);
+    await act(async () => {
+      button.click();
+    });
+  };
+
+  try {
+    await act(async () => {
+      root.render(
+        createElement(FactoryFlowRoadmapModal, {
+          flow: baseFlow,
+          initialDetails: currentDetails,
+          onClose: noop,
+          onOpenFlowTerminal: unavailableTerminal,
+          onAdvanceFlowStage: async () => {
+            advancedCount += 1;
+          },
+          onRerunFlowStage: noopAsync,
+          onReturnFlowStage: noopAsync,
+          onSaveReviewTriage: async (_id, request) => {
+            savedCalls.push(request.decisions);
+            const updatedFlow: FactoryFlow = {
+              ...baseFlow,
+              reviewTriage: {
+                reviewArtifactId,
+                iteration: 1,
+                decisions: request.decisions,
+                updatedAt: '2026-11-22T12:10:00.000Z',
+              },
+            };
+            const nextGate = makeGate(request.decisions);
+            currentDetails = {
+              ...currentDetails,
+              flow: updatedFlow,
+              reviewGate: nextGate,
+            };
+            return {
+              contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+              flow: updatedFlow,
+              reviewGate: nextGate,
+            };
+          },
+          onViewMarkdown: noop,
+        }),
+      );
+    });
+
+    // Roadmap exibe resumo de findings e botão Avançar para PR inicialmente bloqueado.
+    assert.match(visiblePanel().textContent ?? '', /Findings do Review \(3\)/);
+    const roadmapAdvanceBtn = [...visiblePanel().querySelectorAll<HTMLButtonElement>('button')].find(
+      button => button.textContent?.trim() === 'Avançar para PR',
+    );
+    assert(roadmapAdvanceBtn);
+    assert.equal(roadmapAdvanceBtn.disabled, true);
+
+    await clickButton('Triar findings (3)');
+    const tabs = container.querySelector('[role="tablist"]');
+    assert(tabs);
+    assert.equal(tabs.querySelector('[aria-selected="true"]')?.textContent, 'Findings do Review');
+
+    // Filtrar por severidade SUGESTÃO.
+    await clickButton('SUGESTÃO (1)');
+    assert.match(visiblePanel().textContent ?? '', /Extrair validação do header\./);
+    assert.doesNotMatch(visiblePanel().textContent ?? '', /Token expirado retorna HTTP 500\./);
+
+    // Promover a SUGESTÃO a correção obrigatória.
+    await clickButton('Promover a obrigatória');
+    assert.equal(savedCalls.length, 1);
+    assert.match(visiblePanel().textContent ?? '', /Promovida a obrigatória/);
+
+    // Voltar para Todos e filtrar BLOQUEANTE -> descartar F1 com justificativa.
+    await clickButton('BLOQUEANTE (1)');
+    assert.match(visiblePanel().textContent ?? '', /Token expirado retorna HTTP 500\./);
+    await clickButton('Descartar falso positivo');
+    const justificationInput = visiblePanel().querySelector<HTMLInputElement>('input[type="text"]');
+    assert(justificationInput);
+    await act(async () => {
+      const valueSetter = Object.getOwnPropertyDescriptor(
+        Object.getPrototypeOf(justificationInput),
+        'value',
+      )?.set;
+      assert(valueSetter);
+      Object.assign(justificationInput, { attachEvent: () => undefined });
+      justificationInput.dispatchEvent(new window.Event('focusin', { bubbles: true }));
+      valueSetter.call(justificationInput, 'Tratado no gateway');
+      justificationInput.dispatchEvent(new window.Event('keyup', { bubbles: true }));
+      justificationInput.dispatchEvent(new window.Event('input', { bubbles: true }));
+    });
+    await clickButton('Confirmar descarte');
+    assert.match(visiblePanel().textContent ?? '', /Falso positivo descartado/);
+    assert.match(visiblePanel().textContent ?? '', /Tratado no gateway/);
+
+    // Avançar para PR ainda bloqueado porque F2 (SUGESTÃO promovida) é bloqueante ativo.
+    const findingsAdvanceBtn = [...visiblePanel().querySelectorAll<HTMLButtonElement>('button')].find(
+      button => button.textContent?.trim() === 'Avançar para PR',
+    );
+    assert(findingsAdvanceBtn);
+    assert.equal(findingsAdvanceBtn.disabled, true);
+
+    // Despromover F2 (clicar em "Promovida a obrigatória") -> 0 bloqueantes ativos -> Avançar para PR liberado!
+    await clickButton('Todos (3)');
+    await clickButton('Promovida a obrigatória');
+    const unlockedAdvanceBtn = [...visiblePanel().querySelectorAll<HTMLButtonElement>('button')].find(
+      button => button.textContent?.trim() === 'Avançar para PR',
+    );
+    assert(unlockedAdvanceBtn);
+    assert.equal(unlockedAdvanceBtn.disabled, false);
+
+    // Link direto ao arquivo e linha no diff.
+    await clickButton('src/auth.ts:14');
+    assert.equal(tabs?.querySelector('[aria-selected="true"]')?.textContent, 'Diff Real');
+    assert.match(visiblePanel().textContent ?? '', /Linha 14/);
+    const focusedLine = visiblePanel().querySelector('[aria-current="location"]');
+    assert(focusedLine);
+    assert.equal(focusedLine.getAttribute('data-line'), '14');
+    assert.match(focusedLine.textContent ?? '', /return throwExpired\(\);/);
+
+    // Voltar à aba Findings e acionar Avançar para PR.
+    await clickButton('Findings do Review', tabs);
+    await clickButton('Avançar para PR');
+    assert.equal(advancedCount, 1);
+  } finally {
+    await act(() => root.unmount());
+  }
+});

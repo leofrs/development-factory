@@ -14,6 +14,8 @@ import type {
   RerunFactoryStageRequest,
   ReturnFactoryStageRequest,
   ReviewRequest,
+  SaveFactoryReviewTriageRequest,
+  SaveFactoryReviewTriageResponse,
 } from '@development-factory/shared';
 import {
   advanceFactoryFlowStage,
@@ -22,6 +24,7 @@ import {
   fetchFactoryFlows,
   rerunFactoryFlowStage,
   returnFactoryFlowStage,
+  saveFactoryReviewTriage,
   type AdvanceFactoryFlowResult,
   type CreateFactoryFlowResult,
   type RerunFactoryFlowResult,
@@ -95,6 +98,10 @@ export interface BackgroundOperationsState {
     flowId: string,
     request: ReturnFactoryStageRequest,
   ) => Promise<AdvanceFactoryFlowResult>;
+  saveReviewTriage: (
+    flowId: string,
+    request: SaveFactoryReviewTriageRequest,
+  ) => Promise<SaveFactoryReviewTriageResponse>;
   cancelFlow: (flowId: string, request?: CancelFactoryFlowRequest) => Promise<FactoryFlow>;
   openTerminal: (sessionId: string, options?: OpenTerminalOptions) => boolean;
   openFlowTerminal: (flowId: string, options?: OpenTerminalOptions) => boolean;
@@ -138,10 +145,17 @@ function sortFactoryFlowsByRecent(flowsMap: ReadonlyMap<string, FactoryFlow>): F
 }
 
 function compareFactoryFlowRevisions(a: FactoryFlow, b: FactoryFlow): number {
-  return (
-    Date.parse(a.updatedAt) - Date.parse(b.updatedAt) ||
-    a.transitions.length - b.transitions.length
-  );
+  const updatedDiff = Date.parse(a.updatedAt) - Date.parse(b.updatedAt);
+  if (updatedDiff !== 0) {
+    return updatedDiff;
+  }
+  const transitionsDiff = a.transitions.length - b.transitions.length;
+  if (transitionsDiff !== 0) {
+    return transitionsDiff;
+  }
+  const aTriage = a.reviewTriage?.updatedAt ? Date.parse(a.reviewTriage.updatedAt) : 0;
+  const bTriage = b.reviewTriage?.updatedAt ? Date.parse(b.reviewTriage.updatedAt) : 0;
+  return aTriage - bTriage;
 }
 
 const REPORT_STAGE_NOTIFICATION_LABELS: Partial<
@@ -774,6 +788,18 @@ export function useBackgroundOperations(): BackgroundOperationsState {
     [upsertFactoryFlow],
   );
 
+  const saveReviewTriage = useCallback(
+    async (
+      flowId: string,
+      request: SaveFactoryReviewTriageRequest,
+    ): Promise<SaveFactoryReviewTriageResponse> => {
+      const saved = await saveFactoryReviewTriage(flowId, request);
+      upsertFactoryFlow(saved.flow);
+      return saved;
+    },
+    [upsertFactoryFlow],
+  );
+
   const openTerminal = useCallback((sessionId: string, options?: OpenTerminalOptions) => {
     const existing = sessionsMapRef.current.get(sessionId);
     if (!existing || (options?.liveOnly && existing.status !== 'running')) {
@@ -860,6 +886,7 @@ export function useBackgroundOperations(): BackgroundOperationsState {
     advanceFlowStage,
     rerunFlowStage,
     returnFlowStage,
+    saveReviewTriage,
     cancelFlow,
     openTerminal,
     openFlowTerminal,

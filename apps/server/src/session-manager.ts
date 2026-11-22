@@ -2115,6 +2115,24 @@ export class SessionManager {
           }
 
           if (isFactoryReviewApprovedVerdict(decision.verdict)) {
+            const hasFindings = decision.findings.length > 0;
+            const hasBlockingFindings = decision.findings.some(
+              finding => finding.severity === 'BLOQUEANTE',
+            );
+            if (hasFindings || hasBlockingFindings) {
+              await this.#pauseReviewSession(
+                session,
+                flowId,
+                hasBlockingFindings
+                  ? 'Code Review pausado com apontamentos bloqueantes aguardando triagem humana'
+                  : 'Code Review aprovado com apontamentos para triagem humana antes do PR',
+                hasBlockingFindings
+                  ? 'O Code Review registrou apontamentos bloqueantes que exigem triagem humana antes de avançar para o PR.'
+                  : 'Code Review concluído com sugestões/ressalvas. Revise e trie os findings antes de avançar para o PR ou retornar para ajustes.',
+                decision.verdict,
+              );
+              return;
+            }
             const paused = await this.#factoryFlowService.transitionFlow(
               flowId,
               {

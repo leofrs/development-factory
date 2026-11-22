@@ -30,12 +30,15 @@ import {
   type FactoryFlowStage,
   type FactoryPlanningApprovalInput,
   type FactoryPlanningDecisionChoiceMode,
+  type FactoryReviewFindingDecision,
   type FactoryStageName,
   type FactoryStageState,
   type ReturnFactoryTargetStage,
+  type SaveFactoryReviewTriageRequest,
+  type SaveFactoryReviewTriageResponse,
 } from '@development-factory/shared';
 import type { BackgroundSessionSummary } from '@development-factory/shared';
-import { fetchFactoryFlowDetails } from '../api/factory-flows';
+import { fetchFactoryFlowDetails, saveFactoryReviewTriage } from '../api/factory-flows';
 import {
   getFactoryFlowStatePresentation,
   getFactoryReviewVerdictPresentation,
@@ -45,7 +48,8 @@ import {
 } from '../utils/factory-flow-status';
 import { FactoryFlowDetailTabs } from './FactoryFlowDetailTabs.js';
 import type { FactoryFlowDetailTab } from './FactoryFlowDetailTabs.js';
-import { FactoryFlowDiffPanel } from './FactoryFlowDiffPanel.js';
+import { FactoryFlowDiffPanel, type FactoryDiffFocusTarget } from './FactoryFlowDiffPanel.js';
+import { FactoryFlowFindingsPanel } from './FactoryFlowFindingsPanel.js';
 import { FactoryFlowIterationsPanel } from './FactoryFlowIterationsPanel.js';
 import { FactoryFlowTraceabilityPanel } from './FactoryFlowTraceabilityPanel.js';
 import { FactoryLiveTerminalButton } from './FactoryLiveTerminalButton.js';
@@ -81,6 +85,10 @@ interface FactoryFlowRoadmapModalProps {
     targetStage: ReturnFactoryTargetStage,
     approvedNotes?: string,
   ) => Promise<void>;
+  onSaveReviewTriage?: (
+    flowId: string,
+    request: SaveFactoryReviewTriageRequest,
+  ) => Promise<SaveFactoryReviewTriageResponse>;
   onCancelFlow?: (flowId: string) => Promise<void>;
   onViewMarkdown: (filePath: string) => void;
 }
@@ -245,17 +253,22 @@ export function FactoryFlowRoadmapModal({
   onAdvanceFlowStage,
   onRerunFlowStage,
   onReturnFlowStage,
+  onSaveReviewTriage,
   onCancelFlow,
   onViewMarkdown,
 }: FactoryFlowRoadmapModalProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const tabId = useId();
   const [activeTab, setActiveTab] = useState<FactoryFlowDetailTab>('roadmap');
+  const [diffFocusTarget, setDiffFocusTarget] = useState<FactoryDiffFocusTarget | null>(null);
+  const diffFocusCounterRef = useRef(0);
   const [details, setDetails] = useState<FactoryFlowDetails | null>(initialDetails ?? null);
   const [loadingDetails, setLoadingDetails] = useState(initialDetails === undefined);
   const [detailsError, setDetailsError] = useState<string | null>(null);
   const [detailsRefreshTick, setDetailsRefreshTick] = useState(0);
-  const [busyAction, setBusyAction] = useState<'advance' | 'rerun' | 'return' | 'cancel' | null>(null);
+  const [busyAction, setBusyAction] = useState<
+    'advance' | 'rerun' | 'return' | 'cancel' | 'triage' | null
+  >(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [approvedNotes, setApprovedNotes] = useState('');
   const initialPlanningReport =
@@ -318,11 +331,11 @@ export function FactoryFlowRoadmapModal({
     return () => {
       controller.abort();
     };
-  }, [flow.id, flow.updatedAt, detailsRefreshTick]);
+  }, [flow.id, flow.updatedAt, flow.reviewTriage?.updatedAt, detailsRefreshTick]);
 
   const runAction = useCallback(
     async (
-      action: 'advance' | 'rerun' | 'return' | 'cancel',
+      action: 'advance' | 'rerun' | 'return' | 'cancel' | 'triage',
       operation: () => Promise<void>,
       fallbackError: string,
       clearNotes = false,
@@ -526,6 +539,46 @@ export function FactoryFlowRoadmapModal({
       ...(trimmedNotes.length > 0 ? { notes: trimmedNotes } : {}),
     };
   }, [planningCriteria, planningDecisions, planningNotes]);
+
+  const handleSaveReviewTriage = useCallback(
+    async (decisions: FactoryReviewFindingDecision[]) => {
+      const saveHandler = onSaveReviewTriage ?? saveFactoryReviewTriage;
+      setActionError(null);
+      setBusyAction('triage');
+      try {
+        const saved = await saveHandler(flow.id, {
+          decisions,
+          expectedUpdatedAt: currentDetails?.flow.updatedAt ?? flow.updatedAt,
+        });
+        setDetails(previous =>
+          previous && previous.flow.id === saved.flow.id
+            ? { ...previous, flow: saved.flow, reviewGate: saved.reviewGate }
+            : previous,
+        );
+        setDetailsRefreshTick(tick => tick + 1);
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : 'Não foi possível salvar a triagem de apontamentos.';
+        setActionError(message);
+        throw error;
+      } finally {
+        setBusyAction(null);
+      }
+    },
+    [currentDetails?.flow.updatedAt, flow.id, flow.updatedAt, onSaveReviewTriage],
+  );
+
+  const handleOpenDiffLocation = useCallback((path: string, line: number) => {
+    diffFocusCounterRef.current += 1;
+    setDiffFocusTarget({
+      path,
+      line,
+      requestId: diffFocusCounterRef.current,
+    });
+    setActiveTab('diff');
+  }, []);
 
   const canStartDevelopment = Boolean(triageReport && planningReport);
   const canStartTests = Boolean(canStartDevelopment && developmentReport);
@@ -738,6 +791,14 @@ export function FactoryFlowRoadmapModal({
                         (nextStage !== 'tests' || canStartTests) &&
                         (nextStage !== 'review' || canStartReview) &&
                         (nextStage !== 'pr' || canAdvanceToPr);
+                      const reviewGate =
+                        stage.id === 'review' ? currentDetails?.reviewGate : undefined;
+                      const isReviewAdvanceBlockedByFindings = Boolean(
+                        stage.id === 'review' &&
+                        nextStage === 'pr' &&
+                        reviewGate &&
+                        !reviewGate.canAdvanceToPr,
+                      );
                       const canReturnFromReview = Boolean(
                         isCurrentStage &&
                         stage.id === 'review' &&
@@ -862,6 +923,43 @@ export function FactoryFlowRoadmapModal({
                                     editable={false}
                                     approval={persistedPlanningApproval}
                                   />
+                                )}
+
+                              {stage.id === 'review' &&
+                                reviewGate &&
+                                reviewGate.counts.total > 0 && (
+                                  <div className="mt-3 space-y-2 rounded-xl border border-line bg-page p-2.5 text-[11px]">
+                                    <div className="flex flex-wrap items-center justify-between gap-2">
+                                      <span className="font-medium text-primary">
+                                        Findings do Review ({reviewGate.counts.total})
+                                      </span>
+                                      <span
+                                        className={`font-mono text-[10px] ${
+                                          reviewGate.counts.activeBlockers > 0
+                                            ? 'text-danger'
+                                            : 'text-accent'
+                                        }`}
+                                      >
+                                        {reviewGate.counts.activeBlockers}{' '}
+                                        {reviewGate.counts.activeBlockers === 1
+                                          ? 'bloqueante ativo'
+                                          : 'bloqueantes ativos'}
+                                      </span>
+                                    </div>
+                                    <p className="text-[10px] text-muted">
+                                      {reviewGate.counts.blocking} bloqueante(s) ·{' '}
+                                      {reviewGate.counts.suggestion} sugestão(ões) ·{' '}
+                                      {reviewGate.counts.nit} nit(s) ·{' '}
+                                      {reviewGate.counts.dismissed} descartado(s)
+                                    </p>
+                                    <button
+                                      type="button"
+                                      onClick={() => setActiveTab('findings')}
+                                      className="modal-button border-accent/35 px-2 py-1 text-[10px] text-accent hover:bg-selected"
+                                    >
+                                      Triar findings ({reviewGate.counts.total})
+                                    </button>
+                                  </div>
                                 )}
 
                               {(stageRecord?.error ?? stageArtifactError) && (
@@ -1089,8 +1187,15 @@ export function FactoryFlowRoadmapModal({
                                 {canAdvanceCurrent && nextStage && (
                                   <button
                                     type="button"
-                                    disabled={busyAction !== null}
+                                    disabled={
+                                      busyAction !== null || isReviewAdvanceBlockedByFindings
+                                    }
                                     aria-busy={busyAction === 'advance'}
+                                    title={
+                                      isReviewAdvanceBlockedByFindings
+                                        ? 'Resolva ou descarte os apontamentos bloqueantes na aba Findings do Review antes de avançar para PR.'
+                                        : undefined
+                                    }
                                     onClick={() => {
                                       if (isPlanningGateEditable) {
                                         const planningApproval = buildPlanningApprovalPayload();
@@ -1221,6 +1326,7 @@ export function FactoryFlowRoadmapModal({
               flowId={flow.id}
               baseBranch={flow.baseBranch}
               updatedAt={flow.updatedAt}
+              focusTarget={diffFocusTarget}
             />
           ) : (
             <p className="text-sm text-muted">O worktree isolado deste fluxo está indisponível.</p>
@@ -1269,6 +1375,66 @@ export function FactoryFlowRoadmapModal({
               flowId={flow.id}
               updatedAt={flow.updatedAt}
             />
+          )}
+        </div>
+
+        <div
+          id={`${tabId}-findings-panel`}
+          role="tabpanel"
+          aria-labelledby={`${tabId}-findings-tab`}
+          tabIndex={0}
+          hidden={activeTab !== 'findings'}
+          className="min-h-0 flex-1 overflow-y-auto bg-page p-5 sm:p-6"
+        >
+          {activeTab === 'findings' && (
+            currentDetails ? (
+              <FactoryFlowFindingsPanel
+                flow={currentDetails.flow}
+                reviewGate={currentDetails.reviewGate}
+                editable={
+                  currentDetails.flow.currentStage === 'review' &&
+                  currentDetails.flow.state === 'waiting_action'
+                }
+                canReturnToTests={canStartTests}
+                busyAction={busyAction}
+                onSaveTriage={handleSaveReviewTriage}
+                onReturnToStage={async (targetStage, notes) => {
+                  if (!onReturnFlowStage) {
+                    return;
+                  }
+                  await runAction(
+                    'return',
+                    () => onReturnFlowStage(flow.id, targetStage, notes),
+                    `Não foi possível retornar para ${getFactoryStageLabel(targetStage)}.`,
+                  );
+                }}
+                onAdvanceToPr={async () => {
+                  await runAction(
+                    'advance',
+                    () => onAdvanceFlowStage(flow.id),
+                    'Não foi possível avançar para PR.',
+                  );
+                }}
+                onOpenDiffLocation={handleOpenDiffLocation}
+              />
+            ) : loadingDetails ? (
+              <p role="status" className="text-xs text-muted">
+                Carregando findings do Code Review…
+              </p>
+            ) : detailsError ? (
+              <div className="space-y-2">
+                <p role="alert" className="text-xs text-danger">
+                  {detailsError}
+                </p>
+                <button
+                  type="button"
+                  className="modal-button"
+                  onClick={() => setDetailsRefreshTick(tick => tick + 1)}
+                >
+                  Tentar novamente
+                </button>
+              </div>
+            ) : null
           )}
         </div>
       </div>

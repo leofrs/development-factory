@@ -2,13 +2,17 @@ import { posix } from 'node:path';
 import {
   FactoryReviewVerdictSchema,
   ReturnFactoryTargetStageSchema,
+  buildFactoryReviewGate,
+  buildFactoryReviewTriageScope,
   getLatestReadyFactoryStageArtifact,
+  getReadyFactoryStageArtifact,
   resolveFactoryReviewDecision,
 } from '@development-factory/shared';
 import type {
   FactoryFlowDetails,
   FactoryReviewDecision,
   FactoryReviewSidecar,
+  FactoryReviewTriageScope,
   FactoryReviewVerdict,
   ReturnFactoryTargetStage,
 } from '@development-factory/shared';
@@ -309,6 +313,8 @@ export async function readFactoryReviewInputs(details: FactoryFlowDetails) {
   const iteration = details.flow.iteration > 0 ? details.flow.iteration : 1;
   const previousReviewReportPath =
     iteration >= 2 ? await readOptionalLatestStageDocument(details, 'review') : undefined;
+  const previousReviewTriageScope =
+    iteration >= 2 ? readFactoryReviewTriageScope(details) : undefined;
   return {
     understandingReportPath: paths.triage,
     implementationPlanPath: paths.planning,
@@ -319,7 +325,43 @@ export async function readFactoryReviewInputs(details: FactoryFlowDetails) {
     iteration,
     maxIterations: details.flow.maxIterations,
     ...(previousReviewReportPath ? { previousReviewReportPath } : {}),
+    ...(previousReviewTriageScope ? { previousReviewTriageScope } : {}),
   };
+}
+
+/**
+ * Lê e resolve o escopo estruturado da triagem humana do Bloco 05 para o artefato `review_report`
+ * mais recente quando há decisões humanas persistidas para aquele artefato.
+ */
+export function readFactoryReviewTriageScope(
+  details: Pick<FactoryFlowDetails, 'flow' | 'stages' | 'artifacts'>,
+): FactoryReviewTriageScope | undefined {
+  const reviewTriage = details.flow.reviewTriage;
+  if (!reviewTriage) {
+    return undefined;
+  }
+  const reviewArtifact =
+    getReadyFactoryStageArtifact(details, 'review') ??
+    getLatestReadyFactoryStageArtifact(details, 'review');
+  if (!reviewArtifact || reviewArtifact.id !== reviewTriage.reviewArtifactId) {
+    return undefined;
+  }
+  try {
+    const sidecar = readFactoryStageSidecar('review', reviewArtifact.path);
+    const decision = resolveFactoryReviewDecision(sidecar);
+    const gate = buildFactoryReviewGate({
+      reviewArtifactId: reviewArtifact.id,
+      reviewReportPath: reviewArtifact.path,
+      iteration: reviewArtifact.iteration,
+      verdict: decision.verdict,
+      returnTarget: decision.returnTarget,
+      findings: sidecar.findings,
+      reviewTriage,
+    });
+    return buildFactoryReviewTriageScope(gate);
+  } catch {
+    return undefined;
+  }
 }
 
 /** Valida a estrutura mínima e o veredito determinístico do artefato `review_report` em Markdown. */
