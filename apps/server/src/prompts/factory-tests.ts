@@ -86,7 +86,7 @@ ${JSON.stringify(input.developmentChecks, null, 2)}
             : ''
         }${
           input.previousReviewReportPath
-            ? `\n- Relatório de Code Review da iteração anterior (valide se as correções exigidas passaram nos testes): ${JSON.stringify(input.previousReviewReportPath)}`
+            ? `\n- Relatório de Code Review da iteração anterior (aplique as correções de teste, mock ou cobertura solicitadas e valide se passaram nos testes): ${JSON.stringify(input.previousReviewReportPath)}`
             : ''
         }`
       : '';

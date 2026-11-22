@@ -673,20 +673,65 @@ export const FactoryTestsSidecarSchema = z
   });
 export type FactoryTestsSidecar = z.infer<typeof FactoryTestsSidecarSchema>;
 
-export const FactoryReviewSidecarSchema = z.strictObject({
-  contractVersion: sidecarVersion,
-  stage: z.literal('review'),
-  verdict: FactoryReviewVerdictSchema,
-  findings: z.array(
-    z.strictObject({
-      severity: z.enum(['BLOQUEANTE', 'SUGESTÃO', 'NIT']),
-      file: sidecarFilePathSchema,
-      line: z.number().int().positive(),
-      explanation: text,
-    }),
-  ),
-});
+function validateReviewReturnTargetConsistency(
+  value: { verdict: FactoryReviewVerdict; returnTarget?: ReturnFactoryTargetStage | null },
+  context: z.RefinementCtx,
+): void {
+  if (isFactoryReviewApprovedVerdict(value.verdict)) {
+    if (value.returnTarget != null) {
+      context.addIssue({
+        code: 'custom',
+        path: ['returnTarget'],
+        message: 'O alvo de retorno deve ser null quando o Code Review aprovar as alterações',
+      });
+    }
+    return;
+  }
+
+  if (value.returnTarget == null) {
+    context.addIssue({
+      code: 'custom',
+      path: ['returnTarget'],
+      message: 'Informe returnTarget ("development" ou "tests") quando o veredito solicitar ajustes',
+    });
+  }
+}
+
+export const FactoryReviewSidecarSchema = z
+  .strictObject({
+    contractVersion: sidecarVersion,
+    stage: z.literal('review'),
+    verdict: FactoryReviewVerdictSchema,
+    returnTarget: ReturnFactoryTargetStageSchema.nullable().optional(),
+    findings: z.array(
+      z.strictObject({
+        severity: z.enum(['BLOQUEANTE', 'SUGESTÃO', 'NIT']),
+        file: sidecarFilePathSchema,
+        line: z.number().int().positive(),
+        explanation: text,
+      }),
+    ),
+  })
+  .superRefine(validateReviewReturnTargetConsistency);
 export type FactoryReviewSidecar = z.infer<typeof FactoryReviewSidecarSchema>;
+
+export const FactoryReviewDecisionSchema = z
+  .strictObject({
+    verdict: FactoryReviewVerdictSchema,
+    returnTarget: ReturnFactoryTargetStageSchema.nullable(),
+  })
+  .superRefine(validateReviewReturnTargetConsistency);
+export type FactoryReviewDecision = z.infer<typeof FactoryReviewDecisionSchema>;
+
+/** Resolve e valida o veredito e o alvo de retorno explícito a partir do sidecar do Bloco 05. */
+export function resolveFactoryReviewDecision(
+  sidecar: Pick<FactoryReviewSidecar, 'verdict' | 'returnTarget'>,
+): FactoryReviewDecision {
+  return FactoryReviewDecisionSchema.parse({
+    verdict: sidecar.verdict,
+    returnTarget: sidecar.returnTarget ?? null,
+  });
+}
 
 export const FactoryPrSidecarSchema = z.strictObject({
   contractVersion: sidecarVersion,

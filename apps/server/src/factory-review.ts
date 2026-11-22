@@ -1,7 +1,9 @@
 import {
   FactoryReviewVerdictSchema,
+  ReturnFactoryTargetStageSchema,
   type FactoryFlowDetails,
   type FactoryReviewVerdict,
+  type ReturnFactoryTargetStage,
 } from '@development-factory/shared';
 import {
   GIT_WRITE_DENIED_BASH_TOOLS,
@@ -20,6 +22,8 @@ import {
 
 const VERDICT_PREFIX_PATTERN =
   /^(?:[-*]\s*)?(?:\*\*|__)?(?:veredito|parecer(?:\s+final)?|decis[aã]o)(?:\*\*|__)?\s*:\s*(.+)$/iu;
+const RETURN_TARGET_PREFIX_PATTERN =
+  /^(?:[-*]\s*)?(?:\*\*|__)?(?:alvo(?:\s+de\s+retorno)?|retorno|returnTarget)(?:\*\*|__)?\s*:\s*(.+)$/iu;
 
 function extractSectionBody(content: string, heading: string): string[] | null {
   const [, ...rawSections] = content.split(/^## /m);
@@ -105,6 +109,45 @@ export function parseReviewVerdict(content: string): FactoryReviewVerdict | null
 
   const firstLine = nonEmptyLines[0];
   return firstLine ? matchVerdictToken(normalizeVerdictToken(firstLine)) : null;
+}
+
+/**
+ * Analisa opcionalmente o alvo de retorno explícito na seção `## Parecer Final` do `review_report`.
+ * Retorna `null` quando ausente ou ambíguo.
+ */
+export function parseReviewReturnTarget(content: string): ReturnFactoryTargetStage | null {
+  const verdictBody = extractSectionBody(content, REVIEW_REPORT_SECTIONS.verdict);
+  if (!verdictBody) {
+    return null;
+  }
+
+  for (const rawLine of verdictBody) {
+    const line = rawLine.trim();
+    if (!line) {
+      continue;
+    }
+    const prefixMatch = RETURN_TARGET_PREFIX_PATTERN.exec(line);
+    if (prefixMatch?.[1] === undefined) {
+      continue;
+    }
+    const normalized = normalizeVerdictToken(prefixMatch[1]).toLowerCase();
+    const isAmbiguous =
+      /(?:\bdevelopment\b|\bdesenvolvimento\b).*(?:\||\/|\bou\b).*(?:\btests\b|\btestes\b)|(?:\btests\b|\btestes\b).*(?:\||\/|\bou\b).*(?:\bdevelopment\b|\bdesenvolvimento\b)/.test(
+        normalized,
+      );
+    if (isAmbiguous) {
+      return null;
+    }
+    if (/^(?:development|desenvolvimento)(?:\b|$)/.test(normalized)) {
+      return ReturnFactoryTargetStageSchema.parse('development');
+    }
+    if (/^(?:tests|testes)(?:\b|$)/.test(normalized)) {
+      return ReturnFactoryTargetStageSchema.parse('tests');
+    }
+    return null;
+  }
+
+  return null;
 }
 
 /** Argumentos restritos do runner da Etapa 05 (somente leitura no código + comandos git de inspeção). */

@@ -5,11 +5,13 @@ import {
   FactoryDevelopmentSidecarSchema,
   FactoryPlanningSidecarSchema,
   FactoryPrSidecarSchema,
+  FactoryReviewDecisionSchema,
   FactoryReviewSidecarSchema,
   FactoryTestsSidecarSchema,
   FactoryTriageSidecarSchema,
   RerunFactoryStageRequestSchema,
   evaluateFactoryTriageGate,
+  resolveFactoryReviewDecision,
 } from '@development-factory/shared';
 import type {
   FactoryBackendCommandCheck,
@@ -300,15 +302,49 @@ test('valida verificações de Testes pelo backend e consistência com status e 
   }
 });
 
-test('valida vereditos, severidades e linhas em findings de revisão', () => {
+test('valida vereditos, returnTarget, severidades e linhas em findings de revisão', () => {
+  const validPayloads = [
+    { ...review, verdict: 'approved' as const, returnTarget: null },
+    { ...review, verdict: 'approved_with_warnings' as const, returnTarget: null },
+    { ...review, verdict: 'changes_requested' as const, returnTarget: 'development' as const },
+    { ...review, verdict: 'changes_requested' as const, returnTarget: 'tests' as const },
+  ];
+  for (const payload of validPayloads) {
+    const parsed = FactoryReviewSidecarSchema.parse(payload);
+    assert.deepEqual(resolveFactoryReviewDecision(parsed), {
+      verdict: payload.verdict,
+      returnTarget: payload.returnTarget,
+    });
+  }
+
+  assert.deepEqual(resolveFactoryReviewDecision(FactoryReviewSidecarSchema.parse(review)), {
+    verdict: 'approved_with_warnings',
+    returnTarget: null,
+  });
+
   const invalidPayloads = [
     { ...review, verdict: 'unknown' },
+    { ...review, verdict: 'approved', returnTarget: 'development' },
+    { ...review, verdict: 'approved_with_warnings', returnTarget: 'tests' },
+    { ...review, verdict: 'changes_requested' },
+    { ...review, verdict: 'changes_requested', returnTarget: null },
+    { ...review, verdict: 'changes_requested', returnTarget: 'planning' },
     { ...review, findings: [{ ...finding, severity: 'CRÍTICO' }] },
     { ...review, findings: [{ ...finding, line: 0 }] },
   ];
   for (const payload of invalidPayloads) {
     assert.equal(FactoryReviewSidecarSchema.safeParse(payload).success, false);
   }
+
+  assert.equal(
+    FactoryReviewDecisionSchema.safeParse({ verdict: 'changes_requested', returnTarget: null })
+      .success,
+    false,
+  );
+  assert.equal(
+    FactoryReviewDecisionSchema.safeParse({ verdict: 'approved', returnTarget: 'tests' }).success,
+    false,
+  );
 });
 
 test('rejeita referências de branches inválidas nos metadados de PR', () => {

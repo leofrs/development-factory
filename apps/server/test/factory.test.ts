@@ -50,7 +50,12 @@ import {
 import { buildDevelopmentRunnerArgs } from '../src/factory-development.js';
 import { buildPrRunnerArgs, isPrSummary } from '../src/factory-pr.js';
 import { loadFactoryRepositoryProfile } from '../src/factory-repository-profile.js';
-import { buildReviewRunnerArgs, isReviewReport, parseReviewVerdict } from '../src/factory-review.js';
+import {
+  buildReviewRunnerArgs,
+  isReviewReport,
+  parseReviewReturnTarget,
+  parseReviewVerdict,
+} from '../src/factory-review.js';
 import {
   INFRA_AND_CONFIG_PATHS,
   TEST_AND_FIXTURE_PATTERNS,
@@ -534,6 +539,7 @@ test('prompts, runners e validadores das Etapas 04 a 06 seguem contratos e permi
   }
   assertFactoryStageOutput(reviewPrompt, 'review', reviewReportPath, [
     'verdict',
+    'returnTarget',
     'findings',
     'severity',
     'file',
@@ -548,6 +554,8 @@ test('prompts, runners e validadores das Etapas 04 a 06 seguem contratos e permi
   for (const [verdict, label] of Object.entries(verdictMappings)) {
     assert.ok(reviewPrompt.includes(`\`${verdict}\` para ${label}`));
   }
+  assert.ok(reviewPrompt.includes('Alvo de retorno: development'));
+  assert.ok(reviewPrompt.includes('Alvo de retorno: tests'));
   assert.match(reviewPrompt, /`BLOQUEANTE`, `SUGESTÃO` ou `NIT`/);
 
   const reviewArgs = buildReviewRunnerArgs(reviewReportPath);
@@ -598,10 +606,28 @@ test('prompts, runners e validadores das Etapas 04 a 06 seguem contratos e permi
     '- [BLOQUEANTE] src/jwt.ts:14 retorna token expirado.',
     `## ${REVIEW_REPORT_SECTIONS.verdict}`,
     `Veredito: ${REVIEW_VERDICT_LABELS.changesRequested}`,
+    'Alvo de retorno: development',
     'Corrigir validação de expiração antes do PR.',
   ].join('\n');
   assert.equal(isReviewReport(rejectedReviewReport), true);
   assert.equal(parseReviewVerdict(rejectedReviewReport), 'changes_requested');
+  assert.equal(parseReviewReturnTarget(rejectedReviewReport), 'development');
+
+  const rejectedTestsOnlyReviewReport = [
+    `# ${REVIEW_REPORT_TITLE}`,
+    `## ${REVIEW_REPORT_SECTIONS.executiveSummary}`,
+    'Implementação íntegra; falta cobertura de caso de borda nos testes.',
+    `## ${REVIEW_REPORT_SECTIONS.findings}`,
+    '- [BLOQUEANTE] test/jwt.test.ts:28 falta mock de relógio expirado.',
+    `## ${REVIEW_REPORT_SECTIONS.verdict}`,
+    `Veredito: ${REVIEW_VERDICT_LABELS.changesRequested}`,
+    'Alvo de retorno: tests',
+    'Adicionar caso de teste para expiração.',
+  ].join('\n');
+  assert.equal(isReviewReport(rejectedTestsOnlyReviewReport), true);
+  assert.equal(parseReviewVerdict(rejectedTestsOnlyReviewReport), 'changes_requested');
+  assert.equal(parseReviewReturnTarget(rejectedTestsOnlyReviewReport), 'tests');
+  assert.equal(parseReviewReturnTarget(validReviewReport), null);
 
   const ambiguousReviewReport = [
     `# ${REVIEW_REPORT_TITLE}`,

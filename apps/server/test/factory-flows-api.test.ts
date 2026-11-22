@@ -1254,7 +1254,10 @@ if (check === 'typecheck' || check === 'lint') {
       '',
     ].join('\n');
     writeFileSync(rerunReview.reportPath, rejectedReviewMarkdown);
-    writeFactoryStageSidecar(rerunReview.reportPath, 'review', { verdict: 'changes_requested' });
+    writeFactoryStageSidecar(rerunReview.reportPath, 'review', {
+      verdict: 'changes_requested',
+      returnTarget: 'development',
+    });
     sessionManager.writeInput(rerunReview.sessionId, 'EXIT0');
 
     await waitFor(() => {
@@ -1664,7 +1667,10 @@ test(
           'Ajuste necessário.',
         ].join('\n'),
       );
-      writeFactoryStageSidecar(reviewSession.reportPath, 'review', { verdict: 'changes_requested' });
+      writeFactoryStageSidecar(reviewSession.reportPath, 'review', {
+        verdict: 'changes_requested',
+        returnTarget: 'development',
+      });
       sessionManager.writeInput(reviewSession.sessionId, 'EXIT0');
       await waitFor(() => sessionManager.getSession(reviewSession.sessionId)?.status === 'exited');
     }
@@ -2143,7 +2149,10 @@ test(
         'Veredito: REPROVADO / REQUER AJUSTES',
       ].join('\n'),
     );
-    writeFactoryStageSidecar(review1.reportPath, 'review', { verdict: 'changes_requested' });
+    writeFactoryStageSidecar(review1.reportPath, 'review', {
+      verdict: 'changes_requested',
+      returnTarget: 'development',
+    });
     sessionManager.writeInput(review1.sessionId, 'EXIT0');
 
     // Development Iteração 2: introduz regressão + arquivo extra e sai com relatório incompleto para pausar em waiting_action.
@@ -2807,6 +2816,312 @@ test(
     assert.deepEqual(
       persistedDetails.flow.planningApproval?.acceptanceCriteria,
       planningApproval.acceptanceCriteria,
+    );
+  },
+);
+
+test(
+  'Bloco 05 realiza roteamento seletivo para tests quando reprova apenas por lacuna de testes e pausa se houver divergência',
+  { timeout: 30000 },
+  async context => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'df-factory-selective-return-'));
+    const binDir = join(rootDir, 'bin');
+    const repoDir = join(rootDir, 'repo');
+    const xdgDataHome = join(rootDir, 'xdg-data');
+    const dbPath = join(rootDir, 'reviews.db');
+    mkdirSync(binDir);
+    mkdirSync(repoDir);
+    mkdirSync(xdgDataHome);
+    initGitRepo(repoDir);
+
+    const claudeTarget = join(binDir, 'claude');
+    copyFileSync(new URL('./fixtures/claude.ts', import.meta.url), claudeTarget);
+    chmodSync(claudeTarget, 0o755);
+
+    const previousPath = process.env.PATH;
+    const previousXdg = process.env.XDG_DATA_HOME;
+    process.env.PATH = `${binDir}:${previousPath ?? ''}`;
+    process.env.XDG_DATA_HOME = xdgDataHome;
+
+    const { server, sessionManager, shutdown } = createReviewServer({ dbPath });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+
+    const address = server.address();
+    assert(address && typeof address !== 'string');
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+
+    context.after(async () => {
+      await shutdown();
+      process.env.PATH = previousPath;
+      if (previousXdg === undefined) {
+        delete process.env.XDG_DATA_HOME;
+      } else {
+        process.env.XDG_DATA_HOME = previousXdg;
+      }
+      rmSync(rootDir, { recursive: true, force: true });
+    });
+
+    const getDetails = async (flowId: string) => {
+      const response = await fetch(`${baseUrl}/api/factory/flows/${flowId}`, {
+        headers: { Origin: ALLOWED_ORIGIN },
+      });
+      assert.equal(response.status, 200);
+      return FactoryFlowDetailsSchema.parse(await response.json());
+    };
+
+    const waitForStageSession = async (
+      flowId: string,
+      stage: string,
+      seen: Set<string>,
+    ): Promise<BackgroundSessionSummary> => {
+      let match: BackgroundSessionSummary | undefined;
+      await waitFor(() => {
+        match = sessionManager
+          .listSessions()
+          .find(
+            session =>
+              session.flowId === flowId &&
+              session.stage === stage &&
+              session.status === 'running' &&
+              !seen.has(session.sessionId),
+          );
+        return Boolean(match);
+      });
+      assert.ok(match);
+      seen.add(match.sessionId);
+      await waitFor(() =>
+        /READY:[^\n]*\n/.test(sessionManager.getSession(match!.sessionId)?.buffer.replay() ?? ''),
+      );
+      return match;
+    };
+
+    const createRes = await fetch(`${baseUrl}/api/factory/flows`, {
+      method: 'POST',
+      headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        task: { inputType: 'jira_key', value: 'PROD-530', repoPath: repoDir },
+        startSession: true,
+        cols: 100,
+        rows: 30,
+      }),
+    });
+    assert.equal(createRes.status, 201);
+    const created = (await createRes.json()) as {
+      flow: { id: string };
+      session: BackgroundSessionSummary;
+    };
+    const flowId = created.flow.id;
+    const seen = new Set<string>([created.session.sessionId]);
+
+    await waitFor(() =>
+      /READY:[^\n]*\n/.test(sessionManager.getSession(created.session.sessionId)?.buffer.replay() ?? ''),
+    );
+    assert.ok(created.session.reportPath);
+    writeFileSync(created.session.reportPath, triageMarkdown('Validar expiração de sessão.'));
+    writeFactoryStageSidecar(created.session.reportPath, 'triage');
+    sessionManager.writeInput(created.session.sessionId, 'EXIT0');
+
+    const planningSession = await waitForStageSession(flowId, 'planning', seen);
+    assert.ok(planningSession.reportPath);
+    writeFileSync(planningSession.reportPath, planningMarkdown('Cobrir cenários de expiração.'));
+    writeFactoryStageSidecar(planningSession.reportPath, 'planning');
+    sessionManager.writeInput(planningSession.sessionId, 'EXIT0');
+    await waitFor(() => sessionManager.getSession(planningSession.sessionId)?.status === 'exited');
+
+    const approveRes = await fetch(`${baseUrl}/api/factory/flows/${flowId}/advance`, {
+      method: 'POST',
+      headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ startSession: true }),
+    });
+    assert.equal(approveRes.status, 200);
+
+    // Iteração 1: Development -> Tests -> Review.
+    const dev1 = await waitForStageSession(flowId, 'development', seen);
+    assert.ok(dev1.reportPath);
+    writeFileSync(
+      dev1.reportPath,
+      [
+        '# Relatório de Implementação',
+        '## Arquivos alterados',
+        '- src/session.ts',
+        '## Resumo das mudanças',
+        'Implementação concluída.',
+        '## Status dos passos do plano',
+        '| Passo do Plano | Status | Observações |',
+        '| --- | --- | --- |',
+        '| Validar expiração | Concluído | Código de produção íntegro |',
+      ].join('\n'),
+    );
+    writeFactoryStageSidecar(dev1.reportPath, 'development', { changedFiles: ['src/session.ts'] });
+    sessionManager.writeInput(dev1.sessionId, 'EXIT0');
+
+    const tests1 = await waitForStageSession(flowId, 'tests', seen);
+    assert.ok(tests1.reportPath);
+    writeFileSync(
+      tests1.reportPath,
+      [
+        '# Relatório de Testes',
+        '## Arquivos de teste alterados',
+        '- test/session.test.ts',
+        '## Comandos executados',
+        '- npm test (exit 1)',
+        '## Resultados e cobertura',
+        'FAIL por mock incorreto de relógio no teste.',
+      ].join('\n'),
+    );
+    writeFactoryStageSidecar(tests1.reportPath, 'tests', {
+      status: 'failed',
+      executedCommands: [{ command: ['npm', 'test'], exitCode: 1 }],
+    });
+    sessionManager.writeInput(tests1.sessionId, 'EXIT0');
+
+    const review1 = await waitForStageSession(flowId, 'review', seen);
+    assert.ok(review1.reportPath);
+
+    // Divergência entre Alvo de retorno no Markdown e returnTarget no sidecar pausa em waiting_action.
+    writeFileSync(
+      review1.reportPath,
+      [
+        '# Relatório de Code Review',
+        '## Resumo Executivo',
+        'Divergência simulada.',
+        '## Pontos Encontrados',
+        '- [BLOQUEANTE] test/session.test.ts:12 ajustar mock.',
+        '## Parecer Final',
+        'Veredito: REPROVADO / REQUER AJUSTES',
+        'Alvo de retorno: development',
+      ].join('\n'),
+    );
+    writeFactoryStageSidecar(review1.reportPath, 'review', {
+      verdict: 'changes_requested',
+      returnTarget: 'tests',
+    });
+    sessionManager.writeInput(review1.sessionId, 'EXIT0');
+
+    const divergentPaused = await waitForFlowDetails(
+      () => getDetails(flowId),
+      details => details.flow.state === 'waiting_action' && details.flow.loopPausedReason !== null,
+    );
+    assert.equal(divergentPaused.flow.currentStage, 'review');
+    assert.match(divergentPaused.flow.loopPausedReason ?? '', /ausente ou ambíguo/);
+
+    // Reexecução do Review reprova apenas por lacuna de testes -> retorna automaticamente para Tests (sem reexecutar Development).
+    const rerunReviewRes = await fetch(`${baseUrl}/api/factory/flows/${flowId}/rerun`, {
+      method: 'POST',
+      headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stage: 'review' }),
+    });
+    assert.equal(rerunReviewRes.status, 200);
+    const review1Rerun = await waitForStageSession(flowId, 'review', seen);
+    assert.ok(review1Rerun.reportPath);
+    writeFileSync(
+      review1Rerun.reportPath,
+      [
+        '# Relatório de Code Review',
+        '## Resumo Executivo',
+        'Código de produção íntegro; falha exclusiva de mock e cobertura insuficiente nos testes.',
+        '## Pontos Encontrados',
+        '- [BLOQUEANTE] test/session.test.ts:12 ajustar mock de relógio e cobrir expiração.',
+        '## Parecer Final',
+        'Veredito: REPROVADO / REQUER AJUSTES',
+        'Alvo de retorno: tests',
+        'Corrigir apenas os testes na etapa tests.',
+      ].join('\n'),
+    );
+    writeFactoryStageSidecar(review1Rerun.reportPath, 'review', {
+      verdict: 'changes_requested',
+      returnTarget: 'tests',
+      findings: [
+        {
+          severity: 'BLOQUEANTE',
+          file: 'test/session.test.ts',
+          line: 12,
+          explanation: 'Ajustar mock de relógio e cobrir caso de expiração.',
+        },
+      ],
+    });
+    sessionManager.writeInput(review1Rerun.sessionId, 'EXIT0');
+
+    // Deve retornar diretamente para Tests na Iteração 2, mantendo apenas 1 sessão de Development!
+    const tests2 = await waitForStageSession(flowId, 'tests', seen);
+    assert.ok(tests2.reportPath);
+    const iter2TestsDetails = await getDetails(flowId);
+    assert.equal(iter2TestsDetails.flow.currentStage, 'tests');
+    assert.equal(iter2TestsDetails.flow.state, 'running');
+    assert.equal(iter2TestsDetails.flow.iteration, 2);
+    assert.equal(
+      iter2TestsDetails.stages.find(stage => stage.name === 'development')?.state,
+      'completed',
+    );
+    assert.equal(
+      sessionManager.listSessions().filter(s => s.flowId === flowId && s.stage === 'development')
+        .length,
+      1,
+    );
+
+    const tests2ReadyLine = sessionManager
+      .getSession(tests2.sessionId)
+      ?.buffer.replay()
+      .split(/\r?\n/)
+      .find(line => line.startsWith('READY:'));
+    assert.ok(tests2ReadyLine);
+    const tests2Prompt =
+      z
+        .object({ args: z.array(z.string()) })
+        .parse(JSON.parse(tests2ReadyLine.slice('READY:'.length)) as unknown)
+        .args.at(-1) ?? '';
+    assert.ok(tests2Prompt.includes('Iteração 2/3'));
+    assert.ok(tests2Prompt.includes(tests1.reportPath));
+    assert.ok(tests2Prompt.includes(review1Rerun.reportPath));
+
+    writeFileSync(
+      tests2.reportPath,
+      [
+        '# Relatório de Testes',
+        '## Arquivos de teste alterados',
+        '- test/session.test.ts',
+        '## Comandos executados',
+        '- npm test (exit 0)',
+        '## Resultados e cobertura',
+        'PASS: mock ajustado e cobertura completa.',
+      ].join('\n'),
+    );
+    writeFactoryStageSidecar(tests2.reportPath, 'tests');
+    sessionManager.writeInput(tests2.sessionId, 'EXIT0');
+
+    // Tests (Iteração 2) conclui -> avança automaticamente para Review (Iteração 2) -> aprova -> PR!
+    const review2 = await waitForStageSession(flowId, 'review', seen);
+    assert.ok(review2.reportPath);
+    writeFileSync(
+      review2.reportPath,
+      [
+        '# Relatório de Code Review',
+        '## Resumo Executivo',
+        'Testes corrigidos e aprovados.',
+        '## Pontos Encontrados',
+        'Nenhum bloqueador.',
+        '## Parecer Final',
+        'Veredito: APROVADO PARA PR',
+      ].join('\n'),
+    );
+    writeFactoryStageSidecar(review2.reportPath, 'review');
+    sessionManager.writeInput(review2.sessionId, 'EXIT0');
+
+    const prReadyDetails = await waitForFlowDetails(
+      () => getDetails(flowId),
+      details => details.flow.currentStage === 'pr' && details.flow.state === 'waiting_action',
+    );
+    assert.equal(prReadyDetails.flow.iteration, 2);
+    assert.equal(prReadyDetails.flow.lastReviewVerdict, 'approved');
+    assert.equal(
+      sessionManager.listSessions().filter(s => s.flowId === flowId && s.stage === 'development')
+        .length,
+      1,
+    );
+    assert.equal(
+      sessionManager.listSessions().filter(s => s.flowId === flowId && s.stage === 'tests').length,
+      2,
     );
   },
 );

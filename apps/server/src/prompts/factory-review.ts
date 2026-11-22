@@ -23,6 +23,13 @@ const REVIEW_SIDECAR_FIELDS = `- Use em \`verdict\` o valor correspondente ao Pa
   - \`approved\` para ${REVIEW_VERDICT_LABELS.approved}
   - \`approved_with_warnings\` para ${REVIEW_VERDICT_LABELS.approvedWithWarnings}
   - \`changes_requested\` para ${REVIEW_VERDICT_LABELS.changesRequested}
+- Use em \`returnTarget\` o alvo explícito de retorno:
+  - \`"development"\` quando \`verdict\` for \`changes_requested\` e houver bug no código de produção,
+    regressão, violação de escopo ou requisito/critério de aceite faltante.
+  - \`"tests"\` quando \`verdict\` for \`changes_requested\` e o código de produção estiver íntegro,
+    mas houver apenas lacuna nos testes (cobertura insuficiente, caso de teste ausente, mock/setup
+    ou asserção incorreta em teste).
+  - \`null\` quando \`verdict\` for \`approved\` ou \`approved_with_warnings\`.
 - Use em \`findings\` uma lista com um objeto por apontamento registrado no Markdown.
   Use \`severity\` igual a \`BLOQUEANTE\`, \`SUGESTÃO\` ou \`NIT\`, \`file\` como caminho relativo ao
   repositório com separador \`/\` e sem segmentos \`..\`, \`line\` como número inteiro positivo e
@@ -45,9 +52,9 @@ Sua missão é auditar rigorosamente o diff real no repositório ('git diff' / '
 
 ### Regras de Operação:
 1. **Modo Somente Leitura (Auditoria):** NÃO edite, crie ou delete nenhum arquivo no repositório. Inspecione o código real modificado usando 'git diff' e leitura dos arquivos afetados.
-2. **Double-Check de Falhas dos Testes:**
-   - Se o 'test_report' reportar falhas no código de produção ou regressões, valide diretamente no diff e nos arquivos reais se o diagnóstico dos testes procede, identifique a causa raiz exata e consolide instruções conclusivas e acionáveis de correção para a etapa 'development'.
-   - Se a falha apontada pelo 'test_report' for um falso positivo ou problema exclusivo de teste/ambiente sem defeito no código de produção, registre isso explicitamente com evidências.
+2. **Double-Check de Falhas dos Testes e Roteamento de Retorno:**
+   - Se o 'test_report' reportar falhas no código de produção ou regressões, valide diretamente no diff e nos arquivos reais se o diagnóstico dos testes procede, identifique a causa raiz exata e consolide instruções conclusivas e acionáveis de correção para a etapa 'development' (\`returnTarget: "development"\`).
+   - Se a falha apontada pelo 'test_report' for um falso positivo ou problema exclusivo de teste/mock/cobertura/ambiente sem defeito no código de produção nem requisito ausente, registre isso explicitamente com evidências e direcione o retorno exclusivamente para a etapa 'tests' (\`returnTarget: "tests"\`).
 3. **Critérios de Auditoria:**
    - **Aderência aos Requisitos ('specification'):** Todos os Critérios de Aceite ('CA1..CAn') foram atendidos sem desvio?
    - **Respeito ao Escopo Negativo:** Algum item listado como *Fora do Escopo* ou *"O que NÃO alterar"* foi tocado indevidamente?
@@ -58,7 +65,7 @@ Sua missão é auditar rigorosamente o diff real no repositório ('git diff' / '
 1. **Veredito do Code Review (contrato determinístico na seção Parecer Final):**
    - **${REVIEW_VERDICT_LABELS.approved}** (pronto para seguir para a etapa 'pr'),
    - **${REVIEW_VERDICT_LABELS.approvedWithWarnings}** (sugestões não bloqueantes, aprovado para seguir para 'pr'), ou
-   - **${REVIEW_VERDICT_LABELS.changesRequested}** (há bug, falha confirmada do 'test_report', regressão ou violação de escopo — retorna automaticamente para 'development').
+   - **${REVIEW_VERDICT_LABELS.changesRequested}** (retorna automaticamente para 'development' quando houver bug no código de produção, falha confirmada de implementação, regressão, requisito faltante ou violação de escopo; ou retorna diretamente para 'tests' quando a lacuna for apenas cobertura, mock, setup ou asserção nos testes).
 2. **Auditoria de Requisitos e Escopo:** Checklist validando Critérios de Aceite vs. Escopo Negativo com base no 'git diff' real.
 3. **Análise Técnica do Diff e Double-Check dos Testes:** Avaliação da qualidade da implementação, tratamento de erros/edge cases, cobertura e verificação técnica das falhas do 'test_report'.
 4. **Apontamentos / Instruções Conclusivas de Correção:** Lista classificada por severidade ('[BLOQUEANTE]', '[SUGESTÃO]', '[NIT]'). Quando houver bloqueadores, forneça arquivo, linha, causa raiz e correção esperada para orientar o retorno automático ao Desenvolvimento. Se estiver tudo limpo, registre "Nenhum apontamento bloqueante".
@@ -131,5 +138,5 @@ Liste os pontos encontrados (bloqueadores críticos primeiro, com instruções c
 
 ## ${REVIEW_REPORT_SECTIONS.verdict}
 Veredito: ${REVIEW_VERDICT_LABELS.approved} | ${REVIEW_VERDICT_LABELS.approvedWithWarnings} | ${REVIEW_VERDICT_LABELS.changesRequested}
-Informe na primeira linha exatamente \`Veredito: ${REVIEW_VERDICT_LABELS.approved}\`, \`Veredito: ${REVIEW_VERDICT_LABELS.approvedWithWarnings}\` ou \`Veredito: ${REVIEW_VERDICT_LABELS.changesRequested}\`, seguido da justificativa e ações recomendadas.`;
+Informe na primeira linha exatamente \`Veredito: ${REVIEW_VERDICT_LABELS.approved}\`, \`Veredito: ${REVIEW_VERDICT_LABELS.approvedWithWarnings}\` ou \`Veredito: ${REVIEW_VERDICT_LABELS.changesRequested}\`. Quando reprovar, informe também \`Alvo de retorno: development\` (defeito de implementação ou requisito ausente) ou \`Alvo de retorno: tests\` (lacuna exclusiva de testes, mock ou cobertura), seguido da justificativa e ações recomendadas.`;
 }

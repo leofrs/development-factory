@@ -14,6 +14,7 @@ import {
   FactoryFlowDomainError,
   FactoryFlowSchema,
   FactoryFlowStageSchema,
+  FactoryReviewDecisionSchema,
   FactoryTaskInputSchema,
   FactoryWorktreeRetentionPolicySchema,
   ListFactoryFlowsFilterSchema,
@@ -26,6 +27,7 @@ import {
   getNextFactoryStage,
   getReadyFactoryStageArtifact,
   isFinalFactoryFlowState,
+  resolveFactoryReviewDecision,
   returnFactoryFlowStage,
   transitionFactoryFlow,
   type FactoryFlow,
@@ -344,13 +346,34 @@ test('permite retorno controlado de review para development ou tests e resolve a
   }
   assert.equal(flow.currentStage, 'review');
 
+  const testReturnDecision = resolveFactoryReviewDecision({
+    verdict: 'changes_requested',
+    returnTarget: 'tests',
+  });
+  assert.equal(testReturnDecision.returnTarget, 'tests');
+  assert.equal(canReturnFactoryStage(flow.currentStage, testReturnDecision.returnTarget!), true);
+
   const returnedToTests = returnFactoryFlowStage(flow, {
     to: 'running',
-    stage: 'tests',
+    stage: testReturnDecision.returnTarget!,
     at: waitingAt,
-    reason: 'Bloqueadores encontrados nos testes',
+    reason: 'Bloqueadores encontrados apenas nos testes',
   });
   assert.equal(returnedToTests.currentStage, 'tests');
+
+  const devReturnDecision = FactoryReviewDecisionSchema.parse({
+    verdict: 'changes_requested',
+    returnTarget: 'development',
+  });
+  assert.equal(canReturnFactoryStage(flow.currentStage, devReturnDecision.returnTarget!), true);
+
+  const returnedToDev = returnFactoryFlowStage(flow, {
+    to: 'running',
+    stage: devReturnDecision.returnTarget!,
+    at: waitingAt,
+    reason: 'Defeito de implementação encontrado no código de produção',
+  });
+  assert.equal(returnedToDev.currentStage, 'development');
 
   assert.throws(
     () =>

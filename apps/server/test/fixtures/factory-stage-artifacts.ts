@@ -57,6 +57,7 @@ export const sidecarFixtures: Sidecars = {
     contractVersion,
     stage: 'review',
     verdict: 'approved',
+    returnTarget: null,
     findings: [],
   },
   pr: {
