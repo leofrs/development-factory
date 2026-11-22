@@ -1481,9 +1481,12 @@ if (check === 'typecheck' || check === 'lint') {
         '## Resumo das Alterações',
         'Renovação de JWT ajustada.',
         '## Validação e Evidências',
+        '| ID | Critério de Aceite | Status | Evidência |',
+        '| --- | --- | --- | --- |',
+        '| CA1 | Validar renovação de token | Atendido | npm test (exitCode 0) |',
         'Testes e Code Review aprovados.',
         '## Dados do Pull Request',
-        `Branch ${prPausedDetails.branchName} -> ${prPausedDetails.baseBranch}.`,
+        `Título: fix(auth): ajustar renovação de JWT\nBranch ${prPausedDetails.branchName} -> ${prPausedDetails.baseBranch}.`,
         '',
       ].join('\n'),
     );
@@ -2427,9 +2430,12 @@ test(
         '## Resumo das Alterações',
         'Feature concluída.',
         '## Validação e Evidências',
+        '| ID | Critério de Aceite | Status | Evidência |',
+        '| --- | --- | --- | --- |',
+        '| CA1 | Validar comportamento esperado | Atendido | npm test (exitCode 0) |',
         'Testes e Review aprovados.',
         '## Dados do Pull Request',
-        `Branch ${branchName} -> main.`,
+        `Título: feat(factory): concluir entrega\nBranch ${branchName} -> main.`,
       ].join('\n'),
     );
     writeFactoryStageSidecar(prSession.reportPath, 'pr', { headBranch: branchName });

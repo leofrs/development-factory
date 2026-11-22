@@ -10,7 +10,10 @@ import { test } from 'node:test';
 import { WebSocket } from 'ws';
 import {
   ClientMessageSchema,
+  FACTORY_FLOW_CONTRACT_VERSION,
+  FACTORY_STAGE_ORDER,
   FACTORY_STAGE_SIDECAR_CONTRACT_VERSION,
+  FactoryFlowDetailsSchema,
   FactoryRepositoryProfileSchema,
   FactoryTestsSidecarSchema,
   HistoryFileSchema,
@@ -48,7 +51,12 @@ import {
   buildFactoryTestsPrompt,
 } from '../src/prompts/factory-tests.js';
 import { buildDevelopmentRunnerArgs } from '../src/factory-development.js';
-import { buildPrRunnerArgs, isPrSummary } from '../src/factory-pr.js';
+import {
+  buildPrRunnerArgs,
+  isConventionalCommitTitle,
+  isPrSummary,
+  readFactoryPrInputs,
+} from '../src/factory-pr.js';
 import { loadFactoryRepositoryProfile } from '../src/factory-repository-profile.js';
 import {
   buildReviewRunnerArgs,
@@ -72,7 +80,11 @@ import {
   parseTestCoverageFromOutput,
 } from '../src/factory-tests-checks.js';
 import { createReviewServer } from '../src/server.js';
-import { triageMarkdown, writeFactoryStageSidecar } from './fixtures/factory-stage-artifacts.js';
+import {
+  planningMarkdown,
+  triageMarkdown,
+  writeFactoryStageSidecar,
+} from './fixtures/factory-stage-artifacts.js';
 
 async function until<T>(probe: () => T | undefined, label: string): Promise<T> {
   const deadline = Date.now() + 5000;
@@ -701,10 +713,19 @@ test('prompts, runners e validadores das Etapas 04 a 06 seguem contratos e permi
 
   const prArgs = buildPrRunnerArgs(prReportPath);
   assert(prArgs.includes('--restricted'));
-  const prAllowed = prArgs[prArgs.indexOf('--allowedTools') + 1] ?? '';
+  assert.equal(prArgs[prArgs.indexOf('--add-dir') + 1], '/tmp/factory-artifacts/flow-1');
+  const prAllowed = prArgs[prArgs.indexOf('--allowedTools') + 1]?.split(',') ?? [];
+  const prDenied = prArgs[prArgs.indexOf('--disallowedTools') + 1]?.split(',') ?? [];
   assert(prAllowed.includes('Edit(//tmp/factory-artifacts/flow-1/pr-summary.md)'));
   assert(prAllowed.includes('Write(//tmp/factory-artifacts/flow-1/pr-summary.md)'));
+  assert(prAllowed.includes('Edit(//tmp/factory-artifacts/flow-1/pr-summary.json)'));
+  assert(prAllowed.includes('Write(//tmp/factory-artifacts/flow-1/pr-summary.json)'));
   assert.equal(prAllowed.includes('.code-reviews'), false);
+  assert.equal(prAllowed.includes('Bash(gh pr*)'), false);
+  assert(prDenied.includes('Bash(git commit*)'));
+  assert(prDenied.includes('Bash(git push*)'));
+  assert(prDenied.includes('Bash(gh *)'));
+  assert(prDenied.includes('Bash(gh pr*)'));
   assert.equal(
     isPrSummary(
       [
@@ -712,12 +733,28 @@ test('prompts, runners e validadores das Etapas 04 a 06 seguem contratos e permi
         `## ${PR_SUMMARY_SECTIONS.summary}`,
         'PR preparado.',
         `## ${PR_SUMMARY_SECTIONS.validation}`,
-        'Testes e Review aprovados.',
+        '| ID | Critério de Aceite | Status | Evidência |',
+        '| --- | --- | --- | --- |',
+        '| CA1 | Validar endpoint | Atendido | npm test (exitCode 0) |',
+        `## ${PR_SUMMARY_SECTIONS.prDetails}`,
+        'Título: feat(factory): preparar PR\nBranch feat/prod-1234 -> main',
+      ].join('\n'),
+    ),
+    true,
+  );
+  assert.equal(
+    isPrSummary(
+      [
+        `# ${PR_SUMMARY_TITLE}`,
+        `## ${PR_SUMMARY_SECTIONS.summary}`,
+        'PR preparado.',
+        `## ${PR_SUMMARY_SECTIONS.validation}`,
+        'Testes e Review aprovados sem tabela.',
         `## ${PR_SUMMARY_SECTIONS.prDetails}`,
         'Branch feat/prod-1234 -> main',
       ].join('\n'),
     ),
-    true,
+    false,
   );
   assert.equal(isPrSummary(`# ${PR_SUMMARY_TITLE}\n\nIncompleto.`), false);
 });
@@ -1041,4 +1078,269 @@ test('buildFactoryDevelopmentPrompt injeta decisões e critérios aprovados estr
   assert.ok(prompt.includes('"id": "CA2"'));
   assert.ok(prompt.includes('"approved": false'));
   assert.ok(prompt.includes('Preservar compatibilidade da rota v1.'));
+});
+
+test('Etapa 1 do Bloco 06 não possui placeholders, bloqueia publicação autônoma e injeta CAs, checks reais do Bloco 04 e triagem do Review', async context => {
+  const rootDir = await mkdtemp(join(tmpdir(), 'df-pr-stage1-'));
+  context.after(() => rm(rootDir, { recursive: true, force: true }));
+
+  const sourcePromptFile = readFileSync(
+    new URL('../src/prompts/factory-pr.ts', import.meta.url),
+    'utf8',
+  );
+  const sourcePrFile = readFileSync(new URL('../src/factory-pr.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(sourcePromptFile, /placeholder/i);
+  assert.doesNotMatch(sourcePrFile, /placeholder/i);
+  assert.doesNotMatch(FACTORY_PR_SYSTEM_PROMPT, /executar os comandos de abertura/i);
+
+  assert.equal(isConventionalCommitTitle('feat(auth): renovar token expirado'), true);
+  assert.equal(isConventionalCommitTitle('fix!: corrigir validação de sessão'), true);
+  assert.equal(isConventionalCommitTitle('Atualizar endpoint de login'), false);
+
+  const flowId = '11111111-1111-4111-8111-111111111111';
+  const reviewArtifactId = '22222222-2222-4222-8222-222222222222';
+  const now = '2026-11-22T12:00:00.000Z';
+
+  const specPath = join(rootDir, 'triage.md');
+  const planPath = join(rootDir, 'planning.md');
+  const devPath = join(rootDir, 'development.md');
+  const testsPath = join(rootDir, 'tests.md');
+  const reviewPath = join(rootDir, 'review.md');
+  const prPath = join(rootDir, 'pr-summary.md');
+
+  writeFileSync(specPath, triageMarkdown('Suportar renovação segura de token.'));
+  writeFactoryStageSidecar(specPath, 'triage', {
+    acceptanceCriteria: [
+      { id: 'CA1', description: 'Renovar token válido antes da expiração' },
+      { id: 'CA2', description: 'Telemetria adicional no painel' },
+    ],
+    negativeScope: ['Não alterar schema legado'],
+    jiraContext: { key: 'PROD-777', url: 'https://empresa.atlassian.net/browse/PROD-777' },
+  });
+
+  writeFileSync(planPath, planningMarkdown('Ajustar middleware JWT e cobrir casos de borda.'));
+  writeFactoryStageSidecar(planPath, 'planning');
+
+  writeFileSync(
+    devPath,
+    [
+      '# Relatório de Implementação',
+      '## Arquivos alterados',
+      '- src/auth.ts',
+      '## Resumo das mudanças',
+      'Renovação de JWT implementada.',
+      '## Status dos passos do plano',
+      '| Passo | Status | Observação |',
+      '| --- | --- | --- |',
+      '| 1 | Concluído | Middleware atualizado |',
+    ].join('\n'),
+  );
+  writeFactoryStageSidecar(devPath, 'development', {
+    backendChecks: {
+      typecheck: { command: ['npm', 'run', 'typecheck'], exitCode: 0, errorSummary: null },
+      lint: { command: ['npm', 'run', 'lint'], exitCode: 0, errorSummary: null },
+    },
+  });
+
+  writeFileSync(
+    testsPath,
+    [
+      `# ${TEST_REPORT_TITLE}`,
+      `## ${TEST_REPORT_SECTIONS.testFiles}`,
+      '- test/auth.test.ts',
+      `## ${TEST_REPORT_SECTIONS.executedCommands}`,
+      '- npm test (exit 0)',
+      `## ${TEST_REPORT_SECTIONS.results}`,
+      'Cobertura validada.',
+    ].join('\n'),
+  );
+  writeFactoryStageSidecar(testsPath, 'tests', {
+    status: 'passed',
+    executedCommands: [
+      { command: ['npm', 'test'], exitCode: 0 },
+      { command: ['npm', 'run', 'coverage'], exitCode: 0 },
+    ],
+    testCases: [
+      {
+        id: 'T1',
+        description: 'Renova token válido antes de expirar',
+        acceptanceCriteriaIds: ['CA1'],
+        status: 'passed',
+      },
+    ],
+    coverage: { linesPercent: 93.4, branchesPercent: 84.5 },
+    backendChecks: {
+      test: { command: ['npm', 'test'], exitCode: 0, errorSummary: null },
+      coverage: { command: ['npm', 'run', 'coverage'], exitCode: 0, errorSummary: null },
+    },
+  });
+
+  writeFileSync(
+    reviewPath,
+    [
+      `# ${REVIEW_REPORT_TITLE}`,
+      `## ${REVIEW_REPORT_SECTIONS.executiveSummary}`,
+      'Aprovado com ressalvas não bloqueantes.',
+      `## ${REVIEW_REPORT_SECTIONS.findings}`,
+      '- [SUGESTÃO] src/auth.ts:12 extrair helper de TTL.\n- [NIT] src/auth.ts:30 ajustar comentário.',
+      `## ${REVIEW_REPORT_SECTIONS.verdict}`,
+      `Veredito: ${REVIEW_VERDICT_LABELS.approvedWithWarnings}`,
+    ].join('\n'),
+  );
+  writeFactoryStageSidecar(reviewPath, 'review', {
+    verdict: 'approved_with_warnings',
+    returnTarget: null,
+    findings: [
+      {
+        severity: 'SUGESTÃO',
+        file: 'src/auth.ts',
+        line: 12,
+        explanation: 'Extrair helper de TTL.',
+      },
+      {
+        severity: 'NIT',
+        file: 'src/auth.ts',
+        line: 30,
+        explanation: 'Ajustar comentário.',
+      },
+    ],
+  });
+
+  const stageArtifacts = [
+    { stage: 'triage', kind: 'specification', path: specPath },
+    { stage: 'planning', kind: 'plan', path: planPath },
+    { stage: 'development', kind: 'implementation_report', path: devPath },
+    { stage: 'tests', kind: 'test_report', path: testsPath },
+    { stage: 'review', kind: 'review_report', path: reviewPath },
+  ] as const;
+
+  const details = FactoryFlowDetailsSchema.parse({
+    contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+    flow: {
+      contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+      id: flowId,
+      title: 'PROD-777',
+      target: {
+        contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+        inputType: 'jira_key',
+        value: 'PROD-777',
+        repoPath: rootDir,
+      },
+      state: 'waiting_action',
+      currentStage: 'pr',
+      currentSessionId: null,
+      iteration: 1,
+      maxIterations: 3,
+      lastReviewVerdict: 'approved_with_warnings',
+      loopPausedReason: null,
+      worktreePath: rootDir,
+      branchName: 'factory/prod-777',
+      baseBranch: 'main',
+      planningApproval: {
+        approvedAt: now,
+        decisions: [
+          {
+            id: 'D1',
+            question: 'Estratégia de renovação',
+            mode: 'recommended',
+            selectedOption: 'Sliding window de 15min',
+            recommendedOption: 'Sliding window de 15min',
+          },
+        ],
+        acceptanceCriteria: [
+          { id: 'CA1', description: 'Renovar token válido antes da expiração', approved: true },
+          { id: 'CA2', description: 'Telemetria adicional no painel', approved: false },
+        ],
+      },
+      reviewTriage: {
+        reviewArtifactId,
+        iteration: 1,
+        decisions: [
+          {
+            findingId: 'F1',
+            action: 'dismiss_false_positive',
+            justification: 'Helper será extraído em task separada',
+          },
+        ],
+        updatedAt: now,
+      },
+      createdAt: now,
+      updatedAt: now,
+      finishedAt: null,
+      transitions: [
+        {
+          from: 'queued',
+          to: 'waiting_action',
+          stage: 'pr',
+          at: now,
+          reason: 'Pronto para preparação do PR',
+        },
+      ],
+      error: null,
+    },
+    stages: FACTORY_STAGE_ORDER.map((stageName, index) => {
+      const matched = stageArtifacts.find(item => item.stage === stageName);
+      return {
+        contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+        id: `44444444-4444-4444-8444-44444444444${index}`,
+        flowId,
+        name: stageName,
+        state: matched ? 'completed' : 'pending',
+        sessionId: null,
+        reportPath: matched ? matched.path : null,
+        sessionPath: null,
+        createdAt: now,
+        updatedAt: now,
+        startedAt: matched ? now : null,
+        finishedAt: matched ? now : null,
+        approvedNotes: stageName === 'pr' ? 'Destacar janela de renovação no corpo do PR' : undefined,
+        error: null,
+      };
+    }),
+    artifacts: stageArtifacts.map(item => ({
+      contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+      id: item.stage === 'review' ? reviewArtifactId : '33333333-3333-4333-8333-333333333333',
+      flowId,
+      stage: item.stage,
+      sessionId: null,
+      kind: item.kind,
+      format: 'markdown',
+      path: item.path,
+      status: 'ready',
+      iteration: 1,
+      createdAt: now,
+      updatedAt: now,
+      error: null,
+    })),
+    worktreePath: rootDir,
+    branchName: 'factory/prod-777',
+    baseBranch: 'main',
+    checkpoints: [],
+  });
+
+  const inputs = await readFactoryPrInputs(details);
+  const prompt = buildFactoryPrPrompt({
+    ...inputs,
+    task: details.flow.target.value,
+    reportPath: prPath,
+    branchName: details.branchName,
+    baseBranch: details.baseBranch,
+    repositoryProfile: FactoryRepositoryProfileSchema.parse({
+      prTemplate: '## Motivação\n\n## Como validar',
+    }),
+  });
+
+  assert.match(prompt, /Conventional Commits/);
+  assert.match(prompt, /NÃO execute `git add`, `git commit`, `git push`, `gh pr create`/);
+  assert.ok(prompt.includes('"key": "PROD-777"'));
+  assert.ok(prompt.includes('"id": "CA1"'));
+  assert.ok(prompt.includes('"approved": false'));
+  assert.ok(prompt.includes('"linesPercent": 93.4'));
+  assert.ok(prompt.includes('"branchesPercent": 84.5'));
+  assert.ok(prompt.includes('"exitCode": 0'));
+  assert.ok(prompt.includes('"verdict": "approved_with_warnings"'));
+  assert.ok(prompt.includes('Helper será extraído em task separada'));
+  assert.ok(prompt.includes('Extrair helper de TTL.'));
+  assert.ok(prompt.includes('Destacar janela de renovação no corpo do PR'));
+  assert.ok(prompt.includes(JSON.stringify('## Motivação\n\n## Como validar')));
 });
