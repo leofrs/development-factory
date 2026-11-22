@@ -14,6 +14,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test, type TestContext } from 'node:test';
+import { FactoryTriageSidecarSchema } from '@development-factory/shared';
 import { createFactoryHistory } from '../src/history.js';
 import {
   planningMarkdown,
@@ -263,4 +264,75 @@ test('recusa destino dentro do repositório, symlinks em diretórios gerenciados
   symlinkSync(protectedFile, history.reportPath);
   history.finish('interrompido');
   assert.equal(readFileSync(protectedFile, 'utf8'), 'original');
+});
+
+test('redige segredos divididos entre chunks na saída da TUI, no relatório Markdown e no sidecar JSON', context => {
+  const { repoDir } = createIsolatedHistoryEnv(context);
+  const states: string[] = [];
+  const history = createFactoryHistory(
+    {
+      inputType: 'jira_url',
+      value: 'https://bot:jira_pass_123@empresa.atlassian.net/browse/DEV-99',
+      repoPath: repoDir,
+    },
+    state => states.push(state),
+    assert.fail,
+  );
+
+  history.record('\x1b[33mAuthorization: Bearer eyJhbGciOiJIUzI1NiJ9.');
+  history.record('eyJzdWIiOiIxMjM0NTYifQ.sig_9876543210\x1b[0m\r\n');
+  history.record('GH_TOKEN=ghp_1234567890abcdef1234567890abcdef1234\n');
+  history.record('Linha final sem quebra AWS=AKIAIOSFODNN7EXAMPLE');
+
+  writeFileSync(
+    history.reportPath,
+    triageMarkdown('Chamada em https://user:secret99@api.internal/v1 com x-api-key: key_abc12345'),
+  );
+  writeFactoryStageSidecar(history.reportPath, 'triage', {
+    technicalContext: 'Token ATATT3xFfGF0123456789abcdefABCDEF_-123456 e "secret": "nao-vazar-123"',
+    jiraContext: {
+      key: 'DEV-99',
+      url: 'https://bot:jira_pass_123@empresa.atlassian.net/browse/DEV-99',
+    },
+  });
+
+  const error = history.finish('encerrado com JIRA_API_TOKEN=ATATT3xFfGF0123456789abcdefABCDEF_-9999');
+  assert.equal(error, undefined);
+  assert.deepEqual(states, ['saved']);
+
+  const sessionContent = readFileSync(history.sessionPath, 'utf8');
+  const reportContent = readFileSync(history.reportPath, 'utf8');
+  const sidecarContent = readFileSync(history.sidecarPath, 'utf8');
+
+  for (const leaked of [
+    'jira_pass_123',
+    'eyJhbGciOiJIUzI1NiJ9',
+    'ghp_1234567890abcdef1234567890abcdef1234',
+    'AKIAIOSFODNN7EXAMPLE',
+    'user:secret99',
+    'key_abc12345',
+    'ATATT3xFfGF0123456789abcdefABCDEF_-123456',
+    'nao-vazar-123',
+    'ATATT3xFfGF0123456789abcdefABCDEF_-9999',
+  ]) {
+    assert.equal(sessionContent.includes(leaked), false, `Sessão vazou ${leaked}`);
+    assert.equal(reportContent.includes(leaked), false, `Relatório vazou ${leaked}`);
+    assert.equal(sidecarContent.includes(leaked), false, `Sidecar vazou ${leaked}`);
+  }
+
+  assert.match(sessionContent, /Authorization: Bearer \[REDACTED\]/);
+  assert.match(sessionContent, /GH_TOKEN=\[REDACTED\]/);
+  assert.match(sessionContent, /Linha final sem quebra AWS=\[REDACTED\]/);
+  assert.match(sessionContent, /- Encerramento: encerrado com JIRA_API_TOKEN=\[REDACTED\]/);
+  assert.match(reportContent, /https:\/\/\[REDACTED\]@api\.internal\/v1 com x-api-key: \[REDACTED\]/);
+
+  const parsedSidecar = FactoryTriageSidecarSchema.parse(JSON.parse(sidecarContent));
+  assert.equal(
+    parsedSidecar.jiraContext?.url,
+    'https://[REDACTED]@empresa.atlassian.net/browse/DEV-99',
+  );
+  assert.equal(
+    parsedSidecar.technicalContext,
+    'Token [REDACTED] e "secret": "[REDACTED]"',
+  );
 });

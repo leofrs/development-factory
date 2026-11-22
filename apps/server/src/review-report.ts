@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { resolveReviewReportDirectory } from './artifacts.js';
 import { readHistoryFile } from './history-reader.js';
+import { redactSecrets } from './secret-redaction.js';
 
 function hasErrorCode(error: unknown, code: string): boolean {
   return error instanceof Error && 'code' in error && error.code === code;
@@ -49,10 +50,11 @@ export function createReviewReportDraft(repoPath: string, reportPath: string) {
         throw new Error('A pasta indicada em “Salvar code review em” mudou durante a execução.');
       }
 
+      const sanitizedContent = redactSecrets(content);
       const file = openSync(reportPath, 'wx', 0o600);
       try {
         try {
-          writeFileSync(file, content);
+          writeFileSync(file, sanitizedContent);
         } finally {
           closeSync(file);
         }

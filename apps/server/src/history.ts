@@ -15,6 +15,7 @@ import {
   validateStructuredMarkdownReport,
 } from './factory-stage-runners.js';
 import { isTestReport } from './factory-tests.js';
+import { redactSecrets, redactSecretsInValue } from './secret-redaction.js';
 import { IMPLEMENTATION_REPORT_TITLE } from './prompts/factory-development.js';
 import { PR_SUMMARY_TITLE } from './prompts/factory-pr.js';
 import { REVIEW_REPORT_TITLE } from './prompts/factory-review.js';
@@ -52,29 +53,72 @@ function writeReportFileSafely(path: string, content: string): void {
   }
 }
 
+function sanitizeReportMarkdownFile(reportPath: string): void {
+  let raw: string;
+  try {
+    raw = readFactoryArtifactFile(reportPath).toString('utf8');
+  } catch {
+    return;
+  }
+  const sanitized = redactSecrets(raw);
+  if (sanitized !== raw) {
+    writeReportFileSafely(reportPath, sanitized);
+  }
+}
+
+function sanitizeSidecarJsonFile(sidecarPath: string): void {
+  let rawBytes: Buffer;
+  try {
+    rawBytes = readFactoryArtifactFile(sidecarPath);
+  } catch {
+    return;
+  }
+  if (rawBytes.length === 0) {
+    return;
+  }
+  let parsed: unknown;
+  try {
+    const decoded = new TextDecoder('utf-8', { fatal: true }).decode(rawBytes);
+    parsed = JSON.parse(decoded) as unknown;
+  } catch {
+    return;
+  }
+  const sanitized = redactSecretsInValue(parsed);
+  const serializedOriginal = JSON.stringify(parsed);
+  const serializedSanitized = JSON.stringify(sanitized);
+  if (serializedSanitized !== serializedOriginal) {
+    writeReportFileSafely(sidecarPath, `${serializedSanitized}\n`);
+  }
+}
+
+const MAX_PENDING_LINE_LENGTH = 8192;
+const PENDING_LINE_OVERLAP = 512;
+
 function createSessionHistory(
   config: SessionHistoryConfig,
   onChange: (state: HistoryResult) => void,
   onError: (message: string) => void,
 ) {
   const stageConfig = REPORT_STAGE_HISTORY_CONFIG[config.stage];
+  const safeMetadata = redactSecrets(config.metadata);
   const startedAt = new Date().toISOString();
   let descriptor = -1;
   const directory = resolveFactoryArtifactsDirectory(config.repoPath, config.flowId);
   const prefix = `${stageConfig.prefixSegment}-${config.inputType}`;
-  const slug = config.slugSource.replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 60) || prefix;
+  const slug =
+    redactSecrets(config.slugSource).replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 60) || prefix;
   const fileBasename = `${startedAt.replace(/[:.]/g, '-')}-${prefix}-${slug}-${randomUUID()}`;
   const reportPath = join(directory, `${fileBasename}.md`);
   const sidecarPath = getFactoryStageSidecarPath(reportPath);
   const sessionPath = join(directory, `${fileBasename}.session.md`);
-  const placeholder = `# ${stageConfig.reportPlaceholderTitle}\n\n${config.metadata}\n> ${stageConfig.reportPlaceholderNote}\n`;
+  const placeholder = `# ${stageConfig.reportPlaceholderTitle}\n\n${safeMetadata}\n> ${stageConfig.reportPlaceholderNote}\n`;
   writeFileSync(reportPath, placeholder, { flag: 'wx', mode: 0o600 });
   try {
     writeFileSync(sidecarPath, '', { flag: 'wx', mode: 0o600 });
     descriptor = openSync(sessionPath, 'wx', 0o600);
     appendFileSync(
       descriptor,
-      `# ${stageConfig.sessionTitle}\n\n${config.metadata}\n` +
+      `# ${stageConfig.sessionTitle}\n\n${safeMetadata}\n` +
         `> Registro textual da TUI. O relatório fica em ${JSON.stringify(reportPath)}.\n` +
         `> O sidecar JSON fica em ${JSON.stringify(sidecarPath)}.\n\n## Saída do terminal\n\n    `,
     );
@@ -84,7 +128,7 @@ function createSessionHistory(
     }
     writeReportFileSafely(
       reportPath,
-      `# ${stageConfig.reportPlaceholderTitle} não iniciado\n\n${config.metadata}\n` +
+      `# ${stageConfig.reportPlaceholderTitle} não iniciado\n\n${safeMetadata}\n` +
         'Falha ao preparar o sidecar JSON ou o registro da sessão.\n',
     );
     throw error;
@@ -92,6 +136,37 @@ function createSessionHistory(
   let finished = false;
   let failed = false;
   let escapeTail = '';
+  let pendingLine = '';
+
+  const flushPendingLine = (flushAll: boolean) => {
+    if (pendingLine.length === 0) {
+      return;
+    }
+    if (flushAll) {
+      const redacted = redactSecrets(pendingLine);
+      pendingLine = '';
+      appendFileSync(descriptor, redacted.replace(/\n/g, '\n    '));
+      return;
+    }
+    const lastNewline = pendingLine.lastIndexOf('\n');
+    if (lastNewline !== -1) {
+      const ready = pendingLine.slice(0, lastNewline + 1);
+      pendingLine = pendingLine.slice(lastNewline + 1);
+      const redacted = redactSecrets(ready);
+      appendFileSync(descriptor, redacted.replace(/\n/g, '\n    '));
+    }
+    while (pendingLine.length > MAX_PENDING_LINE_LENGTH) {
+      // Redige antes de fatiar linhas longas sem quebra para evitar vazamento na fronteira.
+      pendingLine = redactSecrets(pendingLine);
+      if (pendingLine.length <= MAX_PENDING_LINE_LENGTH) {
+        break;
+      }
+      const cutIndex = pendingLine.length - PENDING_LINE_OVERLAP;
+      const chunk = pendingLine.slice(0, cutIndex);
+      pendingLine = pendingLine.slice(cutIndex);
+      appendFileSync(descriptor, chunk);
+    }
+  };
 
   const record = (data: string) => {
     if (finished || failed) {
@@ -109,7 +184,8 @@ function createSessionHistory(
         .replace(/\r\n/g, '\n')
         .replace(/\r/g, '\n')
         .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
-      appendFileSync(descriptor, plain.replace(/\n/g, '\n    '));
+      pendingLine += plain;
+      flushPendingLine(false);
     } catch {
       failed = true;
       onError(
@@ -122,8 +198,15 @@ function createSessionHistory(
       return undefined;
     }
     finished = true;
+    const safeReason = redactSecrets(reason);
     let content: string | undefined;
     let artifactError: FactoryStageArtifactError | undefined;
+    try {
+      sanitizeReportMarkdownFile(reportPath);
+      sanitizeSidecarJsonFile(sidecarPath);
+    } catch {
+      // Erros de leitura/gravação de artefatos são diagnosticados na consolidação abaixo.
+    }
     // Consolida a entrega após o encerramento para validar os dois arquivos já gravados.
     if (acceptReport) {
       try {
@@ -143,9 +226,12 @@ function createSessionHistory(
     }
     const saved = acceptReport && !artifactError;
     try {
+      if (!failed) {
+        flushPendingLine(true);
+      }
       appendFileSync(
         descriptor,
-        `\n\n- Encerramento: ${reason}\n- Fim: ${new Date().toISOString()}\n`,
+        `\n\n- Encerramento: ${safeReason}\n- Fim: ${new Date().toISOString()}\n`,
       );
       if (
         !saved &&
@@ -154,8 +240,8 @@ function createSessionHistory(
       ) {
         writeReportFileSafely(
           reportPath,
-          `# ${stageConfig.reportPlaceholderTitle} incompleto\n\n${config.metadata}\n` +
-            `O relatório final não foi salvo antes do encerramento (${reason}).\n\n` +
+          `# ${stageConfig.reportPlaceholderTitle} incompleto\n\n${safeMetadata}\n` +
+            `O relatório final não foi salvo antes do encerramento (${safeReason}).\n\n` +
             `Consulte o registro da sessão: [${fileBasename}.session.md](./${fileBasename}.session.md).\n`,
         );
       }

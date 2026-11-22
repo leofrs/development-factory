@@ -10,6 +10,7 @@ import type {
 } from '@development-factory/shared';
 import { FactoryStageArtifactError, getFactoryStageSidecarPath } from './factory-stage-runners.js';
 import { maxHistoryBytes } from './history-reader.js';
+import { redactSecrets, redactSecretsInValue } from './secret-redaction.js';
 import { SessionOutputBuffer } from './session-buffer.js';
 
 export type ProfileCommand = FactoryRepositoryProfile['commands']['typecheck'];
@@ -72,7 +73,7 @@ export function runBackendCommandCheck(
       signal.removeEventListener('abort', abort);
       // Em uma falha de spawn, o Node pode devolver um código interno negativo.
       const exitCode = launchError ? null : code;
-      const plainOutput = stripVTControlCharacters(outputBuffer.replay());
+      const plainOutput = redactSecrets(stripVTControlCharacters(outputBuffer.replay()));
       let errorSummary: string | null = null;
       if (launchError) {
         errorSummary = `Não foi possível iniciar o comando (${launchError.code ?? 'erro de execução'}).`;
@@ -83,8 +84,13 @@ export function runBackendCommandCheck(
         const extra = options.summarizeFailure?.(plainOutput, exitCode);
         errorSummary = extra ? `${baseSummary} ${extra}` : baseSummary;
       }
+      const safeCommand = command.map(redactSecrets) as NonNullable<ProfileCommand>;
       resolve({
-        check: { command, exitCode, errorSummary },
+        check: {
+          command: safeCommand,
+          exitCode,
+          errorSummary: errorSummary === null ? null : redactSecrets(errorSummary),
+        },
         output: plainOutput,
       });
     });
@@ -101,7 +107,8 @@ export function writeValidatedStageSidecar<T>(
 ): T {
   const sidecarPath = getFactoryStageSidecarPath(reportPath);
   try {
-    const validated = schema.parse(payload);
+    const sanitizedPayload = redactSecretsInValue(payload);
+    const validated = schema.parse(sanitizedPayload);
     const content = `${JSON.stringify(validated)}\n`;
     if (Buffer.byteLength(content) > maxHistoryBytes) {
       throw new Error('O sidecar com as verificações excede o limite de 5 MB.');
