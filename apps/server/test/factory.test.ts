@@ -52,7 +52,9 @@ import {
 } from '../src/prompts/factory-tests.js';
 import { buildDevelopmentRunnerArgs } from '../src/factory-development.js';
 import {
+  buildFactoryPrGateForFlow,
   buildPrRunnerArgs,
+  extractPrDescriptionFromSummary,
   isConventionalCommitTitle,
   isPrSummary,
   readFactoryPrInputs,
@@ -1343,4 +1345,175 @@ test('Etapa 1 do Bloco 06 não possui placeholders, bloqueia publicação autôn
   assert.ok(prompt.includes('Extrair helper de TTL.'));
   assert.ok(prompt.includes('Destacar janela de renovação no corpo do PR'));
   assert.ok(prompt.includes(JSON.stringify('## Motivação\n\n## Como validar')));
+});
+
+test('extractPrDescriptionFromSummary e buildFactoryPrGateForFlow pré-carregam rascunho da Etapa 1 e contexto Jira', async context => {
+  const rootDir = await mkdtemp(join(tmpdir(), 'df-pr-gate-'));
+  context.after(() => rm(rootDir, { recursive: true, force: true }));
+
+  const specPath = join(rootDir, 'triage.md');
+  const prPath = join(rootDir, 'pr-summary.md');
+  const flowId = '11111111-1111-4111-8111-111111111111';
+  const triageArtifactId = '22222222-2222-4222-8222-222222222222';
+  const prArtifactId = '33333333-3333-4333-8333-333333333333';
+  const now = '2026-11-22T12:00:00.000Z';
+
+  writeFileSync(specPath, triageMarkdown('Suportar revisão pré-publicação.'));
+  writeFactoryStageSidecar(specPath, 'triage', {
+    jiraContext: { key: 'PROD-999', url: 'https://empresa.atlassian.net/browse/PROD-999' },
+  });
+
+  const prMarkdownWithFencedBody = [
+    `# ${PR_SUMMARY_TITLE}`,
+    `## ${PR_SUMMARY_SECTIONS.summary}`,
+    'Resumo interno do relatório.',
+    `## ${PR_SUMMARY_SECTIONS.validation}`,
+    '| ID | Critério de Aceite | Status | Evidência |',
+    '| --- | --- | --- | --- |',
+    '| CA1 | Validar pré-carregamento | Atendido | npm test (exitCode 0) |',
+    `## ${PR_SUMMARY_SECTIONS.prDetails}`,
+    'Título: feat(pr): preparar revisão humana',
+    '',
+    '````markdown',
+    '## Motivação',
+    'Permitir revisão antes do push.',
+    '',
+    '## Validação',
+    '- `npm test` (exitCode 0)',
+    '````',
+  ].join('\n');
+  writeFileSync(prPath, prMarkdownWithFencedBody);
+  writeFactoryStageSidecar(prPath, 'pr', {
+    title: 'feat(pr): preparar revisão humana',
+    summary: 'Resumo do sidecar',
+    baseBranch: 'develop',
+    headBranch: 'factory/prod-999',
+    satisfiedAcceptanceCriteriaIds: ['CA1'],
+    evidence: ['npm test (exitCode 0)'],
+  });
+
+  assert.equal(
+    extractPrDescriptionFromSummary(prMarkdownWithFencedBody, { summary: 'Resumo do sidecar' }),
+    '## Motivação\nPermitir revisão antes do push.\n\n## Validação\n- `npm test` (exitCode 0)',
+  );
+
+  const fallbackMarkdown = [
+    `# ${PR_SUMMARY_TITLE}`,
+    `## ${PR_SUMMARY_SECTIONS.summary}`,
+    'Alterações aplicadas.',
+    `## ${PR_SUMMARY_SECTIONS.validation}`,
+    '| ID | Critério de Aceite | Status | Evidência |',
+    '| --- | --- | --- | --- |',
+    '| CA1 | Validar fallback | Atendido | exitCode 0 |',
+    `## ${PR_SUMMARY_SECTIONS.prDetails}`,
+    'Status: Rascunho preparado.',
+  ].join('\n');
+  assert.match(
+    extractPrDescriptionFromSummary(fallbackMarkdown, { summary: 'Fallback' }),
+    /^## Resumo das Alterações[\s\S]*## Validação e Evidências/,
+  );
+
+  const parsedDetails = FactoryFlowDetailsSchema.parse({
+    contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+    flow: {
+      contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+      id: flowId,
+      title: 'PROD-999',
+      target: {
+        contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+        inputType: 'jira_key',
+        value: 'PROD-999',
+        repoPath: rootDir,
+      },
+      state: 'waiting_action',
+      currentStage: 'pr',
+      currentSessionId: null,
+      iteration: 1,
+      maxIterations: 3,
+      lastReviewVerdict: 'approved',
+      loopPausedReason: null,
+      worktreePath: rootDir,
+      branchName: 'factory/prod-999',
+      baseBranch: 'main',
+      createdAt: now,
+      updatedAt: now,
+      finishedAt: null,
+      transitions: [
+        {
+          from: 'queued',
+          to: 'waiting_action',
+          stage: 'pr',
+          at: now,
+          reason: 'Pronto para revisão do PR',
+        },
+      ],
+      error: null,
+    },
+    stages: FACTORY_STAGE_ORDER.map((name, index) => ({
+      contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+      id: `44444444-4444-4444-8444-44444444444${index}`,
+      flowId,
+      name,
+      state: name === 'pr' ? 'waiting_action' : 'completed',
+      sessionId: null,
+      reportPath: name === 'triage' ? specPath : name === 'pr' ? prPath : null,
+      sessionPath: null,
+      createdAt: now,
+      updatedAt: now,
+      startedAt: now,
+      finishedAt: name === 'pr' ? null : now,
+      error: null,
+    })),
+    artifacts: [
+      {
+        contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+        id: triageArtifactId,
+        flowId,
+        stage: 'triage',
+        sessionId: null,
+        kind: 'specification',
+        format: 'markdown',
+        path: specPath,
+        status: 'ready',
+        iteration: 0,
+        createdAt: now,
+        updatedAt: now,
+        error: null,
+      },
+      {
+        contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+        id: prArtifactId,
+        flowId,
+        stage: 'pr',
+        sessionId: null,
+        kind: 'pr_summary',
+        format: 'markdown',
+        path: prPath,
+        status: 'ready',
+        iteration: 1,
+        createdAt: now,
+        updatedAt: now,
+        error: null,
+      },
+    ],
+    checkpoints: [],
+  });
+
+  const prGate = buildFactoryPrGateForFlow(
+    parsedDetails.flow,
+    parsedDetails.stages,
+    parsedDetails.artifacts,
+  );
+  assert.ok(prGate);
+  assert.equal(prGate.title, 'feat(pr): preparar revisão humana');
+  assert.equal(prGate.baseBranch, 'develop');
+  assert.equal(prGate.headBranch, 'factory/prod-999');
+  assert.equal(prGate.draft, false);
+  assert.deepEqual(prGate.reviewers, []);
+  assert.equal(prGate.updateJira, true);
+  assert.equal(prGate.confirmedForPublish, false);
+  assert.deepEqual(prGate.jiraContext, {
+    key: 'PROD-999',
+    url: 'https://empresa.atlassian.net/browse/PROD-999',
+  });
 });

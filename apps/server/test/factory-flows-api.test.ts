@@ -30,6 +30,7 @@ import {
   FactoryFlowSchema,
   FactoryTestsSidecarSchema,
   RollbackFactoryFlowCheckpointResponseSchema,
+  SaveFactoryPrReviewResponseSchema,
   ServerMessageSchema,
   TransitionFactoryFlowResponseSchema,
   type AppEvent,
@@ -2440,6 +2441,63 @@ test(
     );
     writeFactoryStageSidecar(prSession.reportPath, 'pr', { headBranch: branchName });
     sessionManager.writeInput(prSession.sessionId, 'EXIT0');
+
+    // Etapa 1 concluída: pausa em waiting_action com prGate pré-carregado para revisão humana (Etapa 2).
+    const prReviewReady = await waitForFlowDetails(
+      getDetails,
+      d =>
+        d.flow.currentStage === 'pr' &&
+        d.flow.state === 'waiting_action' &&
+        d.prGate !== undefined &&
+        d.prGate !== null,
+    );
+    assert.equal(prReviewReady.prGate?.headBranch, branchName);
+    assert.equal(prReviewReady.prGate?.baseBranch, 'main');
+    assert.equal(prReviewReady.prGate?.confirmedForPublish, false);
+    assert.equal(existsSync(worktreePath), true);
+
+    const invalidPrReviewRes = await fetch(`${baseUrl}/api/factory/flows/${flowId}/pr-review`, {
+      method: 'POST',
+      headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: 'feat(factory): entrega revisada',
+        description: 'Corpo validado.',
+        baseBranch: 'HEAD',
+        draft: false,
+        reviewers: [],
+        updateJira: false,
+      }),
+    });
+    assert.equal(invalidPrReviewRes.status, 400);
+
+    const savedPrReviewRes = await fetch(`${baseUrl}/api/factory/flows/${flowId}/pr-review`, {
+      method: 'POST',
+      headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: 'feat(factory): entrega revisada pelo humano',
+        description: '## Resumo\n\nDescrição revisada antes do envio.',
+        baseBranch: 'main',
+        draft: true,
+        reviewers: ['alice', 'team/core'],
+        updateJira: false,
+        confirmPublish: true,
+      }),
+    });
+    assert.equal(savedPrReviewRes.status, 200);
+    const savedPrReview = SaveFactoryPrReviewResponseSchema.parse(await savedPrReviewRes.json());
+    assert.equal(savedPrReview.prGate.title, 'feat(factory): entrega revisada pelo humano');
+    assert.equal(savedPrReview.prGate.draft, true);
+    assert.deepEqual(savedPrReview.prGate.reviewers, ['alice', 'team/core']);
+    assert.equal(savedPrReview.prGate.confirmedForPublish, true);
+    assert.ok(savedPrReview.prGate.confirmedAt);
+    assert.equal(existsSync(worktreePath), true);
+
+    const completePrRes = await fetch(`${baseUrl}/api/factory/flows/${flowId}/transitions`, {
+      method: 'POST',
+      headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ to: 'completed', reason: 'Concluir o fluxo após revisão do PR' }),
+    });
+    assert.equal(completePrRes.status, 200);
 
     const completed = await waitForFlowDetails(getDetails, d => d.flow.state === 'completed');
     assert.equal(completed.worktreePath, null);

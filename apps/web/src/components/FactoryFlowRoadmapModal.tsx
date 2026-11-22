@@ -15,6 +15,7 @@ import {
   Loader2,
   RotateCcw,
   ScanSearch,
+  ShieldCheck,
   Square,
   X,
 } from 'lucide-react';
@@ -34,11 +35,17 @@ import {
   type FactoryStageName,
   type FactoryStageState,
   type ReturnFactoryTargetStage,
+  type SaveFactoryPrReviewRequest,
+  type SaveFactoryPrReviewResponse,
   type SaveFactoryReviewTriageRequest,
   type SaveFactoryReviewTriageResponse,
 } from '@development-factory/shared';
 import type { BackgroundSessionSummary } from '@development-factory/shared';
-import { fetchFactoryFlowDetails, saveFactoryReviewTriage } from '../api/factory-flows';
+import {
+  fetchFactoryFlowDetails,
+  saveFactoryPrReview,
+  saveFactoryReviewTriage,
+} from '../api/factory-flows';
 import {
   getFactoryFlowStatePresentation,
   getFactoryReviewVerdictPresentation,
@@ -51,6 +58,7 @@ import type { FactoryFlowDetailTab } from './FactoryFlowDetailTabs.js';
 import { FactoryFlowDiffPanel, type FactoryDiffFocusTarget } from './FactoryFlowDiffPanel.js';
 import { FactoryFlowFindingsPanel } from './FactoryFlowFindingsPanel.js';
 import { FactoryFlowIterationsPanel } from './FactoryFlowIterationsPanel.js';
+import { FactoryFlowPrPanel } from './FactoryFlowPrPanel.js';
 import { FactoryFlowTraceabilityPanel } from './FactoryFlowTraceabilityPanel.js';
 import { FactoryLiveTerminalButton } from './FactoryLiveTerminalButton.js';
 import {
@@ -89,6 +97,10 @@ interface FactoryFlowRoadmapModalProps {
     flowId: string,
     request: SaveFactoryReviewTriageRequest,
   ) => Promise<SaveFactoryReviewTriageResponse>;
+  onSavePrReview?: (
+    flowId: string,
+    request: SaveFactoryPrReviewRequest,
+  ) => Promise<SaveFactoryPrReviewResponse>;
   onCancelFlow?: (flowId: string) => Promise<void>;
   onViewMarkdown: (filePath: string) => void;
 }
@@ -254,6 +266,7 @@ export function FactoryFlowRoadmapModal({
   onRerunFlowStage,
   onReturnFlowStage,
   onSaveReviewTriage,
+  onSavePrReview,
   onCancelFlow,
   onViewMarkdown,
 }: FactoryFlowRoadmapModalProps) {
@@ -267,7 +280,7 @@ export function FactoryFlowRoadmapModal({
   const [detailsError, setDetailsError] = useState<string | null>(null);
   const [detailsRefreshTick, setDetailsRefreshTick] = useState(0);
   const [busyAction, setBusyAction] = useState<
-    'advance' | 'rerun' | 'return' | 'cancel' | 'triage' | null
+    'advance' | 'rerun' | 'return' | 'cancel' | 'triage' | 'pr' | null
   >(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [approvedNotes, setApprovedNotes] = useState('');
@@ -331,11 +344,11 @@ export function FactoryFlowRoadmapModal({
     return () => {
       controller.abort();
     };
-  }, [flow.id, flow.updatedAt, flow.reviewTriage?.updatedAt, detailsRefreshTick]);
+  }, [flow.id, flow.updatedAt, flow.reviewTriage?.updatedAt, flow.prReview?.updatedAt, detailsRefreshTick]);
 
   const runAction = useCallback(
     async (
-      action: 'advance' | 'rerun' | 'return' | 'cancel' | 'triage',
+      action: 'advance' | 'rerun' | 'return' | 'cancel' | 'triage' | 'pr',
       operation: () => Promise<void>,
       fallbackError: string,
       clearNotes = false,
@@ -570,6 +583,36 @@ export function FactoryFlowRoadmapModal({
     [currentDetails?.flow.updatedAt, flow.id, flow.updatedAt, onSaveReviewTriage],
   );
 
+  const handleSavePrReview = useCallback(
+    async (request: SaveFactoryPrReviewRequest) => {
+      const saveHandler = onSavePrReview ?? saveFactoryPrReview;
+      setActionError(null);
+      setBusyAction('pr');
+      try {
+        const saved = await saveHandler(flow.id, {
+          ...request,
+          expectedUpdatedAt: request.expectedUpdatedAt ?? currentDetails?.flow.updatedAt ?? flow.updatedAt,
+        });
+        setDetails(previous =>
+          previous && previous.flow.id === saved.flow.id
+            ? { ...previous, flow: saved.flow, prGate: saved.prGate }
+            : previous,
+        );
+        setDetailsRefreshTick(tick => tick + 1);
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : 'Não foi possível salvar os parâmetros revisados do Pull Request.';
+        setActionError(message);
+        throw error;
+      } finally {
+        setBusyAction(null);
+      }
+    },
+    [currentDetails?.flow.updatedAt, flow.id, flow.updatedAt, onSavePrReview],
+  );
+
   const handleOpenDiffLocation = useCallback((path: string, line: number) => {
     diffFocusCounterRef.current += 1;
     setDiffFocusTarget({
@@ -793,6 +836,7 @@ export function FactoryFlowRoadmapModal({
                         (nextStage !== 'pr' || canAdvanceToPr);
                       const reviewGate =
                         stage.id === 'review' ? currentDetails?.reviewGate : undefined;
+                      const prGate = stage.id === 'pr' ? currentDetails?.prGate : undefined;
                       const isReviewAdvanceBlockedByFindings = Boolean(
                         stage.id === 'review' &&
                         nextStage === 'pr' &&
@@ -967,12 +1011,52 @@ export function FactoryFlowRoadmapModal({
                                   {(stageRecord?.error ?? stageArtifactError)?.message}
                                 </p>
                               )}
+                              {stage.id === 'pr' && prGate && (
+                                <div className="mt-3 space-y-2 rounded-xl border border-line bg-page p-2.5 text-[11px]">
+                                  <div className="flex flex-wrap items-center justify-between gap-2">
+                                    <span className="inline-flex items-center gap-1 font-medium text-primary">
+                                      {prGate.confirmedForPublish && (
+                                        <ShieldCheck size={12} className="text-accent" />
+                                      )}
+                                      {prGate.confirmedForPublish
+                                        ? 'Publicação confirmada'
+                                        : 'Rascunho do PR preparado'}
+                                    </span>
+                                    <span className="font-mono text-[10px] text-accent">
+                                      {prGate.headBranch} → {prGate.baseBranch}
+                                    </span>
+                                  </div>
+                                  <p className="truncate font-medium text-secondary" title={prGate.title}>
+                                    {prGate.title}
+                                  </p>
+                                  <p className="text-[10px] text-muted">
+                                    {prGate.draft ? 'Draft PR' : 'PR padrão'} ·{' '}
+                                    {prGate.reviewers.length}{' '}
+                                    {prGate.reviewers.length === 1 ? 'reviewer' : 'reviewers'}
+                                    {prGate.jiraContext
+                                      ? prGate.updateJira
+                                        ? ` · Atualizar ${prGate.jiraContext.key}`
+                                        : ` · Sem comentário em ${prGate.jiraContext.key}`
+                                      : ''}
+                                  </p>
+                                  <button
+                                    type="button"
+                                    onClick={() => setActiveTab('pr')}
+                                    className="modal-button border-accent/35 px-2 py-1 text-[10px] text-accent hover:bg-selected"
+                                  >
+                                    {isCurrentStage && flow.state === 'waiting_action'
+                                      ? 'Revisar e publicar PR'
+                                      : 'Ver revisão do PR'}
+                                  </button>
+                                </div>
+                              )}
                               {stage.id === 'pr' &&
+                                !prGate &&
                                 isCurrentStage &&
                                 flow.state === 'waiting_action' && (
                                   <p className="mt-2 text-xs text-muted">
-                                    Code Review aprovado. Dispare manualmente a preparação/abertura
-                                    do Pull Request quando desejar.
+                                    Code Review aprovado. Dispare manualmente a preparação do Pull
+                                    Request (Etapa 1) antes da revisão humana pré-publicação.
                                   </p>
                                 )}
                             </div>
@@ -1041,14 +1125,20 @@ export function FactoryFlowRoadmapModal({
                                         'Não foi possível executar a etapa PR.',
                                       );
                                     }}
-                                    className="modal-button border-accent/40 bg-selected/60 px-2.5 py-1 text-[11px] text-accent hover:bg-selected disabled:opacity-60"
+                                    className={`modal-button px-2.5 py-1 text-[11px] disabled:opacity-60 ${
+                                      prGate
+                                        ? ''
+                                        : 'border-accent/40 bg-selected/60 text-accent hover:bg-selected'
+                                    }`}
                                   >
                                     {busyAction === 'rerun' ? (
                                       <Loader2 size={11} className="animate-spin" />
+                                    ) : prGate ? (
+                                      <RotateCcw size={11} />
                                     ) : (
                                       <GitPullRequest size={11} />
                                     )}
-                                    Executar etapa PR
+                                    {prGate ? 'Reexecutar preparação' : 'Executar etapa PR'}
                                   </button>
                                 )}
 
@@ -1420,6 +1510,55 @@ export function FactoryFlowRoadmapModal({
             ) : loadingDetails ? (
               <p role="status" className="text-xs text-muted">
                 Carregando findings do Code Review…
+              </p>
+            ) : detailsError ? (
+              <div className="space-y-2">
+                <p role="alert" className="text-xs text-danger">
+                  {detailsError}
+                </p>
+                <button
+                  type="button"
+                  className="modal-button"
+                  onClick={() => setDetailsRefreshTick(tick => tick + 1)}
+                >
+                  Tentar novamente
+                </button>
+              </div>
+            ) : null
+          )}
+        </div>
+
+        <div
+          id={`${tabId}-pr-panel`}
+          role="tabpanel"
+          aria-labelledby={`${tabId}-pr-tab`}
+          tabIndex={0}
+          hidden={activeTab !== 'pr'}
+          className="min-h-0 flex-1 overflow-y-auto bg-page p-5 sm:p-6"
+        >
+          {activeTab === 'pr' && (
+            currentDetails ? (
+              <FactoryFlowPrPanel
+                flow={currentDetails.flow}
+                prGate={currentDetails.prGate}
+                editable={
+                  currentDetails.flow.currentStage === 'pr' &&
+                  currentDetails.flow.state === 'waiting_action'
+                }
+                busyAction={busyAction}
+                onSavePrReview={handleSavePrReview}
+                onRunPrPreparation={async () => {
+                  await runAction(
+                    'rerun',
+                    () => onRerunFlowStage(flow.id, 'pr'),
+                    'Não foi possível executar a etapa PR.',
+                  );
+                }}
+                onViewMarkdown={onViewMarkdown}
+              />
+            ) : loadingDetails ? (
+              <p role="status" className="text-xs text-muted">
+                Carregando revisão do Pull Request…
               </p>
             ) : detailsError ? (
               <div className="space-y-2">

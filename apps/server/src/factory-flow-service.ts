@@ -22,6 +22,7 @@ import {
   RegisterFactoryFlowCheckpointRequestSchema,
   ReturnFactoryStageRequestSchema,
   RollbackFactoryFlowCheckpointRequestSchema,
+  SaveFactoryPrReviewRequestSchema,
   SaveFactoryReviewTriageRequestSchema,
   TransitionFactoryFlowRequestSchema,
   UpdateFactoryFlowWorktreeRequestSchema,
@@ -51,6 +52,8 @@ import {
   type FactoryPlanningApproval,
   type FactoryPlanningApprovalInput,
   type FactoryPlanningGate,
+  type FactoryPrGate,
+  type FactoryPrReview,
   type FactoryReviewGate,
   type FactoryReviewTriage,
   type FactoryReviewTriageInput,
@@ -59,11 +62,13 @@ import {
   type FactoryTriageGate,
   type FactoryWorktreeRetentionPolicy,
   type RollbackFactoryFlowCheckpointResponse,
+  type SaveFactoryPrReviewResponse,
   type SaveFactoryReviewTriageResponse,
   type TransitionFactoryFlowResponse,
 } from '@development-factory/shared';
 import { getFactoryDevelopmentChecksError } from './factory-development-checks.js';
 import { readFactoryIterationComparison } from './factory-flow-iterations.js';
+import { buildFactoryPrGateForFlow } from './factory-pr.js';
 import { readFactoryTraceabilityMatrix } from './factory-traceability.js';
 import {
   FactoryStageArtifactError,
@@ -354,6 +359,18 @@ function resolveReviewGateForFlow(
       findings: sidecar.findings,
       reviewTriage: flow.reviewTriage ?? null,
     });
+  } catch {
+    return undefined;
+  }
+}
+
+function resolvePrGateForFlow(
+  flow: FactoryFlow,
+  stages: FactoryFlowStage[],
+  artifacts: FactoryFlowArtifact[],
+): FactoryPrGate | undefined {
+  try {
+    return buildFactoryPrGateForFlow(flow, stages, artifacts);
   } catch {
     return undefined;
   }
@@ -735,6 +752,7 @@ export class FactoryFlowService {
       baseBranch: parsed.data.baseBranch ?? null,
       planningApproval: null,
       reviewTriage: null,
+      prReview: null,
       createdAt,
       updatedAt: createdAt,
       finishedAt: null,
@@ -808,6 +826,7 @@ export class FactoryFlowService {
       const triageGate = resolveTriageGateForFlow(flow, stages, artifacts);
       const planningGate = resolvePlanningGateForFlow(stages, artifacts);
       const reviewGate = resolveReviewGateForFlow(flow, stages, artifacts);
+      const prGate = resolvePrGateForFlow(flow, stages, artifacts);
 
       return {
         contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
@@ -821,6 +840,7 @@ export class FactoryFlowService {
         ...(triageGate ? { triageGate } : {}),
         ...(planningGate ? { planningGate } : {}),
         ...(reviewGate ? { reviewGate } : {}),
+        ...(prGate ? { prGate } : {}),
       };
     } catch (error) {
       throw mapUnexpectedError(error);
@@ -1926,10 +1946,145 @@ export class FactoryFlowService {
             parsed.data.expectedUpdatedAt,
           );
 
+      return {
+        contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+        flow: updatedFlow,
+        reviewGate,
+      };
+    }),
+  );
+} catch (error) {
+  throw mapUnexpectedError(error);
+}
+}
+
+  /**
+   * Valida os contratos de todas as etapas de um fluxo até o estágio atual (ou completo).
+   */
+  validateFlowStageContracts(
+    flowIdInput: string,
+    stages: readonly FactoryStageName[] = FACTORY_STAGE_ORDER,
+  ): void {
+    const flowId = this.parseFlowId(flowIdInput);
+    try {
+      assertStageContracts(
+        this.getFlow(flowId),
+        stages,
+        'Conclua todas as etapas com os artefatos salvos antes de prosseguir.',
+      );
+    } catch (error) {
+      throw mapUnexpectedError(error);
+    }
+  }
+
+  /**
+   * Persiste os parâmetros revisados pelo usuário na Etapa 2 do Bloco 06 (`pr`)
+   * antes da publicação determinística (sem executar `git push` nem abrir PR).
+   */
+  async savePrReview(
+    flowIdInput: string,
+    requestInput: unknown,
+  ): Promise<SaveFactoryPrReviewResponse> {
+    const flowId = this.parseFlowId(flowIdInput);
+    const parsed = SaveFactoryPrReviewRequestSchema.safeParse(requestInput);
+    if (!parsed.success) {
+      throw new FactoryFlowServiceError(
+        'FACTORY_FLOW_INVALID_INPUT',
+        'Os parâmetros revisados para o Pull Request são inválidos.',
+        400,
+        formatZodIssues(parsed.error),
+      );
+    }
+
+    try {
+      return await this.repository.withWriteLock(() =>
+        this.repository.runInTransaction(() => {
+          const flow = this.repository.getFlowById(flowId);
+          if (!flow) {
+            throw new FactoryFlowServiceError(
+              'FACTORY_FLOW_NOT_FOUND',
+              `Fluxo ${flowId} não encontrado.`,
+              404,
+            );
+          }
+
+          if (isFinalFactoryFlowState(flow.state)) {
+            throw new FactoryFlowServiceError(
+              'FACTORY_FLOW_INVALID_TRANSITION',
+              `Não é possível revisar o Pull Request de um fluxo no estado final ${flow.state}.`,
+              409,
+            );
+          }
+
+          if (
+            flow.currentStage !== 'pr' ||
+            flow.state !== 'waiting_action' ||
+            flow.currentSessionId !== null
+          ) {
+            throw new FactoryFlowServiceError(
+              'FACTORY_FLOW_CONFLICT',
+              'A revisão humana do Pull Request só pode ser salva quando o fluxo está aguardando decisão na etapa PR.',
+              409,
+            );
+          }
+
+          const details = this.getFlow(flowId);
+          const prArtifact =
+            getReadyFactoryStageArtifact(details, 'pr') ??
+            getLatestReadyFactoryStageArtifact(details, 'pr');
+          if (!prArtifact || !details.prGate) {
+            throw new FactoryFlowServiceError(
+              'FACTORY_FLOW_INVALID_STAGE_ADVANCE',
+              'Execute a Etapa 1 do Bloco 06 (preparação do PR) antes de revisar os parâmetros de publicação.',
+              409,
+            );
+          }
+
+          if (parsed.data.updateJira && details.prGate.jiraContext === null) {
+            throw new FactoryFlowServiceError(
+              'FACTORY_FLOW_INVALID_INPUT',
+              'Não há card do Jira vinculado a este fluxo para comentar ou atualizar.',
+              400,
+            );
+          }
+
+          const now = this.now();
+          const confirmedForPublish = Boolean(parsed.data.confirmPublish);
+          const prReview: FactoryPrReview = {
+            prArtifactId: prArtifact.id,
+            title: parsed.data.title,
+            description: parsed.data.description,
+            baseBranch: parsed.data.baseBranch,
+            draft: parsed.data.draft,
+            reviewers: parsed.data.reviewers,
+            updateJira: parsed.data.updateJira,
+            confirmedForPublish,
+            confirmedAt: confirmedForPublish ? now : null,
+            updatedAt: now,
+          };
+
+          const updatedFlow = this.repository.updateFlowPrReview(
+            flowId,
+            prReview,
+            parsed.data.expectedUpdatedAt,
+          );
+          const prGate = buildFactoryPrGateForFlow(
+            updatedFlow,
+            details.stages,
+            details.artifacts,
+          );
+          if (!prGate) {
+            throw new FactoryFlowServiceError(
+              'FACTORY_FLOW_INVALID_CONTRACT',
+              'Não foi possível consolidar os dados revisados do Pull Request.',
+              409,
+            );
+          }
+
           return {
             contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
             flow: updatedFlow,
-            reviewGate,
+            prGate,
           };
         }),
       );

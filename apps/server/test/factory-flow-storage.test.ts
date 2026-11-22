@@ -46,7 +46,7 @@ test('SqliteFactoryFlowRepository aplica migrations e persiste múltiplos fluxos
     const applied = repo1.getAppliedMigrations();
     assert.equal(applied.length, REVIEW_MIGRATIONS.length);
     assert.ok(applied.some(migration => migration.name === 'add_factory_flows'));
-    assert.equal(applied.at(-1)?.name, 'add_factory_review_triage');
+    assert.equal(applied.at(-1)?.name, 'add_factory_pr_review');
 
     const service1 = new FactoryFlowService(repo1, { now: createClock() });
 
@@ -1024,6 +1024,175 @@ test('Migration v8 e FactoryFlowService persistem planningApproval e expõem pla
       reloaded.stages.find(stage => stage.name === 'development')?.approvedNotes,
       approvalInput.notes,
     );
+    repo2.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(artifactsDir, { recursive: true, force: true });
+  }
+});
+
+test('migration v10 persiste revisão humana do PR (Etapa 2 do Bloco 06) com validação e idempotência', async () => {
+  const { dir, dbPath } = createTempDbPath();
+  const artifactsDir = mkdtempSync(join(tmpdir(), 'df-pr-review-artifacts-'));
+
+  try {
+    const repo1 = SqliteFactoryFlowRepository.open({ dbPath });
+    const service1 = new FactoryFlowService(repo1, { now: createClock() });
+
+    const specPath = join(artifactsDir, 'spec.md');
+    const planPath = join(artifactsDir, 'plan.md');
+    const devPath = join(artifactsDir, 'dev.md');
+    const testsPath = join(artifactsDir, 'tests.md');
+    const reviewPath = join(artifactsDir, 'review.md');
+    const prPath = join(artifactsDir, 'pr.md');
+
+    writeFileSync(specPath, triageMarkdown('Preparar revisão do PR.'));
+    writeFactoryStageSidecar(specPath, 'triage', {
+      jiraContext: { key: 'PAY-100', url: 'https://empresa.atlassian.net/browse/PAY-100' },
+    });
+    writeFileSync(planPath, planningMarkdown('Plano objetivo.'));
+    writeFactoryStageSidecar(planPath, 'planning');
+    writeFileSync(
+      devPath,
+      '# Relatório de Implementação\n## Arquivos alterados\n- src/a.ts\n## Resumo das mudanças\nOk.\n## Status dos passos do plano\n| Passo | Status | Obs |\n| --- | --- | --- |\n| 1 | Concluído | Ok |\n',
+    );
+    writeFactoryStageSidecar(devPath, 'development');
+    writeFileSync(
+      testsPath,
+      '# Relatório de Testes\n## Arquivos de teste alterados\n- test/a.test.ts\n## Comandos executados\n- npm test\n## Resultados e cobertura\nPASS\n',
+    );
+    writeFactoryStageSidecar(testsPath, 'tests');
+    writeFileSync(
+      reviewPath,
+      '# Relatório de Code Review\n## Resumo Executivo\nOk\n## Pontos Encontrados\nNenhum\n## Parecer Final\nVeredito: APROVADO PARA PR\n',
+    );
+    writeFactoryStageSidecar(reviewPath, 'review');
+    writeFileSync(
+      prPath,
+      '# Resumo do Pull Request\n## Resumo das Alterações\nAjuste entregue.\n## Validação e Evidências\n| ID | Critério de Aceite | Status | Evidência |\n| --- | --- | --- | --- |\n| CA1 | Validar fluxo | Atendido | npm test (exitCode 0) |\n## Dados do Pull Request\nTítulo: feat(pay): entrega inicial\n',
+    );
+    writeFactoryStageSidecar(prPath, 'pr', {
+      title: 'feat(pay): entrega inicial',
+      baseBranch: 'main',
+      headBranch: 'factory/pay-100',
+    });
+
+    const created = await service1.createFlow({
+      task: { inputType: 'jira_key', value: 'PAY-100', repoPath: '/tmp/repo' },
+    });
+
+    await service1.registerArtifact(created.flow.id, {
+      stage: 'triage',
+      kind: 'specification',
+      path: specPath,
+      status: 'ready',
+    });
+    await service1.transitionFlow(created.flow.id, { to: 'running', reason: 'Executando triagem' });
+    await service1.transitionFlow(created.flow.id, { to: 'waiting_action', reason: 'Triagem ok' });
+    await service1.advanceStage(created.flow.id);
+    await service1.registerArtifact(created.flow.id, {
+      stage: 'planning',
+      kind: 'plan',
+      path: planPath,
+      status: 'ready',
+    });
+    await service1.transitionFlow(created.flow.id, { to: 'waiting_action', reason: 'Plano ok' });
+    await service1.advanceStage(created.flow.id);
+    await service1.registerArtifact(created.flow.id, {
+      stage: 'development',
+      kind: 'implementation_report',
+      path: devPath,
+      status: 'ready',
+    });
+    await service1.advanceStage(created.flow.id);
+    await service1.registerArtifact(created.flow.id, {
+      stage: 'tests',
+      kind: 'test_report',
+      path: testsPath,
+      status: 'ready',
+    });
+    await service1.advanceStage(created.flow.id);
+    await service1.registerArtifact(created.flow.id, {
+      stage: 'review',
+      kind: 'review_report',
+      path: reviewPath,
+      status: 'ready',
+    });
+    await service1.advanceStage(created.flow.id);
+
+    // Sem artefato pr_summary pronto -> 409.
+    await assert.rejects(
+      () =>
+        service1.savePrReview(created.flow.id, {
+          title: 'feat(pay): título',
+          description: 'Descrição',
+          baseBranch: 'main',
+          draft: false,
+          reviewers: [],
+          updateJira: false,
+        }),
+      error =>
+        error instanceof FactoryFlowServiceError &&
+        error.code === 'FACTORY_FLOW_INVALID_STAGE_ADVANCE' &&
+        error.statusCode === 409,
+    );
+
+    await service1.registerArtifact(created.flow.id, {
+      stage: 'pr',
+      kind: 'pr_summary',
+      path: prPath,
+      status: 'ready',
+    });
+
+    const beforeEdit = service1.getFlow(created.flow.id);
+    assert.equal(beforeEdit.prGate?.title, 'feat(pay): entrega inicial');
+    assert.equal(beforeEdit.prGate?.baseBranch, 'main');
+    assert.equal(beforeEdit.prGate?.updateJira, true);
+    assert.equal(beforeEdit.prGate?.confirmedForPublish, false);
+
+    // Salva rascunho sem confirmar publicação.
+    const draftSaved = await service1.savePrReview(created.flow.id, {
+      title: 'feat(pay): título ajustado',
+      description: '## Alterações\n\nRevisado.',
+      baseBranch: 'release/2026',
+      draft: true,
+      reviewers: ['maria', 'time/pagamentos'],
+      updateJira: true,
+      confirmPublish: false,
+    });
+    assert.equal(draftSaved.prGate.confirmedForPublish, false);
+    assert.equal(draftSaved.prGate.confirmedAt, null);
+
+    // Confirma publicação explicitamente.
+    const confirmed = await service1.savePrReview(created.flow.id, {
+      title: 'feat(pay): título final',
+      description: '## Alterações\n\nConfirmado.',
+      baseBranch: 'main',
+      draft: false,
+      reviewers: ['maria'],
+      updateJira: false,
+      confirmPublish: true,
+    });
+    assert.equal(confirmed.prGate.confirmedForPublish, true);
+    assert.ok(confirmed.prGate.confirmedAt);
+    repo1.close();
+
+    // Executa migration v10 novamente para comprovar idempotência.
+    const rawDb = new DatabaseSync(dbPath);
+    try {
+      const v10Migration = REVIEW_MIGRATIONS.find(migration => migration.version === 10);
+      assert.ok(v10Migration);
+      v10Migration.up(rawDb);
+    } finally {
+      rawDb.close();
+    }
+
+    const repo2 = SqliteFactoryFlowRepository.open({ dbPath });
+    const service2 = new FactoryFlowService(repo2);
+    const reloaded = FactoryFlowDetailsSchema.parse(service2.getFlow(created.flow.id));
+    assert.deepEqual(reloaded.flow.prReview, confirmed.flow.prReview);
+    assert.equal(reloaded.prGate?.title, 'feat(pay): título final');
+    assert.equal(reloaded.prGate?.confirmedForPublish, true);
     repo2.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

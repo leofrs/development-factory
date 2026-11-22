@@ -14,6 +14,8 @@ import type {
   RerunFactoryStageRequest,
   ReturnFactoryStageRequest,
   ReviewRequest,
+  SaveFactoryPrReviewRequest,
+  SaveFactoryPrReviewResponse,
   SaveFactoryReviewTriageRequest,
   SaveFactoryReviewTriageResponse,
 } from '@development-factory/shared';
@@ -24,6 +26,7 @@ import {
   fetchFactoryFlows,
   rerunFactoryFlowStage,
   returnFactoryFlowStage,
+  saveFactoryPrReview,
   saveFactoryReviewTriage,
   type AdvanceFactoryFlowResult,
   type CreateFactoryFlowResult,
@@ -102,6 +105,10 @@ export interface BackgroundOperationsState {
     flowId: string,
     request: SaveFactoryReviewTriageRequest,
   ) => Promise<SaveFactoryReviewTriageResponse>;
+  savePrReview: (
+    flowId: string,
+    request: SaveFactoryPrReviewRequest,
+  ) => Promise<SaveFactoryPrReviewResponse>;
   cancelFlow: (flowId: string, request?: CancelFactoryFlowRequest) => Promise<FactoryFlow>;
   openTerminal: (sessionId: string, options?: OpenTerminalOptions) => boolean;
   openFlowTerminal: (flowId: string, options?: OpenTerminalOptions) => boolean;
@@ -800,6 +807,18 @@ export function useBackgroundOperations(): BackgroundOperationsState {
     [upsertFactoryFlow],
   );
 
+  const savePrReview = useCallback(
+    async (
+      flowId: string,
+      request: SaveFactoryPrReviewRequest,
+    ): Promise<SaveFactoryPrReviewResponse> => {
+      const saved = await saveFactoryPrReview(flowId, request);
+      upsertFactoryFlow(saved.flow);
+      return saved;
+    },
+    [upsertFactoryFlow],
+  );
+
   const openTerminal = useCallback((sessionId: string, options?: OpenTerminalOptions) => {
     const existing = sessionsMapRef.current.get(sessionId);
     if (!existing || (options?.liveOnly && existing.status !== 'running')) {
@@ -887,6 +906,7 @@ export function useBackgroundOperations(): BackgroundOperationsState {
     rerunFlowStage,
     returnFlowStage,
     saveReviewTriage,
+    savePrReview,
     cancelFlow,
     openTerminal,
     openFlowTerminal,

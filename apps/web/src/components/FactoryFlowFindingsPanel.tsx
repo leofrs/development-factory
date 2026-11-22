@@ -31,7 +31,7 @@ interface FactoryFlowFindingsPanelProps {
   reviewGate: FactoryReviewGate | null | undefined;
   editable: boolean;
   canReturnToTests: boolean;
-  busyAction: 'advance' | 'rerun' | 'return' | 'cancel' | 'triage' | null;
+  busyAction: 'advance' | 'rerun' | 'return' | 'cancel' | 'triage' | 'pr' | null;
   onSaveTriage: (decisions: FactoryReviewFindingDecision[]) => Promise<void>;
   onReturnToStage: (targetStage: ReturnFactoryTargetStage, approvedNotes?: string) => Promise<void>;
   onAdvanceToPr: () => Promise<void>;

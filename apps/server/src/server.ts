@@ -13,6 +13,8 @@ import {
   ReviewDestinationSchema,
   RollbackFactoryFlowCheckpointRequestSchema,
   RollbackFactoryFlowCheckpointResponseSchema,
+  SaveFactoryPrReviewRequestSchema,
+  SaveFactoryPrReviewResponseSchema,
   SaveFactoryReviewTriageRequestSchema,
   SaveFactoryReviewTriageResponseSchema,
   isFinalFactoryFlowState,
@@ -850,6 +852,46 @@ async function handleFactoryFlowApiRequest(
         flow: saved.flow,
       });
       res.writeHead(200).end(JSON.stringify(SaveFactoryReviewTriageResponseSchema.parse(saved)));
+      return;
+    }
+
+    const prReviewMatch = /^\/api\/factory\/flows\/([^/]+)\/pr-review$/.exec(url.pathname);
+    if (req.method === 'POST' && prReviewMatch?.[1] !== undefined) {
+      const flowId = decodeRouteParam(prReviewMatch[1]);
+      if (flowId === null) {
+        sendFactoryFlowApiError(res, 400, {
+          code: 'FACTORY_FLOW_INVALID_INPUT',
+          message: 'Identificador de fluxo inválido.',
+        });
+        return;
+      }
+      const body = await readJsonBody(req);
+      const parsedBody = SaveFactoryPrReviewRequestSchema.safeParse(body);
+      if (!parsedBody.success) {
+        sendFactoryFlowApiError(res, 400, {
+          code: 'FACTORY_FLOW_INVALID_INPUT',
+          message: 'Os parâmetros revisados para o Pull Request são inválidos.',
+          details: parsedBody.error.issues.map(issue => issue.message),
+        });
+        return;
+      }
+      const currentDetails = factoryFlowService.getFlow(flowId);
+      if (
+        currentDetails.flow.currentSessionId &&
+        sessionManager.getSession(currentDetails.flow.currentSessionId)?.status === 'running'
+      ) {
+        sendFactoryFlowApiError(res, 409, {
+          code: 'FACTORY_FLOW_CONFLICT',
+          message: 'Encerre a sessão em execução antes de revisar os parâmetros do Pull Request.',
+        });
+        return;
+      }
+      const saved = await factoryFlowService.savePrReview(flowId, parsedBody.data);
+      sessionManager.emitAppEvent({
+        type: 'factory_flow.updated',
+        flow: saved.flow,
+      });
+      res.writeHead(200).end(JSON.stringify(SaveFactoryPrReviewResponseSchema.parse(saved)));
       return;
     }
 

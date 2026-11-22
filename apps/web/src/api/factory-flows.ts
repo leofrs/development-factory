@@ -11,6 +11,7 @@ import {
   FactoryFlowTraceabilityMatrixSchema,
   FactoryPreflightResponseSchema,
   RollbackFactoryFlowCheckpointResponseSchema,
+  SaveFactoryPrReviewResponseSchema,
   SaveFactoryReviewTriageResponseSchema,
   TransitionFactoryFlowResponseSchema,
 } from '@development-factory/shared';
@@ -30,6 +31,8 @@ import type {
   ReturnFactoryStageRequest,
   RollbackFactoryFlowCheckpointRequest,
   RollbackFactoryFlowCheckpointResponse,
+  SaveFactoryPrReviewRequest,
+  SaveFactoryPrReviewResponse,
   SaveFactoryReviewTriageRequest,
   SaveFactoryReviewTriageResponse,
 } from '@development-factory/shared';
@@ -680,6 +683,47 @@ export async function saveFactoryReviewTriage(
     if (!parsed.success) {
       throw new FactoryFlowApiError(
         'Formato inesperado ao salvar a triagem dos apontamentos do Code Review.',
+        'FACTORY_FLOW_INVALID_RESPONSE',
+        response.status,
+      );
+    }
+
+    return parsed.data;
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw error;
+    }
+    throw toFactoryFlowRequestError(error, fallbackMessage);
+  }
+}
+
+/** Salva ou confirma os parâmetros revisados pelo usuário na Etapa 2 do Bloco 06 (`pr`). */
+export async function saveFactoryPrReview(
+  flowId: string,
+  request: SaveFactoryPrReviewRequest,
+  signal?: AbortSignal,
+): Promise<SaveFactoryPrReviewResponse> {
+  const fallbackMessage = 'Não foi possível salvar os parâmetros revisados do Pull Request.';
+  try {
+    const response = await fetch(
+      `${API_BASE_URL}/api/factory/flows/${encodeURIComponent(flowId)}/pr-review`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(request),
+        cache: 'no-store',
+        signal,
+      },
+    );
+    const payload = await parseJsonResponse(response);
+    if (!response.ok) {
+      throw extractApiError(payload, response.status, fallbackMessage);
+    }
+
+    const parsed = SaveFactoryPrReviewResponseSchema.safeParse(payload);
+    if (!parsed.success) {
+      throw new FactoryFlowApiError(
+        'Formato inesperado ao salvar os parâmetros revisados do Pull Request.',
         'FACTORY_FLOW_INVALID_RESPONSE',
         response.status,
       );

@@ -14,6 +14,7 @@ import {
   type FactoryFlowStage,
   type FactoryFlowState,
   type FactoryFlowTransitionCommand,
+  type FactoryPrReview,
   type FactoryReviewTriage,
   type FactoryStageName,
   type FactoryStageState,
@@ -96,6 +97,7 @@ interface FactoryFlowRow {
   base_branch: string | null;
   planning_approval_json: string | null;
   review_triage_json: string | null;
+  pr_review_json: string | null;
   created_at: string;
   updated_at: string;
   finished_at: string | null;
@@ -194,6 +196,10 @@ function rowToFlow(row: FactoryFlowRow): FactoryFlow {
       row.review_triage_json === null
         ? null
         : parseJson(row.review_triage_json, `triagem de findings do fluxo ${row.id}`),
+    prReview:
+      row.pr_review_json === null
+        ? null
+        : parseJson(row.pr_review_json, `revisão de PR do fluxo ${row.id}`),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     finishedAt: row.finished_at,
@@ -590,6 +596,7 @@ export class SqliteFactoryFlowRepository {
                base_branch = ?,
                planning_approval_json = ?,
                review_triage_json = ?,
+               pr_review_json = ?,
                updated_at = ?,
                finished_at = ?,
                transitions_json = ?,
@@ -609,6 +616,7 @@ export class SqliteFactoryFlowRepository {
           updated.baseBranch,
           updated.planningApproval ? JSON.stringify(updated.planningApproval) : null,
           updated.reviewTriage ? JSON.stringify(updated.reviewTriage) : null,
+          updated.prReview ? JSON.stringify(updated.prReview) : null,
           updated.updatedAt,
           updated.finishedAt,
           JSON.stringify(updated.transitions),
@@ -729,6 +737,43 @@ export class SqliteFactoryFlowRepository {
       this.db
         .prepare('UPDATE factory_flows SET review_triage_json = ? WHERE id = ?')
         .run(next.data.reviewTriage ? JSON.stringify(next.data.reviewTriage) : null, flowId);
+
+      return next.data;
+    });
+  }
+
+  updateFlowPrReview(
+    flowId: string,
+    prReview: FactoryPrReview | null,
+    expectedUpdatedAt?: string,
+  ): FactoryFlow {
+    return this.runInTransaction(() => {
+      const current = this.getFlowById(flowId);
+      if (!current) {
+        throw new ReviewStorageError('STORAGE_NOT_FOUND', `Fluxo ${flowId} não encontrado.`);
+      }
+
+      if (expectedUpdatedAt !== undefined && current.updatedAt !== expectedUpdatedAt) {
+        throw new ReviewStorageError(
+          'STORAGE_CONFLICT',
+          `O fluxo ${flowId} foi alterado por outra operação concorrente.`,
+        );
+      }
+
+      const next = FactoryFlowSchema.safeParse({
+        ...current,
+        prReview,
+      });
+      if (!next.success) {
+        throw new ReviewStorageError(
+          'STORAGE_INVALID_INPUT',
+          `Os parâmetros de revisão do PR do fluxo são inválidos: ${next.error.issues.map(issue => issue.message).join('; ')}`,
+        );
+      }
+
+      this.db
+        .prepare('UPDATE factory_flows SET pr_review_json = ? WHERE id = ?')
+        .run(next.data.prReview ? JSON.stringify(next.data.prReview) : null, flowId);
 
       return next.data;
     });
@@ -1105,12 +1150,13 @@ export class SqliteFactoryFlowRepository {
           base_branch,
           planning_approval_json,
           review_triage_json,
+          pr_review_json,
           created_at,
           updated_at,
           finished_at,
           transitions_json,
           error_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         flow.id,
@@ -1131,6 +1177,7 @@ export class SqliteFactoryFlowRepository {
         flow.baseBranch,
         flow.planningApproval ? JSON.stringify(flow.planningApproval) : null,
         flow.reviewTriage ? JSON.stringify(flow.reviewTriage) : null,
+        flow.prReview ? JSON.stringify(flow.prReview) : null,
         flow.createdAt,
         flow.updatedAt,
         flow.finishedAt,

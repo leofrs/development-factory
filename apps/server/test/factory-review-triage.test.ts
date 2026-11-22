@@ -592,7 +592,7 @@ test('API REST /api/factory/flows/:id/review-triage e sessão Review pausada com
     const activeSession = sessionManager.getSession(returned.session.sessionId);
     assert.ok(activeSession);
     const deadline = Date.now() + 5000;
-    while (!activeSession.buffer.replay().includes('READY:') && Date.now() < deadline) {
+    while (!/READY:[^\r\n]*\r?\n/.test(activeSession.buffer.replay()) && Date.now() < deadline) {
       await new Promise(resolve => {
         setTimeout(resolve, 25);
       });

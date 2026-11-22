@@ -4,6 +4,9 @@ import {
   FACTORY_FLOW_CONTRACT_VERSION,
   FACTORY_MAX_AUTO_ITERATIONS,
   FACTORY_STAGE_ORDER,
+  normalizePrReviewerInput,
+  parsePrReviewersInput,
+  validateFactoryPrReviewForm,
 } from '@development-factory/shared';
 import type {
   FactoryFlow,
@@ -20,6 +23,7 @@ import {
   fetchFactoryPreflight,
   returnFactoryFlowStage,
   rollbackFactoryFlowCheckpoint,
+  saveFactoryPrReview,
   saveFactoryReviewTriage,
 } from '../src/api/factory-flows';
 import { parseAppEventMessage } from '../src/api/sessions';
@@ -526,4 +530,144 @@ test('cliente HTTP factory-flows cria, lista, detalha e cancela fluxos com valid
   );
 
   assert.equal(requests.length, 7);
+});
+
+test('validateFactoryPrReviewForm e saveFactoryPrReview validam campos e enviam revisão do PR', async () => {
+  assert.equal(normalizePrReviewerInput('  @alice '), 'alice');
+  assert.deepEqual(parsePrReviewersInput('@alice, bob  Alice; org/team'), [
+    'alice',
+    'bob',
+    'org/team',
+  ]);
+
+  const invalid = validateFactoryPrReviewForm({
+    title: '   ',
+    description: '',
+    baseBranch: 'HEAD',
+    draft: false,
+    reviewers: ['alice', 'Alice'],
+    updateJira: false,
+  });
+  assert.equal(invalid.valid, false);
+  if (!invalid.valid) {
+    assert.ok(invalid.errors.title);
+    assert.ok(invalid.errors.description);
+    assert.ok(invalid.errors.baseBranch);
+    assert.ok(invalid.errors.reviewers);
+  }
+
+  const invalidBranch = validateFactoryPrReviewForm({
+    title: 'feat(pr): revisar parâmetros',
+    description: '## Resumo\nTudo ok.',
+    baseBranch: 'feat..bad',
+    draft: true,
+    reviewers: ['alice'],
+    updateJira: true,
+  });
+  assert.equal(invalidBranch.valid, false);
+  if (!invalidBranch.valid) {
+    assert.ok(invalidBranch.errors.baseBranch);
+  }
+
+  const valid = validateFactoryPrReviewForm({
+    title: '  feat(pr): revisar parâmetros  ',
+    description: '## Resumo\nTudo ok.',
+    baseBranch: 'main',
+    draft: true,
+    reviewers: ['@alice', 'org/team'],
+    updateJira: true,
+  });
+  assert.equal(valid.valid, true);
+  if (valid.valid) {
+    assert.equal(valid.data.title, 'feat(pr): revisar parâmetros');
+    assert.deepEqual(valid.data.reviewers, ['alice', 'org/team']);
+  }
+
+  const prArtifactId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+  const flow = makeFlow({
+    currentStage: 'pr',
+    state: 'waiting_action',
+    currentSessionId: null,
+    transitions: [
+      {
+        from: 'queued',
+        to: 'running',
+        stage: 'triage',
+        at: '2026-11-19T12:00:00.000Z',
+        reason: 'Sessão iniciada',
+      },
+      {
+        from: 'running',
+        to: 'waiting_action',
+        stage: 'pr',
+        at: '2026-11-19T12:00:00.000Z',
+        reason: 'Rascunho do PR preparado',
+      },
+    ],
+    prReview: {
+      prArtifactId,
+      title: 'feat(pr): revisar parâmetros',
+      description: '## Resumo\nTudo ok.',
+      baseBranch: 'main',
+      draft: true,
+      reviewers: ['alice', 'org/team'],
+      updateJira: true,
+      confirmedForPublish: true,
+      confirmedAt: '2026-11-19T12:05:00.000Z',
+      updatedAt: '2026-11-19T12:05:00.000Z',
+    },
+  });
+
+  const previousFetch = globalThis.fetch;
+  const requests: Array<{ url: string; method: string; body: string }> = [];
+  globalThis.fetch = (async (input, init) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+    requests.push({ url, method: init?.method ?? 'GET', body: String(init?.body ?? '') });
+    return new Response(
+      JSON.stringify({
+        contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+        flow,
+        prGate: {
+          prArtifactId,
+          prReportPath: '/tmp/artifacts/pr-summary.md',
+          iteration: 1,
+          title: 'feat(pr): revisar parâmetros',
+          description: '## Resumo\nTudo ok.',
+          summary: 'Resumo.',
+          baseBranch: 'main',
+          headBranch: 'factory/fluxo-1',
+          draft: true,
+          reviewers: ['alice', 'org/team'],
+          updateJira: true,
+          confirmedForPublish: true,
+          confirmedAt: '2026-11-19T12:05:00.000Z',
+          updatedAt: '2026-11-19T12:05:00.000Z',
+          draftTitle: 'feat(pr): rascunho',
+          draftDescription: '## Resumo\nRascunho.',
+          draftBaseBranch: 'main',
+          satisfiedAcceptanceCriteriaIds: ['CA1'],
+          evidence: ['npm test (exitCode 0)'],
+          jiraContext: { key: 'PROD-10', url: 'https://empresa.atlassian.net/browse/PROD-10' },
+        },
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+  }) as typeof fetch;
+
+  try {
+    const saved = await saveFactoryPrReview(flow.id, {
+      title: 'feat(pr): revisar parâmetros',
+      description: '## Resumo\nTudo ok.',
+      baseBranch: 'main',
+      draft: true,
+      reviewers: ['alice', 'org/team'],
+      updateJira: true,
+      confirmPublish: true,
+    });
+    assert.equal(saved.prGate.confirmedForPublish, true);
+    assert.equal(requests.length, 1);
+    assert.match(requests[0]?.url ?? '', /\/pr-review$/);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
 });

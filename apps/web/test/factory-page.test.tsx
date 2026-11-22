@@ -168,6 +168,8 @@ test('Roadmap navega pelo diff paginado e compara evidências e checkpoints de c
     [window.HTMLElement.prototype, 'close', function (this: HTMLElement) {
       this.removeAttribute('open');
     }],
+    [window.HTMLElement.prototype, 'attachEvent', () => undefined],
+    [window.HTMLElement.prototype, 'detachEvent', () => undefined],
   ];
   for (const [target, name, value] of overrides) {
     const original = Object.getOwnPropertyDescriptor(target, name);
@@ -1738,6 +1740,8 @@ test('FactoryFlowRoadmapModal filtra findings por severidade, salta para linha n
     [window.HTMLElement.prototype, 'close', function (this: HTMLElement) {
       this.removeAttribute('open');
     }],
+    [window.HTMLElement.prototype, 'attachEvent', () => undefined],
+    [window.HTMLElement.prototype, 'detachEvent', () => undefined],
   ];
   for (const [target, name, value] of overrides) {
     const original = Object.getOwnPropertyDescriptor(target, name);
@@ -2182,6 +2186,394 @@ test('FactoryFlowRoadmapModal filtra findings por severidade, salta para linha n
     await clickButton('Findings do Review', tabs);
     await clickButton('Avançar para PR');
     assert.equal(advancedCount, 1);
+  } finally {
+    await act(() => root.unmount());
+  }
+});
+
+test('FactoryFlowRoadmapModal + FactoryFlowPrPanel pré-carregam Etapa 1, validam campos e exigem confirmação explícita antes do envio', async context => {
+  const window = parseHTML('<!doctype html><html><body><div id="pr-root"></div></body></html>');
+  const { document } = window;
+  const originalFetch = globalThis.fetch;
+  const overrides: Array<[object, string, unknown]> = [
+    [globalThis, 'window', window],
+    [globalThis, 'document', document],
+    [globalThis, 'HTMLElement', window.HTMLElement],
+    [globalThis, 'IS_REACT_ACT_ENVIRONMENT', true],
+    [window.HTMLElement.prototype, 'showModal', function (this: HTMLElement) {
+      this.setAttribute('open', '');
+    }],
+    [window.HTMLElement.prototype, 'close', function (this: HTMLElement) {
+      this.removeAttribute('open');
+    }],
+    [window.HTMLElement.prototype, 'attachEvent', () => undefined],
+    [window.HTMLElement.prototype, 'detachEvent', () => undefined],
+  ];
+  for (const [target, name, value] of overrides) {
+    const original = Object.getOwnPropertyDescriptor(target, name);
+    Object.defineProperty(target, name, { configurable: true, value, writable: true });
+    context.after(() => {
+      if (original) {
+        Object.defineProperty(target, name, original);
+      } else {
+        Reflect.deleteProperty(target, name);
+      }
+    });
+  }
+  context.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  context.mock.method(window.HTMLElement.prototype, 'focus', () => undefined);
+
+  const flowId = '11111111-1111-4111-8111-111111111111';
+  const prArtifactId = 'dddddddd-3333-4333-8333-333333333306';
+  const baseFlow = createFlow({
+    id: flowId,
+    title: 'AUTH-101 · Revisão de PR',
+    currentStage: 'pr',
+    state: 'waiting_action',
+    currentSessionId: null,
+    iteration: 1,
+    lastReviewVerdict: 'approved',
+    worktreePath: '/tmp/worktree-auth-101',
+    branchName: 'factory/auth-101',
+    baseBranch: 'main',
+    updatedAt: '2026-11-22T12:00:00.000Z',
+  });
+
+  let currentDetails: FactoryFlowDetails = {
+    contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+    flow: baseFlow,
+    stages: [
+      {
+        contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+        id: 'cccccccc-3333-4333-8333-333333333301',
+        flowId,
+        name: 'triage',
+        state: 'completed',
+        sessionId: null,
+        reportPath: '/tmp/artifacts/spec.md',
+        sessionPath: null,
+        createdAt: '2026-11-22T11:50:00.000Z',
+        updatedAt: '2026-11-22T11:51:00.000Z',
+        startedAt: '2026-11-22T11:50:00.000Z',
+        finishedAt: '2026-11-22T11:51:00.000Z',
+        error: null,
+      },
+      {
+        contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+        id: 'cccccccc-3333-4333-8333-333333333302',
+        flowId,
+        name: 'planning',
+        state: 'completed',
+        sessionId: null,
+        reportPath: '/tmp/artifacts/plan.md',
+        sessionPath: null,
+        createdAt: '2026-11-22T11:51:00.000Z',
+        updatedAt: '2026-11-22T11:52:00.000Z',
+        startedAt: '2026-11-22T11:51:00.000Z',
+        finishedAt: '2026-11-22T11:52:00.000Z',
+        error: null,
+      },
+      {
+        contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+        id: 'cccccccc-3333-4333-8333-333333333303',
+        flowId,
+        name: 'development',
+        state: 'completed',
+        sessionId: null,
+        reportPath: '/tmp/artifacts/dev.md',
+        sessionPath: null,
+        createdAt: '2026-11-22T11:52:00.000Z',
+        updatedAt: '2026-11-22T11:53:00.000Z',
+        startedAt: '2026-11-22T11:52:00.000Z',
+        finishedAt: '2026-11-22T11:53:00.000Z',
+        error: null,
+      },
+      {
+        contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+        id: 'cccccccc-3333-4333-8333-333333333304',
+        flowId,
+        name: 'tests',
+        state: 'completed',
+        sessionId: null,
+        reportPath: '/tmp/artifacts/tests.md',
+        sessionPath: null,
+        createdAt: '2026-11-22T11:53:00.000Z',
+        updatedAt: '2026-11-22T11:54:00.000Z',
+        startedAt: '2026-11-22T11:53:00.000Z',
+        finishedAt: '2026-11-22T11:54:00.000Z',
+        error: null,
+      },
+      {
+        contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+        id: 'cccccccc-3333-4333-8333-333333333305',
+        flowId,
+        name: 'review',
+        state: 'completed',
+        sessionId: null,
+        reportPath: '/tmp/artifacts/review.md',
+        sessionPath: null,
+        createdAt: '2026-11-22T11:54:00.000Z',
+        updatedAt: '2026-11-22T11:55:00.000Z',
+        startedAt: '2026-11-22T11:54:00.000Z',
+        finishedAt: '2026-11-22T11:55:00.000Z',
+        error: null,
+      },
+      {
+        contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+        id: 'cccccccc-3333-4333-8333-333333333306',
+        flowId,
+        name: 'pr',
+        state: 'waiting_action',
+        sessionId: null,
+        reportPath: '/tmp/artifacts/pr-summary.md',
+        sessionPath: null,
+        createdAt: '2026-11-22T11:55:00.000Z',
+        updatedAt: '2026-11-22T12:00:00.000Z',
+        startedAt: '2026-11-22T11:55:00.000Z',
+        finishedAt: null,
+        error: null,
+      },
+    ],
+    artifacts: [
+      {
+        contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+        id: prArtifactId,
+        flowId,
+        stage: 'pr',
+        sessionId: null,
+        kind: 'pr_summary',
+        format: 'markdown',
+        path: '/tmp/artifacts/pr-summary.md',
+        status: 'ready',
+        iteration: 1,
+        createdAt: '2026-11-22T11:59:00.000Z',
+        updatedAt: '2026-11-22T11:59:00.000Z',
+        error: null,
+      },
+    ],
+    worktreePath: '/tmp/worktree-auth-101',
+    branchName: 'factory/auth-101',
+    baseBranch: 'main',
+    checkpoints: [],
+    prGate: {
+      prArtifactId,
+      prReportPath: '/tmp/artifacts/pr-summary.md',
+      iteration: 1,
+      title: 'feat(auth): renovar token JWT expirado',
+      description: '## Resumo\nRenovação automática de JWT.\n\n| CA | Status |\n| --- | --- |\n| CA1 | Atendido |',
+      summary: 'Renovação automática de JWT.',
+      baseBranch: 'main',
+      headBranch: 'factory/auth-101',
+      draft: false,
+      reviewers: [],
+      updateJira: true,
+      confirmedForPublish: false,
+      confirmedAt: null,
+      updatedAt: null,
+      draftTitle: 'feat(auth): renovar token JWT expirado',
+      draftDescription:
+        '## Resumo\nRenovação automática de JWT.\n\n| CA | Status |\n| --- | --- |\n| CA1 | Atendido |',
+      draftBaseBranch: 'main',
+      satisfiedAcceptanceCriteriaIds: ['CA1'],
+      evidence: ['npm test (exitCode 0)'],
+      jiraContext: {
+        key: 'AUTH-101',
+        url: 'https://empresa.atlassian.net/browse/AUTH-101',
+      },
+    },
+  };
+
+  const savedPayloads: Array<Record<string, unknown>> = [];
+  globalThis.fetch = (() => Promise.resolve(Response.json(currentDetails))) as typeof fetch;
+
+  const container = document.getElementById('pr-root');
+  assert(container);
+  const root = createRoot(container);
+
+  const visiblePanel = () => {
+    const panel = container.querySelector('[role="tabpanel"]:not([hidden])');
+    assert(panel);
+    return panel;
+  };
+
+  const clickButton = async (label: string, within: ParentNode = visiblePanel()) => {
+    const button = [...within.querySelectorAll<HTMLButtonElement>('button')].find(
+      item => item.textContent?.trim().startsWith(label),
+    );
+    assert(button, `Botão ausente: ${label}`);
+    await act(async () => {
+      button.click();
+    });
+  };
+
+  const setInputValue = async (
+    element: HTMLInputElement | HTMLTextAreaElement,
+    value: string,
+  ) => {
+    await act(async () => {
+      const valueSetter = Object.getOwnPropertyDescriptor(
+        Object.getPrototypeOf(element),
+        'value',
+      )?.set;
+      assert(valueSetter);
+      Object.assign(element, { attachEvent: () => undefined, detachEvent: () => undefined });
+      element.dispatchEvent(new window.Event('focusin', { bubbles: true }));
+      valueSetter.call(element, value);
+      element.dispatchEvent(new window.Event('keyup', { bubbles: true }));
+      element.dispatchEvent(new window.Event('input', { bubbles: true }));
+    });
+  };
+
+  try {
+    await act(async () => {
+      root.render(
+        createElement(FactoryFlowRoadmapModal, {
+          flow: baseFlow,
+          initialDetails: currentDetails,
+          onClose: noop,
+          onOpenFlowTerminal: unavailableTerminal,
+          onAdvanceFlowStage: noopAsync,
+          onRerunFlowStage: noopAsync,
+          onSavePrReview: async (_id, request) => {
+            savedPayloads.push(request);
+            const now = '2026-11-22T12:05:00.000Z';
+            const updatedFlow: FactoryFlow = {
+              ...baseFlow,
+              prReview: {
+                prArtifactId,
+                title: request.title,
+                description: request.description,
+                baseBranch: request.baseBranch,
+                draft: request.draft,
+                reviewers: request.reviewers,
+                updateJira: request.updateJira,
+                confirmedForPublish: Boolean(request.confirmPublish),
+                confirmedAt: request.confirmPublish ? now : null,
+                updatedAt: now,
+              },
+            };
+            assert(currentDetails.prGate);
+            const nextGate = {
+              ...currentDetails.prGate,
+              title: request.title,
+              description: request.description,
+              baseBranch: request.baseBranch,
+              draft: request.draft,
+              reviewers: request.reviewers,
+              updateJira: request.updateJira,
+              confirmedForPublish: Boolean(request.confirmPublish),
+              confirmedAt: request.confirmPublish ? now : null,
+              updatedAt: now,
+            };
+            currentDetails = {
+              ...currentDetails,
+              flow: updatedFlow,
+              prGate: nextGate,
+            };
+            return {
+              contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+              flow: updatedFlow,
+              prGate: nextGate,
+            };
+          },
+          onViewMarkdown: noop,
+        }),
+      );
+    });
+
+    // Card da Etapa 06 no Roadmap mostra resumo do rascunho preparado e botão para revisão.
+    assert.match(visiblePanel().textContent ?? '', /Rascunho do PR preparado/);
+    await clickButton('Revisar e publicar PR');
+
+    const tabs = container.querySelector('[role="tablist"]');
+    assert(tabs);
+    assert.equal(tabs.querySelector('[aria-selected="true"]')?.textContent, 'Revisão do PR');
+
+    const panel = visiblePanel();
+    const titleInput = panel.querySelector<HTMLInputElement>('input[placeholder*="feat(escopo)"]');
+    const baseBranchInput = panel.querySelector<HTMLInputElement>('input[placeholder="main"]');
+    const descriptionArea = panel.querySelector<HTMLTextAreaElement>('textarea');
+    const reviewerInput = panel.querySelector<HTMLInputElement>(
+      'input[placeholder*="Adicione usuários"]',
+    );
+    const checkboxes = [...panel.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')];
+    assert(titleInput);
+    assert(baseBranchInput);
+    assert(descriptionArea);
+    assert(reviewerInput);
+    assert.equal(checkboxes.length, 2);
+    const [draftCheckbox, jiraCheckbox] = checkboxes;
+    assert(draftCheckbox);
+    assert(jiraCheckbox);
+
+    // Pré-carrega os dados gerados pela Etapa 1.
+    assert.equal(titleInput.value, 'feat(auth): renovar token JWT expirado');
+    assert.equal(baseBranchInput.value, 'main');
+    assert.equal(draftCheckbox.checked, false);
+    assert.equal(jiraCheckbox.checked, true);
+    assert.match(panel.textContent ?? '', /AUTH-101/);
+
+    // Pré-visualização Markdown comprova que a descrição pré-carregada está preenchida.
+    await clickButton('Pré-visualizar');
+    assert.match(
+      panel.querySelector('[aria-label="Pré-visualização da descrição Markdown"]')?.textContent ??
+        '',
+      /Renovação automática de JWT/,
+    );
+    await clickButton('Editar');
+
+    // Validação bloqueia envio com título vazio e branch destino inválida antes de chamar backend.
+    await setInputValue(titleInput, '   ');
+    await setInputValue(baseBranchInput, 'HEAD');
+    await clickButton('Revisar e confirmar publicação');
+    assert.equal(savedPayloads.length, 0);
+    assert.match(panel.textContent ?? '', /Informe o título do Pull Request/);
+    assert.match(panel.textContent ?? '', /Informe uma branch destino válida/);
+
+    // Edita campos válidos, adiciona reviewers e marca Draft PR.
+    await setInputValue(titleInput, 'feat(auth): renovar token JWT com janela segura');
+    await setInputValue(baseBranchInput, 'release/auth');
+    await setInputValue(reviewerInput, '@alice, core/security');
+    await clickButton('Adicionar');
+    assert.match(panel.textContent ?? '', /@alice/);
+    assert.match(panel.textContent ?? '', /@core\/security/);
+    await act(async () => {
+      draftCheckbox.checked = true;
+      draftCheckbox.dispatchEvent(new window.Event('click', { bubbles: true }));
+    });
+
+    // Salvar revisão envia confirmPublish=false e NÃO abre/dispara publicação irreversível.
+    const form = panel.querySelector('form');
+    assert(form);
+    await act(async () => {
+      form.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+    });
+    assert.equal(savedPayloads.length, 1);
+    assert.equal(savedPayloads[0]?.confirmPublish, false);
+    assert.equal(savedPayloads[0]?.baseBranch, 'release/auth');
+    assert.equal(savedPayloads[0]?.draft, true);
+    assert.deepEqual(savedPayloads[0]?.reviewers, ['alice', 'core/security']);
+
+    // Confirmação explícita: exige clique em "Revisar e confirmar publicação" e depois "Confirmar publicação do PR".
+    await clickButton('Revisar e confirmar publicação');
+    assert.equal(savedPayloads.length, 1);
+    assert.match(
+      panel.textContent ?? '',
+      /Confirmar parâmetros finais para publicação do PR/,
+    );
+    await clickButton('Confirmar publicação do PR');
+    assert.equal(savedPayloads.length, 2);
+    assert.equal(savedPayloads[1]?.confirmPublish, true);
+    assert.match(panel.textContent ?? '', /Publicação confirmada/);
+
+    // Restaurar rascunho da Etapa 1 recompõe título, descrição e branch base originais.
+    await clickButton('Restaurar rascunho da Etapa 1');
+    assert.equal(titleInput.value, 'feat(auth): renovar token JWT expirado');
+    assert.equal(baseBranchInput.value, 'main');
+    assert.equal(draftCheckbox.checked, false);
+    assert.equal(jiraCheckbox.checked, true);
   } finally {
     await act(() => root.unmount());
   }

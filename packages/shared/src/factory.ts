@@ -441,6 +441,17 @@ const sidecarFilePathSchema = manifestSingleLineSchema
   .min(1, 'Informe um caminho de arquivo')
   .refine(isRepositoryRelativePath, 'Use um caminho relativo com / e sem segmentos ".."');
 
+export const FactoryJiraContextSchema = z.strictObject({
+  key: text.regex(jiraKeyPattern, 'Informe uma chave JIRA válida, como PROD-1234'),
+  url: z
+    .url({
+      protocol: /^https?$/,
+      error: 'Informe uma URL HTTP ou HTTPS válida da tarefa no JIRA',
+    })
+    .nullable(),
+});
+export type FactoryJiraContext = z.infer<typeof FactoryJiraContextSchema>;
+
 export const FactoryTriageSidecarSchema = z.strictObject({
   contractVersion: sidecarVersion,
   stage: z.literal('triage'),
@@ -452,17 +463,7 @@ export const FactoryTriageSidecarSchema = z.strictObject({
     ),
   negativeScope: z.array(text),
   blockers: z.array(text),
-  jiraContext: z
-    .strictObject({
-      key: text.regex(jiraKeyPattern, 'Informe uma chave JIRA válida, como PROD-1234'),
-      url: z
-        .url({
-          protocol: /^https?$/,
-          error: 'Informe uma URL HTTP ou HTTPS válida da tarefa no JIRA',
-        })
-        .nullable(),
-    })
-    .nullable(),
+  jiraContext: FactoryJiraContextSchema.nullable(),
   jiraError: text.nullable().optional(),
   technicalContext: text,
 });
@@ -888,6 +889,96 @@ export const FactoryPrSidecarSchema = z.strictObject({
 });
 export type FactoryPrSidecar = z.infer<typeof FactoryPrSidecarSchema>;
 
+export const FactoryPrReviewerSchema = manifestSingleLineSchema
+  .trim()
+  .min(1, 'Informe o identificador do reviewer')
+  .max(100, 'Identificador do reviewer deve ter no máximo 100 caracteres')
+  .refine(
+    value =>
+      !/[\s,;@]/.test(value) &&
+      !value.startsWith('/') &&
+      !value.endsWith('/') &&
+      !value.includes('..') &&
+      !value.includes('//'),
+    'Informe um usuário ou time válido sem espaços, vírgulas ou "@"',
+  );
+
+export const FactoryPrTitleSchema = manifestSingleLineSchema
+  .trim()
+  .min(1, 'Informe o título do Pull Request')
+  .max(200, 'O título do Pull Request deve ter no máximo 200 caracteres');
+
+export const FactoryPrDescriptionSchema = z
+  .string({ error: 'Informe a descrição do Pull Request' })
+  .trim()
+  .min(1, 'Informe a descrição Markdown do Pull Request')
+  .max(65_536, 'A descrição do Pull Request excede o limite de 65.536 caracteres')
+  .refine(value => !value.includes('\0'), 'Descrição inválida');
+
+export const FactoryPrTargetBranchSchema = GitBranchNameSchema.refine(
+  value => value !== 'HEAD',
+  'Informe uma branch destino válida (diferente de HEAD)',
+);
+
+const uniquePrReviewersRefinement = (reviewers: readonly string[]): boolean =>
+  new Set(reviewers.map(item => item.toLowerCase())).size === reviewers.length;
+
+export const FactoryPrReviewSchema = z.strictObject({
+  prArtifactId: id,
+  title: FactoryPrTitleSchema,
+  description: FactoryPrDescriptionSchema,
+  baseBranch: FactoryPrTargetBranchSchema,
+  draft: z.boolean(),
+  reviewers: z
+    .array(FactoryPrReviewerSchema)
+    .max(50, 'Informe no máximo 50 reviewers')
+    .refine(uniquePrReviewersRefinement, 'A lista de reviewers não pode conter duplicatas'),
+  updateJira: z.boolean(),
+  confirmedForPublish: z.boolean().default(false),
+  confirmedAt: timestamp.nullable().default(null),
+  updatedAt: timestamp,
+});
+export type FactoryPrReview = z.infer<typeof FactoryPrReviewSchema>;
+
+export const FactoryPrGateSchema = z.strictObject({
+  prArtifactId: id,
+  prReportPath: artifactPathSchema,
+  iteration: nonNegativeInt,
+  title: FactoryPrTitleSchema,
+  description: FactoryPrDescriptionSchema,
+  summary: text,
+  baseBranch: FactoryPrTargetBranchSchema,
+  headBranch: gitBranchNameSchema,
+  draft: z.boolean(),
+  reviewers: z.array(FactoryPrReviewerSchema),
+  updateJira: z.boolean(),
+  confirmedForPublish: z.boolean(),
+  confirmedAt: timestamp.nullable(),
+  updatedAt: timestamp.nullable(),
+  draftTitle: FactoryPrTitleSchema,
+  draftDescription: FactoryPrDescriptionSchema,
+  draftBaseBranch: FactoryPrTargetBranchSchema,
+  satisfiedAcceptanceCriteriaIds: z.array(text),
+  evidence: z.array(text),
+  jiraContext: FactoryJiraContextSchema.nullable(),
+});
+export type FactoryPrGate = z.infer<typeof FactoryPrGateSchema>;
+
+export const SaveFactoryPrReviewRequestSchema = z.strictObject({
+  title: FactoryPrTitleSchema,
+  description: FactoryPrDescriptionSchema,
+  baseBranch: FactoryPrTargetBranchSchema,
+  draft: z.boolean(),
+  reviewers: z
+    .array(FactoryPrReviewerSchema)
+    .max(50, 'Informe no máximo 50 reviewers')
+    .refine(uniquePrReviewersRefinement, 'A lista de reviewers não pode conter duplicatas'),
+  updateJira: z.boolean(),
+  confirmPublish: z.boolean().default(false),
+  expectedUpdatedAt: timestamp.optional(),
+});
+export type SaveFactoryPrReviewRequest = z.infer<typeof SaveFactoryPrReviewRequestSchema>;
+
 export const FactoryFlowCheckpointSchema = z.strictObject({
   contractVersion: version,
   id,
@@ -945,6 +1036,7 @@ export const FactoryFlowSchema = z
     baseBranch: gitBranchNameSchema.nullable().default(null),
     planningApproval: FactoryPlanningApprovalSchema.nullable().optional(),
     reviewTriage: FactoryReviewTriageSchema.nullable().optional(),
+    prReview: FactoryPrReviewSchema.nullable().optional(),
     createdAt: timestamp,
     updatedAt: timestamp,
     finishedAt: timestamp.nullable(),
@@ -1025,6 +1117,7 @@ export const FactoryFlowTransitionCommandSchema = z.strictObject({
   baseBranch: gitBranchNameSchema.nullable().optional(),
   planningApproval: FactoryPlanningApprovalSchema.nullable().optional(),
   reviewTriage: FactoryReviewTriageSchema.nullable().optional(),
+  prReview: FactoryPrReviewSchema.nullable().optional(),
   error: FactoryFlowErrorSchema.nullable().optional(),
 });
 export type FactoryFlowTransitionCommand = z.infer<typeof FactoryFlowTransitionCommandSchema>;
@@ -1116,6 +1209,8 @@ function applyFactoryFlowTransition(
       next.data.reviewTriage !== undefined
         ? next.data.reviewTriage
         : current.data.reviewTriage,
+    prReview:
+      next.data.prReview !== undefined ? next.data.prReview : current.data.prReview,
     updatedAt: next.data.at,
     finishedAt: isFinalFactoryFlowState(next.data.to) ? next.data.at : null,
     error: next.data.error !== undefined ? next.data.error : current.data.error,
@@ -1216,6 +1311,7 @@ export const FactoryFlowDetailsSchema = z
     triageGate: FactoryTriageGateSchema.nullable().optional(),
     planningGate: FactoryPlanningGateSchema.nullable().optional(),
     reviewGate: FactoryReviewGateSchema.nullable().optional(),
+    prGate: FactoryPrGateSchema.nullable().optional(),
   })
   .transform(details => ({
     ...details,
@@ -1259,7 +1355,10 @@ const HANDOFF_ARTIFACT_KINDS = {
 } as const;
 
 export function getReadyFactoryStageArtifact(
-  details: Pick<FactoryFlowDetails, 'stages' | 'artifacts'>,
+  details: {
+    readonly stages: readonly FactoryFlowStage[];
+    readonly artifacts: readonly FactoryFlowArtifact[];
+  },
   stage: keyof typeof HANDOFF_ARTIFACT_KINDS,
 ): FactoryFlowArtifact | undefined {
   const reportPath = details.stages.find(item => item.name === stage)?.reportPath;
@@ -1275,7 +1374,7 @@ export function getReadyFactoryStageArtifact(
 
 /** Retorna o artefato pronto mais recente de uma etapa (preservando histórico entre iterações). */
 export function getLatestReadyFactoryStageArtifact(
-  details: Pick<FactoryFlowDetails, 'artifacts'>,
+  details: { readonly artifacts: readonly FactoryFlowArtifact[] },
   stage: keyof typeof HANDOFF_ARTIFACT_KINDS,
 ): FactoryFlowArtifact | undefined {
   for (let index = details.artifacts.length - 1; index >= 0; index -= 1) {
@@ -1302,6 +1401,7 @@ export const TransitionFactoryFlowRequestSchema = z.strictObject({
   iteration: z.number().int().nonnegative().optional(),
   lastReviewVerdict: FactoryReviewVerdictSchema.nullable().optional(),
   loopPausedReason: text.nullable().optional(),
+  prReview: FactoryPrReviewSchema.nullable().optional(),
   error: FactoryFlowErrorSchema.nullable().optional(),
   expectedUpdatedAt: timestamp.optional(),
 });
@@ -1406,6 +1506,13 @@ export const RollbackFactoryFlowCheckpointResponseSchema = z.strictObject({
 export type RollbackFactoryFlowCheckpointResponse = z.infer<
   typeof RollbackFactoryFlowCheckpointResponseSchema
 >;
+
+export const SaveFactoryPrReviewResponseSchema = z.strictObject({
+  contractVersion: version,
+  flow: FactoryFlowSchema,
+  prGate: FactoryPrGateSchema,
+});
+export type SaveFactoryPrReviewResponse = z.infer<typeof SaveFactoryPrReviewResponseSchema>;
 
 export const FactoryFlowApiErrorCodeSchema = z.enum([
   'ORIGIN_FORBIDDEN',

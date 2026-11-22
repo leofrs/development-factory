@@ -2234,11 +2234,14 @@ export class SessionManager {
       let transitioned: TransitionFactoryFlowResponse | undefined;
       if (session.historyState === 'saved' && stage === 'pr') {
         try {
+          this.#factoryFlowService.validateFlowStageContracts(flowId);
           transitioned = await this.#factoryFlowService.transitionFlow(flowId, {
-            to: 'completed',
+            to: 'waiting_action',
             stage,
-            reason: 'Etapa final de PR concluída com artefatos validados',
+            reason: 'Rascunho do Pull Request preparado; aguardando revisão humana pré-publicação',
             currentSessionId: null,
+            prReview: null,
+            error: null,
           });
         } catch (error) {
           if (

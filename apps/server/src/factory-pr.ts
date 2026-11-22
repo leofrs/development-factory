@@ -1,11 +1,23 @@
 import { dirname } from 'node:path';
-import type { FactoryFlowDetails } from '@development-factory/shared';
+import {
+  FactoryPrGateSchema,
+  getLatestReadyFactoryStageArtifact,
+  getReadyFactoryStageArtifact,
+  type FactoryFlow,
+  type FactoryFlowArtifact,
+  type FactoryFlowDetails,
+  type FactoryFlowStage,
+  type FactoryJiraContext,
+  type FactoryPrGate,
+  type FactoryPrSidecar,
+} from '@development-factory/shared';
 import { readFactoryReviewTriageScope } from './factory-review.js';
 import {
   GIT_WRITE_DENIED_BASH_TOOLS,
   INFRA_AND_CONFIG_PATHS,
   buildReportFileToolPermissions,
   buildRestrictedRunnerArgs,
+  readFactoryArtifactFile,
   readFactoryStageSidecar,
   readReadyStageDocuments,
   validateStructuredMarkdownReport,
@@ -152,5 +164,154 @@ export async function readFactoryPrInputs(details: FactoryFlowDetails) {
 export function isPrSummary(content: string): boolean {
   return validateStructuredMarkdownReport(content, PR_SUMMARY_TITLE, PR_SUMMARY_SECTIONS, {
     [PR_SUMMARY_SECTIONS.validation]: hasMarkdownTable,
+  });
+}
+
+function parseMarkdownSections(content: string): Map<string, string> {
+  const sections = new Map<string, string>();
+  let currentHeading: string | null = null;
+  let currentLines: string[] = [];
+  let activeFence: { readonly char: '`' | '~'; readonly length: number } | null = null;
+
+  const flush = () => {
+    if (currentHeading !== null) {
+      const body = currentLines.join('\n').trim();
+      if (body.length > 0) {
+        sections.set(currentHeading, body);
+      }
+    }
+  };
+
+  for (const line of content.split(/\r?\n/)) {
+    const fenceMatch = /^(`{3,}|~{3,})/.exec(line.trimStart());
+    if (fenceMatch?.[1] !== undefined) {
+      const marker = fenceMatch[1];
+      const char = marker[0] === '~' ? '~' : '`';
+      if (activeFence === null) {
+        activeFence = { char, length: marker.length };
+      } else if (activeFence.char === char && marker.length >= activeFence.length) {
+        activeFence = null;
+      }
+    } else if (activeFence === null && line.startsWith('## ')) {
+      flush();
+      currentHeading = line.slice(3).trim();
+      currentLines = [];
+      continue;
+    }
+
+    if (currentHeading !== null) {
+      currentLines.push(line);
+    }
+  }
+
+  flush();
+  return sections;
+}
+
+/**
+ * Extrai a descrição Markdown editável do Pull Request a partir do artefato `pr_summary`
+ * gerado na Etapa 1 do Bloco 06.
+ */
+export function extractPrDescriptionFromSummary(
+  markdown: string,
+  sidecar: Pick<FactoryPrSidecar, 'summary'>,
+): string {
+  const sections = parseMarkdownSections(markdown);
+  const prDetailsBody = sections.get(PR_SUMMARY_SECTIONS.prDetails);
+  if (prDetailsBody) {
+    const fencedLong = /````(?:markdown|md)?\r?\n([\s\S]*?)\r?\n````/i.exec(prDetailsBody);
+    const fencedShort = /```(?:markdown|md)\r?\n([\s\S]*?)\r?\n```/i.exec(prDetailsBody);
+    const extracted = (fencedLong?.[1] ?? fencedShort?.[1])?.trim();
+    if (extracted) {
+      return extracted;
+    }
+  }
+
+  const summaryBody = sections.get(PR_SUMMARY_SECTIONS.summary);
+  const validationBody = sections.get(PR_SUMMARY_SECTIONS.validation);
+  const parts: string[] = [];
+  if (summaryBody) {
+    parts.push(`## ${PR_SUMMARY_SECTIONS.summary}\n\n${summaryBody}`);
+  }
+  if (validationBody) {
+    parts.push(`## ${PR_SUMMARY_SECTIONS.validation}\n\n${validationBody}`);
+  }
+  if (parts.length > 0) {
+    return parts.join('\n\n');
+  }
+
+  return sidecar.summary;
+}
+
+/** Resolve o contexto Jira vinculado na Triagem (Bloco 01), quando disponível. */
+export function resolveFactoryPrJiraContext(
+  stages: readonly FactoryFlowStage[],
+  artifacts: readonly FactoryFlowArtifact[],
+): FactoryJiraContext | null {
+  const triageArtifact =
+    getReadyFactoryStageArtifact({ stages, artifacts }, 'triage') ??
+    getLatestReadyFactoryStageArtifact({ artifacts }, 'triage');
+  if (!triageArtifact) {
+    return null;
+  }
+  try {
+    return readFactoryStageSidecar('triage', triageArtifact.path).jiraContext;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Constrói o estado pré-carregado da Etapa 2 do Bloco 06 (`prGate`) combinando o rascunho
+ * da Etapa 1 (`pr_summary` + sidecar JSON), contexto Jira e eventuais edições humanas salvas.
+ */
+export function buildFactoryPrGateForFlow(
+  flow: FactoryFlow,
+  stages: readonly FactoryFlowStage[],
+  artifacts: readonly FactoryFlowArtifact[],
+): FactoryPrGate | undefined {
+  const prArtifact =
+    getReadyFactoryStageArtifact({ stages, artifacts }, 'pr') ??
+    getLatestReadyFactoryStageArtifact({ artifacts }, 'pr');
+  if (!prArtifact) {
+    return undefined;
+  }
+
+  const sidecar = readFactoryStageSidecar('pr', prArtifact.path);
+  const markdown = new TextDecoder('utf-8', { fatal: true }).decode(
+    readFactoryArtifactFile(prArtifact.path),
+  );
+  const draftDescription = extractPrDescriptionFromSummary(markdown, sidecar);
+  const draftBaseBranch =
+    sidecar.baseBranch !== 'HEAD'
+      ? sidecar.baseBranch
+      : flow.baseBranch && flow.baseBranch !== 'HEAD'
+        ? flow.baseBranch
+        : 'main';
+  const jiraContext = resolveFactoryPrJiraContext(stages, artifacts);
+  const savedReview =
+    flow.prReview && flow.prReview.prArtifactId === prArtifact.id ? flow.prReview : null;
+
+  return FactoryPrGateSchema.parse({
+    prArtifactId: prArtifact.id,
+    prReportPath: prArtifact.path,
+    iteration: prArtifact.iteration,
+    title: savedReview?.title ?? sidecar.title,
+    description: savedReview?.description ?? draftDescription,
+    summary: sidecar.summary,
+    baseBranch: savedReview?.baseBranch ?? draftBaseBranch,
+    headBranch: sidecar.headBranch,
+    draft: savedReview?.draft ?? false,
+    reviewers: savedReview?.reviewers ?? [],
+    updateJira: savedReview?.updateJira ?? jiraContext !== null,
+    confirmedForPublish: savedReview?.confirmedForPublish ?? false,
+    confirmedAt: savedReview?.confirmedAt ?? null,
+    updatedAt: savedReview?.updatedAt ?? null,
+    draftTitle: sidecar.title,
+    draftDescription,
+    draftBaseBranch,
+    satisfiedAcceptanceCriteriaIds: sidecar.satisfiedAcceptanceCriteriaIds,
+    evidence: sidecar.evidence,
+    jiraContext,
   });
 }
