@@ -8,6 +8,7 @@ import {
   FACTORY_FLOW_CONTRACT_VERSION,
   FACTORY_STAGE_ORDER,
   REVIEW_CONTRACT_VERSION,
+  evaluateFactoryTriageGate,
   getReadyFactoryStageArtifact,
   isFactoryReviewApprovedVerdict,
   isFinalFactoryFlowState,
@@ -20,6 +21,7 @@ import {
   type FactoryRequest,
   type FactoryReviewVerdict,
   type FactoryStageName,
+  type FactoryTriageGate,
   type ReviewError,
   type ReviewProcess,
   type ReviewRequest,
@@ -45,6 +47,7 @@ import {
   FactoryStageArtifactError,
   buildTriageAndPlanningRunnerArgs,
   readFactoryStageDocument,
+  readFactoryStageSidecar,
 } from './factory-stage-runners.js';
 import { buildTestsRunnerArgs, readFactoryTestsInputs } from './factory-tests.js';
 import { appendFactoryTestsChecks } from './factory-tests-checks.js';
@@ -204,6 +207,7 @@ export interface StartReviewSessionInput extends ReviewRequest {
 }
 
 export interface StartFactorySessionInput extends FactoryRequest {
+  readonly approvedNotes?: string;
   readonly cols: number;
   readonly rows: number;
 }
@@ -323,6 +327,24 @@ function formatReviewTitle(request: ReviewRequest): string {
 function formatFactoryTitle(request: FactoryRequest): string {
   const trimmed = request.value.trim();
   return trimmed.length > 80 ? `${trimmed.slice(0, 77)}...` : trimmed;
+}
+
+function formatTriageGatePausedReason(gate: FactoryTriageGate): string | null {
+  if (!gate.blocked) {
+    return null;
+  }
+  const blockerCount = gate.blockers.length;
+  const blockerLabel =
+    blockerCount === 1
+      ? '1 bloqueador/ambiguidade'
+      : `${blockerCount} bloqueadores/ambiguidades`;
+  if (gate.jiraError && blockerCount > 0) {
+    return `Triagem pausada: falha ao consultar o Jira MCP (${gate.jiraError}) e ${blockerLabel} aguardando resposta humana antes do Planejamento.`;
+  }
+  if (gate.jiraError) {
+    return `Triagem pausada por falha na consulta ao Jira MCP: ${gate.jiraError}`;
+  }
+  return `Triagem pausada com ${blockerLabel} aguardando resposta humana antes do Planejamento.`;
 }
 
 function validateRepoPath(repoPath: string): void {
@@ -966,6 +988,13 @@ export class SessionManager {
       this.#startingFlowIds.add(flowId);
       try {
         this.#factoryFlowService.assertStageHandoff(flowDetails, stage);
+        if (input.approvedNotes !== undefined) {
+          flowDetails = await this.#factoryFlowService.saveStageApprovedNotes(
+            flowId,
+            stage,
+            input.approvedNotes,
+          );
+        }
         const preparedWorktree = await this.#ensureFactoryFlowWorktree(
           flowDetails,
           canonicalRepoPath,
@@ -1371,6 +1400,12 @@ export class SessionManager {
       runnerArgs = prepared.runnerArgs;
     } else {
       const initialStage = stage === 'planning' ? 'planning' : 'triage';
+      const triageApprovedNotes = flowDetails?.stages.find(
+        item => item.name === 'triage',
+      )?.approvedNotes;
+      const planningApprovedNotes = flowDetails?.stages.find(
+        item => item.name === 'planning',
+      )?.approvedNotes;
       prompt =
         initialStage === 'planning'
           ? buildFactoryArchitecturePrompt({
@@ -1378,10 +1413,13 @@ export class SessionManager {
               value: input.value,
               understandingDocument: understanding?.content,
               understandingReportPath: understanding?.path,
+              approvedNotes: planningApprovedNotes,
               reportPath: factoryHistory.reportPath,
               repositoryProfile,
             })
-          : buildFactoryPlanPrompt(input.inputType, input.value, factoryHistory.reportPath);
+          : buildFactoryPlanPrompt(input.inputType, input.value, factoryHistory.reportPath, {
+              approvedNotes: triageApprovedNotes,
+            });
       runnerArgs = buildTriageAndPlanningRunnerArgs(initialStage, factoryHistory.reportPath);
     }
 
@@ -1898,12 +1936,32 @@ export class SessionManager {
 
       if (session.historyState === 'saved') {
         if (stage === 'triage') {
+          const triageGate = session.reportPath
+            ? evaluateFactoryTriageGate(readFactoryStageSidecar('triage', session.reportPath))
+            : { blockers: [], jiraError: null, blocked: false };
+          const triagePausedReason = formatTriageGatePausedReason(triageGate);
           const paused = await this.#factoryFlowService.transitionFlow(flowId, {
             to: 'waiting_action',
             stage,
-            reason: 'Triagem concluída com especificação salva',
+            reason: triageGate.blocked
+              ? 'Triagem pausada no portão humano por bloqueadores ou falha no Jira'
+              : 'Triagem concluída com especificação salva',
             currentSessionId: null,
+            loopPausedReason: triagePausedReason,
           });
+          if (triageGate.blocked) {
+            this.#emitEvent({
+              type: 'factory_flow.updated',
+              flow: paused.flow,
+            });
+            broadcast(session, {
+              type: 'factory_flow',
+              flowId,
+              stage,
+              state: paused.flow.state,
+            });
+            return;
+          }
           await this.#autoAdvanceAndStartStage(
             session,
             flowId,

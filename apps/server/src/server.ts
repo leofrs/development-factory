@@ -648,6 +648,9 @@ async function handleFactoryFlowApiRequest(
         flowId: details.flow.id,
         stage: targetStage,
         title: details.flow.title,
+        ...(parsedBody.data.approvedNotes !== undefined
+          ? { approvedNotes: parsedBody.data.approvedNotes }
+          : {}),
         cols: parsedBody.data.cols ?? 120,
         rows: parsedBody.data.rows ?? 36,
       });

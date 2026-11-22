@@ -13,22 +13,37 @@ import {
 } from '@development-factory/shared';
 import type {
   FactoryArtifactIssue,
+  FactoryDevelopmentSidecar,
   FactoryFlowDetails,
+  FactoryPlanningSidecar,
+  FactoryPrSidecar,
+  FactoryReviewSidecar,
   FactoryStageName,
+  FactoryTestsSidecar,
+  FactoryTriageSidecar,
   HistoryFile,
 } from '@development-factory/shared';
 import { maxHistoryBytes, readHistoryFile } from './history-reader.js';
 
 export type HandoffArtifactStage = Exclude<FactoryStageName, 'pr'>;
 
-const SIDECAR_SCHEMAS = {
+export interface FactoryStageSidecarMap {
+  readonly triage: FactoryTriageSidecar;
+  readonly planning: FactoryPlanningSidecar;
+  readonly development: FactoryDevelopmentSidecar;
+  readonly tests: FactoryTestsSidecar;
+  readonly review: FactoryReviewSidecar;
+  readonly pr: FactoryPrSidecar;
+}
+
+const SIDECAR_SCHEMAS: { [K in FactoryStageName]: z.ZodType<FactoryStageSidecarMap[K]> } = {
   triage: FactoryTriageSidecarSchema,
   planning: FactoryPlanningSidecarSchema,
   development: FactoryDevelopmentSidecarSchema,
   tests: FactoryTestsSidecarSchema,
   review: FactoryReviewSidecarSchema,
   pr: FactoryPrSidecarSchema,
-} satisfies Record<FactoryStageName, z.ZodType>;
+};
 
 const sidecarErrorLocale = z.locales.pt().localeError;
 
@@ -105,7 +120,10 @@ export function readFactoryArtifactFile(path: string): Buffer {
   }
 }
 
-export function readFactoryStageSidecar(stage: FactoryStageName, reportPath: string) {
+export function readFactoryStageSidecar<Stage extends FactoryStageName>(
+  stage: Stage,
+  reportPath: string,
+): FactoryStageSidecarMap[Stage] {
   const path = getFactoryStageSidecarPath(reportPath);
   let content: Buffer;
   try {
@@ -148,7 +166,8 @@ export function readFactoryStageSidecar(stage: FactoryStageName, reportPath: str
     );
   }
 
-  const parsed = SIDECAR_SCHEMAS[stage].safeParse(input, { error: sidecarErrorLocale });
+  const schema: z.ZodType<FactoryStageSidecarMap[Stage]> = SIDECAR_SCHEMAS[stage];
+  const parsed = schema.safeParse(input, { error: sidecarErrorLocale });
   if (!parsed.success) {
     const issues = parsed.error.issues.flatMap<FactoryArtifactIssue>(issue => {
       const field = issue.path.map(segment =>

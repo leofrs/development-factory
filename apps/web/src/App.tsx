@@ -312,8 +312,13 @@ export default function App() {
           onAdvanceFlowStage={async (flowId, approvedNotes) => {
             await advanceFlowStage(flowId, { startSession: true, cols: 120, rows: 36, approvedNotes });
           }}
-          onRerunFlowStage={async (flowId, stage) => {
-            await rerunFlowStage(flowId, { stage, cols: 120, rows: 36 });
+          onRerunFlowStage={async (flowId, stage, approvedNotes) => {
+            await rerunFlowStage(flowId, {
+              stage,
+              cols: 120,
+              rows: 36,
+              ...(approvedNotes !== undefined ? { approvedNotes } : {}),
+            });
           }}
           onReturnFlowStage={async (flowId, targetStage, approvedNotes) => {
             await returnFlowStage(flowId, {

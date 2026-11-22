@@ -6,6 +6,7 @@ import {
   FACTORY_FLOW_CONTRACT_VERSION,
   FACTORY_MAX_AUTO_ITERATIONS,
   FACTORY_STAGE_ORDER,
+  FactoryApprovedNotesSchema,
   FactoryFlowArtifactSchema,
   FactoryFlowCheckpointSchema,
   FactoryFlowDomainError,
@@ -22,6 +23,7 @@ import {
   UpdateFactoryFlowWorktreeRequestSchema,
   FactoryWorktreeRetentionPolicySchema,
   canReturnFactoryStage,
+  evaluateFactoryTriageGate,
   getNextFactoryStage,
   getReadyFactoryStageArtifact,
   isFinalFactoryFlowState,
@@ -38,12 +40,17 @@ import {
   type FactoryFlowTransitionCommand,
   type FactoryStageName,
   type FactoryTaskInput,
+  type FactoryTriageGate,
   type FactoryWorktreeRetentionPolicy,
   type RollbackFactoryFlowCheckpointResponse,
   type TransitionFactoryFlowResponse,
 } from '@development-factory/shared';
 import { getFactoryDevelopmentChecksError } from './factory-development-checks.js';
-import { FactoryStageArtifactError, formatArtifactIssue } from './factory-stage-runners.js';
+import {
+  FactoryStageArtifactError,
+  formatArtifactIssue,
+  readFactoryStageSidecar,
+} from './factory-stage-runners.js';
 import {
   FactoryWorktreeError,
   cleanupFactoryWorktree,
@@ -76,7 +83,7 @@ const HANDOFF_CONFIG: Readonly<
 > = {
   planning: {
     missingMessage: 'Conclua a Triagem com a especificação salva antes de avançar.',
-    acceptsApprovedNotes: false,
+    acceptsApprovedNotes: true,
   },
   development: {
     missingMessage: 'Conclua a Triagem e o Planejamento com os artefatos salvos antes de avançar.',
@@ -203,6 +210,25 @@ function deriveFlowTitle(task: FactoryTaskInput, explicitTitle?: string): string
     return raw;
   }
   return raw.slice(0, 200).trim();
+}
+
+function resolveTriageGateForFlow(
+  flow: FactoryFlow,
+  stages: FactoryFlowStage[],
+  artifacts: FactoryFlowArtifact[],
+): FactoryTriageGate | undefined {
+  if (flow.currentStage !== 'triage') {
+    return undefined;
+  }
+  const artifact = getReadyFactoryStageArtifact({ stages, artifacts }, 'triage');
+  if (!artifact) {
+    return undefined;
+  }
+  try {
+    return evaluateFactoryTriageGate(readFactoryStageSidecar('triage', artifact.path));
+  } catch {
+    return undefined;
+  }
 }
 
 function assertStageContracts(
@@ -587,6 +613,7 @@ export class FactoryFlowService {
       const stages = this.repository.listStagesByFlowId(flow.id);
       const artifacts = this.repository.listArtifactsByFlowId(flow.id);
       const checkpoints = this.repository.listCheckpointsByFlowId(flow.id);
+      const triageGate = resolveTriageGateForFlow(flow, stages, artifacts);
 
       return {
         contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
@@ -597,6 +624,7 @@ export class FactoryFlowService {
         branchName: flow.branchName,
         baseBranch: flow.baseBranch,
         checkpoints,
+        ...(triageGate ? { triageGate } : {}),
       };
     } catch (error) {
       throw mapUnexpectedError(error);
@@ -796,7 +824,7 @@ export class FactoryFlowService {
           if (parsed.data.approvedNotes !== undefined && !handoffConfig.acceptsApprovedNotes) {
             throw new FactoryFlowServiceError(
               'FACTORY_FLOW_INVALID_INPUT',
-              'As notas aprovadas são recebidas no avanço para Desenvolvimento, Testes ou Code Review.',
+              'As notas aprovadas são recebidas no avanço para Planejamento, Desenvolvimento, Testes ou Code Review.',
               400,
             );
           }
@@ -1419,6 +1447,78 @@ export class FactoryFlowService {
           updatedAt: patch.at ?? this.now(),
         }),
       );
+    } catch (error) {
+      throw mapUnexpectedError(error);
+    }
+  }
+
+  /**
+   * Persiste complemento ou respostas aprovadas para a etapa atual quando ela está pausada para ação humana.
+   */
+  async saveStageApprovedNotes(
+    flowIdInput: string,
+    stageNameInput: FactoryStageName,
+    approvedNotesInput: unknown,
+  ): Promise<FactoryFlowDetails> {
+    const flowId = this.parseFlowId(flowIdInput);
+    const parsedStage = FactoryStageNameSchema.safeParse(stageNameInput);
+    if (!parsedStage.success) {
+      throw new FactoryFlowServiceError(
+        'FACTORY_FLOW_INVALID_INPUT',
+        'Nome de etapa inválido.',
+        400,
+        formatZodIssues(parsedStage.error),
+      );
+    }
+
+    const parsedNotes = FactoryApprovedNotesSchema.safeParse(approvedNotesInput);
+    if (!parsedNotes.success) {
+      throw new FactoryFlowServiceError(
+        'FACTORY_FLOW_INVALID_INPUT',
+        'O complemento ou notas informadas são inválidas.',
+        400,
+        formatZodIssues(parsedNotes.error),
+      );
+    }
+
+    try {
+      await this.repository.withWriteLock(() =>
+        this.repository.runInTransaction(() => {
+          const flow = this.repository.getFlowById(flowId);
+          if (!flow) {
+            throw new FactoryFlowServiceError(
+              'FACTORY_FLOW_NOT_FOUND',
+              `Fluxo ${flowId} não encontrado.`,
+              404,
+            );
+          }
+          if (isFinalFactoryFlowState(flow.state)) {
+            throw new FactoryFlowServiceError(
+              'FACTORY_FLOW_INVALID_TRANSITION',
+              `Não é possível atualizar notas de um fluxo no estado final ${flow.state}.`,
+              409,
+            );
+          }
+          if (
+            flow.currentStage !== parsedStage.data ||
+            flow.state === 'running' ||
+            flow.currentSessionId !== null
+          ) {
+            throw new FactoryFlowServiceError(
+              'FACTORY_FLOW_CONFLICT',
+              'Encerre a sessão em execução antes de atualizar o complemento da etapa.',
+              409,
+            );
+          }
+
+          this.repository.updateStage(flowId, parsedStage.data, {
+            approvedNotes: parsedNotes.data,
+            updatedAt: this.now(),
+          });
+        }),
+      );
+
+      return this.getFlow(flowId);
     } catch (error) {
       throw mapUnexpectedError(error);
     }

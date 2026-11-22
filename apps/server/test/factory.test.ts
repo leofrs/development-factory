@@ -165,10 +165,18 @@ test('buildFactoryPlanPrompt inclui a tarefa e o contrato dos artefatos de triag
     'jiraContext',
     'key',
     'url',
+    'jiraError',
     'technicalContext',
   ]);
   assert.match(prompt, /Use IDs únicos.*mesmos IDs e descrições em Critérios de Aceite/);
   assert.match(prompt, /Use `null` em `jiraContext` quando não houver uma\s+chave confirmada/);
+  assert.match(prompt, /registre a falha em `jiraError`/);
+
+  const promptWithComplement = buildFactoryPlanPrompt('jira_key', 'PROD-1234', reportPath, {
+    approvedNotes: 'Usar o provedor Stripe e manter timeout de 5 segundos.',
+  });
+  assert.match(promptWithComplement, /Complemento e respostas fornecidas pelo usuário/);
+  assert.ok(promptWithComplement.includes('Usar o provedor Stripe e manter timeout de 5 segundos.'));
 });
 
 test('buildFactoryArchitecturePrompt descreve a entrada e a entrega do planejamento', () => {
@@ -178,11 +186,14 @@ test('buildFactoryArchitecturePrompt descreve a entrada e a entrega do planejame
     value: 'PROD-1234',
     understandingDocument: '#### 1. Síntese Central (Core)\nQuando X, deve Y.',
     understandingReportPath: '/tmp/factory-artifacts/flow-1/entendimento.md',
+    approvedNotes: 'Confirmado: manter compatibilidade retroativa no endpoint v1.',
     reportPath,
   });
   assert(prompt.includes('Chave da tarefa no JIRA: "PROD-1234"'));
   assert(prompt.includes('/tmp/factory-artifacts/flow-1/entendimento.md'));
   assert(prompt.includes('#### 1. Síntese Central (Core)'));
+  assert.match(prompt, /RESPOSTAS E COMPLEMENTOS APROVADOS PELO USUÁRIO/);
+  assert.ok(prompt.includes('Confirmado: manter compatibilidade retroativa no endpoint v1.'));
   assert(prompt.includes(FACTORY_ARCHITECTURE_SYSTEM_PROMPT));
   assertFactoryStageOutput(prompt, 'planning', reportPath, [
     'pendingDecisions',

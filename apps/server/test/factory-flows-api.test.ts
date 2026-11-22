@@ -2392,3 +2392,202 @@ test(
     assert.equal(existsSync(kept.originalWorktreePath), true);
   },
 );
+
+test(
+  'portão humano do Bloco 01 pausa em waiting_action para bloqueadores ou falha de Jira e permite reexecutar com complemento ou avançar com respostas',
+  { timeout: 30000 },
+  async context => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'df-factory-triage-gate-'));
+    const binDir = join(rootDir, 'bin');
+    const repoDir = join(rootDir, 'repo');
+    const xdgDataHome = join(rootDir, 'xdg-data');
+    const dbPath = join(rootDir, 'reviews.db');
+    mkdirSync(binDir);
+    mkdirSync(repoDir);
+    mkdirSync(xdgDataHome);
+    initGitRepo(repoDir, 'main');
+
+    const claudeTarget = join(binDir, 'claude');
+    copyFileSync(new URL('./fixtures/claude.ts', import.meta.url), claudeTarget);
+    chmodSync(claudeTarget, 0o755);
+
+    const previousPath = process.env.PATH;
+    const previousXdg = process.env.XDG_DATA_HOME;
+    process.env.PATH = `${binDir}:${previousPath ?? ''}`;
+    process.env.XDG_DATA_HOME = xdgDataHome;
+
+    const { server, sessionManager, shutdown } = createReviewServer({ dbPath });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+
+    const address = server.address();
+    assert(address && typeof address !== 'string');
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+
+    context.after(async () => {
+      await shutdown();
+      process.env.PATH = previousPath;
+      if (previousXdg === undefined) {
+        delete process.env.XDG_DATA_HOME;
+      } else {
+        process.env.XDG_DATA_HOME = previousXdg;
+      }
+      rmSync(rootDir, { recursive: true, force: true });
+    });
+
+    const getDetails = async (flowId: string) => {
+      const response = await fetch(`${baseUrl}/api/factory/flows/${flowId}`, {
+        headers: { Origin: ALLOWED_ORIGIN },
+      });
+      assert.equal(response.status, 200);
+      return FactoryFlowDetailsSchema.parse(await response.json());
+    };
+
+    const waitReady = async (sessionId: string) => {
+      await waitFor(() =>
+        /READY:[^\n]*\n/.test(sessionManager.getSession(sessionId)?.buffer.replay() ?? ''),
+      );
+      const readyLine = (sessionManager.getSession(sessionId)?.buffer.replay() ?? '')
+        .split(/\r?\n/)
+        .find(line => line.startsWith('READY:'));
+      assert.ok(readyLine);
+      return z
+        .object({ args: z.array(z.string()) })
+        .parse(JSON.parse(readyLine.slice('READY:'.length)) as unknown)
+        .args.at(-1) ?? '';
+    };
+
+    // Caso 1: Falha de leitura no Jira + bloqueadores pausam em waiting_action e permitem reexecutar Bloco 01 com complemento.
+    const createFlowARes = await fetch(`${baseUrl}/api/factory/flows`, {
+      method: 'POST',
+      headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        task: { inputType: 'jira_key', value: 'PROD-501', repoPath: repoDir },
+        startSession: true,
+        cols: 100,
+        rows: 30,
+      }),
+    });
+    assert.equal(createFlowARes.status, 201);
+    const flowABody = (await createFlowARes.json()) as {
+      flow: { id: string };
+      session: BackgroundSessionSummary;
+    };
+    const flowAId = flowABody.flow.id;
+    assert.ok(flowABody.session.reportPath);
+    await waitReady(flowABody.session.sessionId);
+
+    writeFileSync(flowABody.session.reportPath, triageMarkdown('Triagem com falha de Jira e dúvidas.'));
+    writeFactoryStageSidecar(flowABody.session.reportPath, 'triage', {
+      blockers: ['Qual o gateway de pagamento?', 'Qual o timeout máximo?'],
+      jiraError: 'Falha ao consultar Jira MCP: 401 Unauthorized',
+    });
+    sessionManager.writeInput(flowABody.session.sessionId, 'EXIT0');
+
+    const pausedFlowA = await waitForFlowDetails(
+      () => getDetails(flowAId),
+      details => details.flow.state === 'waiting_action' && details.flow.currentSessionId === null,
+    );
+    assert.equal(pausedFlowA.flow.currentStage, 'triage');
+    assert.equal(pausedFlowA.flow.state, 'waiting_action');
+    assert.match(pausedFlowA.flow.loopPausedReason ?? '', /falha ao consultar o Jira MCP/i);
+    assert.match(pausedFlowA.flow.loopPausedReason ?? '', /2 bloqueadores\/ambiguidades/);
+    assert.deepEqual(pausedFlowA.triageGate, {
+      blockers: ['Qual o gateway de pagamento?', 'Qual o timeout máximo?'],
+      jiraError: 'Falha ao consultar Jira MCP: 401 Unauthorized',
+      blocked: true,
+    });
+    assert.ok(!sessionManager.listSessions().some(s => s.flowId === flowAId && s.stage === 'planning'));
+
+    // Reexecuta o Bloco 01 com complemento anexado.
+    const complementText = 'Usar Stripe como gateway com timeout de 5 segundos.';
+    const rerunTriageRes = await fetch(`${baseUrl}/api/factory/flows/${flowAId}/rerun`, {
+      method: 'POST',
+      headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stage: 'triage', approvedNotes: complementText }),
+    });
+    assert.equal(rerunTriageRes.status, 200);
+    const rerunBody = (await rerunTriageRes.json()) as { session: BackgroundSessionSummary };
+    assert.ok(rerunBody.session.reportPath);
+    const rerunPrompt = await waitReady(rerunBody.session.sessionId);
+    assert.match(rerunPrompt, /Complemento e respostas fornecidas pelo usuário/);
+    assert.ok(rerunPrompt.includes(complementText));
+
+    writeFileSync(rerunBody.session.reportPath, triageMarkdown('Triagem desbloqueada após complemento.'));
+    writeFactoryStageSidecar(rerunBody.session.reportPath, 'triage', {
+      blockers: [],
+      jiraError: null,
+    });
+    sessionManager.writeInput(rerunBody.session.sessionId, 'EXIT0');
+
+    const autoAdvancedFlowA = await waitForFlowDetails(
+      () => getDetails(flowAId),
+      details => details.flow.currentStage === 'planning' && details.flow.currentSessionId !== null,
+    );
+    assert.equal(autoAdvancedFlowA.flow.loopPausedReason, null);
+    assert.equal(autoAdvancedFlowA.triageGate, undefined);
+    assert.equal(
+      autoAdvancedFlowA.stages.find(s => s.name === 'triage')?.approvedNotes,
+      complementText,
+    );
+    if (autoAdvancedFlowA.flow.currentSessionId) {
+      await waitReady(autoAdvancedFlowA.flow.currentSessionId);
+    }
+
+    // Caso 2: Bloqueador na triagem pausa em waiting_action e usuário envia respostas diretamente ao avançar para o Bloco 02.
+    const createFlowBRes = await fetch(`${baseUrl}/api/factory/flows`, {
+      method: 'POST',
+      headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        task: { inputType: 'title', value: 'Exportação de relatório', repoPath: repoDir },
+        startSession: true,
+        cols: 100,
+        rows: 30,
+      }),
+    });
+    assert.equal(createFlowBRes.status, 201);
+    const flowBBody = (await createFlowBRes.json()) as {
+      flow: { id: string };
+      session: BackgroundSessionSummary;
+    };
+    const flowBId = flowBBody.flow.id;
+    assert.ok(flowBBody.session.reportPath);
+    await waitReady(flowBBody.session.sessionId);
+
+    writeFileSync(flowBBody.session.reportPath, triageMarkdown('Triagem com ambiguidade de formato.'));
+    writeFactoryStageSidecar(flowBBody.session.reportPath, 'triage', {
+      blockers: ['Confirmar se a exportação deve ser CSV ou XLSX'],
+    });
+    sessionManager.writeInput(flowBBody.session.sessionId, 'EXIT0');
+
+    const pausedFlowB = await waitForFlowDetails(
+      () => getDetails(flowBId),
+      details => details.flow.state === 'waiting_action' && details.flow.currentSessionId === null,
+    );
+    assert.equal(pausedFlowB.flow.currentStage, 'triage');
+    assert.deepEqual(pausedFlowB.triageGate, {
+      blockers: ['Confirmar se a exportação deve ser CSV ou XLSX'],
+      jiraError: null,
+      blocked: true,
+    });
+
+    const userAnswer = 'Exportar exclusivamente em CSV UTF-8 com separador vírgula.';
+    const advanceWithAnswerRes = await fetch(`${baseUrl}/api/factory/flows/${flowBId}/advance`, {
+      method: 'POST',
+      headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ startSession: true, approvedNotes: userAnswer }),
+    });
+    assert.equal(advanceWithAnswerRes.status, 200);
+    const advancedFlowB = (await advanceWithAnswerRes.json()) as {
+      flow: { currentStage: string; currentSessionId: string | null };
+      session: BackgroundSessionSummary;
+    };
+    assert.equal(advancedFlowB.flow.currentStage, 'planning');
+    const planningPrompt = await waitReady(advancedFlowB.session.sessionId);
+    assert.match(planningPrompt, /RESPOSTAS E COMPLEMENTOS APROVADOS PELO USUÁRIO/);
+    assert.ok(planningPrompt.includes(userAnswer));
+
+    const flowBDetails = await getDetails(flowBId);
+    assert.equal(flowBDetails.stages.find(s => s.name === 'planning')?.approvedNotes, userAnswer);
+  },
+);

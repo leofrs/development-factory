@@ -9,6 +9,7 @@ import {
 import type {
   BackgroundSessionSummary,
   FactoryFlow,
+  FactoryFlowDetails,
   FactoryPreflightResponse,
 } from '@development-factory/shared';
 import { BackgroundTasksPopover } from '../src/components/BackgroundTasksPopover';
@@ -606,4 +607,89 @@ test('FactoryFlowRoadmapModal e BackgroundTasksPopover exibem motivo de pausa e 
   assert.match(popoverHtml, /Reinício do servidor interrompeu a etapa Desenvolvimento/);
   assert.match(popoverHtml, /Retomar etapa do fluxo RES-405 · Retomada após restart/);
   assert.match(popoverHtml, />Retomar etapa</);
+});
+
+test('FactoryFlowRoadmapModal exibe portão humano estruturado do Bloco 01 com bloqueadores, erro do Jira e campo de respostas', () => {
+  const flowId = '77777777-7777-4777-8777-777777777777';
+  const blockedTriageFlow = createFlow({
+    id: flowId,
+    title: 'JIRA-501 · Portão de Triagem',
+    currentStage: 'triage',
+    state: 'waiting_action',
+    currentSessionId: null,
+    loopPausedReason:
+      'Triagem pausada: falha ao consultar o Jira MCP (Erro 401) e 2 bloqueadores/ambiguidades aguardando resposta humana antes do Planejamento.',
+  });
+
+  const initialDetails: FactoryFlowDetails = {
+    contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+    flow: blockedTriageFlow,
+    stages: [
+      {
+        contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+        id: '88888888-8888-4888-8888-888888888881',
+        flowId,
+        name: 'triage',
+        state: 'waiting_action',
+        sessionId: null,
+        reportPath: '/tmp/artifacts/spec.md',
+        sessionPath: null,
+        approvedNotes: 'Contexto inicial do relator.',
+        createdAt: '2026-11-19T12:00:00.000Z',
+        updatedAt: '2026-11-19T12:05:00.000Z',
+        startedAt: '2026-11-19T12:00:00.000Z',
+        finishedAt: null,
+        error: null,
+      },
+    ],
+    artifacts: [
+      {
+        contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+        id: '99999999-9999-4999-8999-999999999991',
+        flowId,
+        stage: 'triage',
+        sessionId: null,
+        kind: 'specification',
+        format: 'markdown',
+        path: '/tmp/artifacts/spec.md',
+        status: 'ready',
+        iteration: 0,
+        createdAt: '2026-11-19T12:05:00.000Z',
+        updatedAt: '2026-11-19T12:05:00.000Z',
+        error: null,
+      },
+    ],
+    worktreePath: null,
+    branchName: null,
+    baseBranch: null,
+    checkpoints: [],
+    triageGate: {
+      blockers: ['Definir provedor de e-mail', 'Confirmar limite de tentativas'],
+      jiraError: 'Erro 401 ao consultar Jira MCP',
+      blocked: true,
+    },
+  };
+
+  const html = renderToStaticMarkup(
+    createElement(FactoryFlowRoadmapModal, {
+      flow: blockedTriageFlow,
+      initialDetails,
+      onClose: noop,
+      onAdvanceFlowStage: noopAsync,
+      onRerunFlowStage: noopAsync,
+      onViewMarkdown: noop,
+    }),
+  );
+
+  assert.match(html, /Portão humano · Ação necessária/);
+  assert.match(html, /Falha na consulta ao Jira MCP/);
+  assert.match(html, /Erro 401 ao consultar Jira MCP/);
+  assert.match(html, /Bloqueadores e ambiguidades identificados/);
+  assert.match(html, /Definir provedor de e-mail/);
+  assert.match(html, /Confirmar limite de tentativas/);
+  assert.match(html, /Complemento enviado anteriormente/);
+  assert.match(html, /Contexto inicial do relator\./);
+  assert.match(html, /Respostas aos bloqueadores \/ Complemento de contexto/);
+  assert.match(html, />Reexecutar</);
+  assert.match(html, /Avançar para Planejamento/);
 });

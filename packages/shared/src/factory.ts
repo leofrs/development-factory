@@ -9,9 +9,10 @@ const timestamp = z.iso.datetime();
 const text = z.string().trim().min(1);
 const time = (value: string): number => Date.parse(value);
 const jiraKeyPattern = /^[A-Z][A-Z0-9_]*-\d+$/i;
-const approvedNotesSchema = text
+export const FactoryApprovedNotesSchema = text
   .max(FACTORY_APPROVED_NOTES_MAX_LENGTH)
   .refine(value => !value.includes('\0'), 'Notas inválidas');
+const approvedNotesSchema = FactoryApprovedNotesSchema;
 
 const absoluteWslPathSchema = text
   .max(4096)
@@ -462,9 +463,27 @@ export const FactoryTriageSidecarSchema = z.strictObject({
         .nullable(),
     })
     .nullable(),
+  jiraError: text.nullable().optional(),
   technicalContext: text,
 });
 export type FactoryTriageSidecar = z.infer<typeof FactoryTriageSidecarSchema>;
+
+export const FactoryTriageGateSchema = z.strictObject({
+  blockers: z.array(text),
+  jiraError: text.nullable(),
+  blocked: z.boolean(),
+});
+export type FactoryTriageGate = z.infer<typeof FactoryTriageGateSchema>;
+
+export function evaluateFactoryTriageGate(sidecar: FactoryTriageSidecar): FactoryTriageGate {
+  const blockers = sidecar.blockers;
+  const jiraError = sidecar.jiraError ?? null;
+  return {
+    blockers,
+    jiraError,
+    blocked: blockers.length > 0 || jiraError !== null,
+  };
+}
 
 const pendingDecisionSchema = z
   .strictObject({
@@ -929,6 +948,7 @@ export const FactoryFlowDetailsSchema = z
     branchName: gitBranchNameSchema.nullable().optional(),
     baseBranch: gitBranchNameSchema.nullable().optional(),
     checkpoints: z.array(FactoryFlowCheckpointSchema).default([]),
+    triageGate: FactoryTriageGateSchema.nullable().optional(),
   })
   .transform(details => ({
     ...details,
@@ -1051,6 +1071,7 @@ export type ReturnFactoryStageRequest = z.infer<typeof ReturnFactoryStageRequest
 
 export const RerunFactoryStageRequestSchema = z.strictObject({
   stage: FactoryStageNameSchema.optional(),
+  approvedNotes: approvedNotesSchema.optional(),
   cols: z.number().int().min(2).max(500).optional(),
   rows: z.number().int().min(1).max(300).optional(),
 });

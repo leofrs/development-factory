@@ -43,9 +43,14 @@ import {
 
 interface FactoryFlowRoadmapModalProps {
   flow: FactoryFlow;
+  initialDetails?: FactoryFlowDetails;
   onClose: () => void;
   onAdvanceFlowStage: (flowId: string, approvedNotes?: string) => Promise<void>;
-  onRerunFlowStage: (flowId: string, stage: FactoryStageName) => Promise<void>;
+  onRerunFlowStage: (
+    flowId: string,
+    stage: FactoryStageName,
+    approvedNotes?: string,
+  ) => Promise<void>;
   onReturnFlowStage?: (
     flowId: string,
     targetStage: ReturnFactoryTargetStage,
@@ -208,6 +213,7 @@ function renderStageIconBadge(
 
 export function FactoryFlowRoadmapModal({
   flow,
+  initialDetails,
   onClose,
   onAdvanceFlowStage,
   onRerunFlowStage,
@@ -216,8 +222,8 @@ export function FactoryFlowRoadmapModal({
   onViewMarkdown,
 }: FactoryFlowRoadmapModalProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
-  const [details, setDetails] = useState<FactoryFlowDetails | null>(null);
-  const [loadingDetails, setLoadingDetails] = useState(true);
+  const [details, setDetails] = useState<FactoryFlowDetails | null>(initialDetails ?? null);
+  const [loadingDetails, setLoadingDetails] = useState(initialDetails === undefined);
   const [detailsError, setDetailsError] = useState<string | null>(null);
   const [detailsRefreshTick, setDetailsRefreshTick] = useState(0);
   const [busyAction, setBusyAction] = useState<'advance' | 'rerun' | 'return' | 'cancel' | null>(null);
@@ -554,9 +560,22 @@ export function FactoryFlowRoadmapModal({
                         onReturnFlowStage &&
                         canStartDevelopment,
                       );
+                      const isTriageWaitingAction =
+                        stage.id === 'triage' &&
+                        isCurrentStage &&
+                        flow.state === 'waiting_action';
+                      const triageGate =
+                        stage.id === 'triage' && isCurrentStage
+                          ? currentDetails?.triageGate
+                          : undefined;
+                      const isTriageGateBlocked = Boolean(triageGate?.blocked);
+                      const hasTriageComplement =
+                        stage.id === 'triage' && approvedNotes.trim().length > 0;
                       const acceptsApprovedNotes =
+                        isTriageWaitingAction ||
                         (canAdvanceCurrent &&
-                          (nextStage === 'development' ||
+                          (nextStage === 'planning' ||
+                            nextStage === 'development' ||
                             nextStage === 'tests' ||
                             nextStage === 'review')) ||
                         canReturnFromReview;
@@ -594,6 +613,50 @@ export function FactoryFlowRoadmapModal({
                               <p className="mt-2 text-xs leading-5 text-muted">
                                 {stage.description}
                               </p>
+
+                              {isTriageGateBlocked && triageGate && (
+                                <div
+                                  role="region"
+                                  aria-label="Bloqueadores e falhas de triagem"
+                                  className="mt-3 space-y-2 rounded-xl border border-warning/40 bg-warning/10 p-3 text-xs text-primary"
+                                >
+                                  <p className="flex items-center gap-1.5 font-semibold text-warning">
+                                    <AlertTriangle size={13} className="shrink-0" />
+                                    Portão humano · Ação necessária
+                                  </p>
+                                  {triageGate.jiraError && (
+                                    <div className="rounded-lg border border-danger/30 bg-danger/10 px-2.5 py-2 text-[11px] text-danger">
+                                      <p className="font-semibold">Falha na consulta ao Jira MCP</p>
+                                      <p className="mt-0.5">{triageGate.jiraError}</p>
+                                    </div>
+                                  )}
+                                  {triageGate.blockers.length > 0 && (
+                                    <div>
+                                      <p className="text-[11px] font-medium text-secondary">
+                                        Bloqueadores e ambiguidades identificados:
+                                      </p>
+                                      <ul className="mt-1 list-disc space-y-1 pl-4 text-[11px] leading-4 text-primary">
+                                        {triageGate.blockers.map((blocker, index) => (
+                                          <li key={`${index}-${blocker}`}>{blocker}</li>
+                                        ))}
+                                      </ul>
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+
+                              {isCurrentStage &&
+                                stage.id === 'triage' &&
+                                stageRecord?.approvedNotes && (
+                                  <div className="mt-3 rounded-lg border border-line bg-page px-2.5 py-2 text-[11px] text-secondary">
+                                    <p className="font-medium text-primary">
+                                      Complemento enviado anteriormente
+                                    </p>
+                                    <p className="mt-0.5 whitespace-pre-wrap break-words">
+                                      {stageRecord.approvedNotes}
+                                    </p>
+                                  </div>
+                                )}
 
                               {(stageRecord?.error ?? stageArtifactError) && (
                                 <p className="mt-2 rounded-lg border border-danger/30 bg-danger/10 px-2.5 py-1.5 text-[11px] text-danger">
@@ -684,8 +747,14 @@ export function FactoryFlowRoadmapModal({
                                     onClick={() => {
                                       void runAction(
                                         'rerun',
-                                        () => onRerunFlowStage(flow.id, stage.id),
+                                        () =>
+                                          onRerunFlowStage(
+                                            flow.id,
+                                            stage.id,
+                                            hasTriageComplement ? approvedNotes.trim() : undefined,
+                                          ),
                                         'Não foi possível reexecutar a etapa.',
+                                        hasTriageComplement,
                                       );
                                     }}
                                     className="modal-button px-2.5 py-1 text-[11px] disabled:opacity-60"
@@ -695,18 +764,27 @@ export function FactoryFlowRoadmapModal({
                                     ) : (
                                       <RotateCcw size={11} />
                                     )}
-                                    Reexecutar
+                                    {hasTriageComplement
+                                      ? 'Reexecutar com complemento'
+                                      : 'Reexecutar'}
                                   </button>
                                 )}
 
                                 {acceptsApprovedNotes && (
                                   <label className="grid w-full gap-1 text-xs text-primary">
-                                    Notas / Decisões Aprovadas (opcional)
+                                    {stage.id === 'triage'
+                                      ? 'Respostas aos bloqueadores / Complemento de contexto'
+                                      : 'Notas / Decisões Aprovadas (opcional)'}
                                     <textarea
                                       value={approvedNotes}
                                       rows={3}
                                       maxLength={FACTORY_APPROVED_NOTES_MAX_LENGTH}
                                       disabled={busyAction !== null}
+                                      placeholder={
+                                        stage.id === 'triage'
+                                          ? 'Responda às dúvidas acima, cole o conteúdo da task do Jira ou adicione contexto complementar...'
+                                          : undefined
+                                      }
                                       onChange={event => setApprovedNotes(event.target.value)}
                                       className="rounded-lg border border-line bg-page p-2 text-xs focus-visible:outline-2 focus-visible:outline-accent"
                                     />
@@ -779,6 +857,7 @@ export function FactoryFlowRoadmapModal({
                                     aria-busy={busyAction === 'advance'}
                                     onClick={() => {
                                       const shouldPassNotes =
+                                        nextStage === 'planning' ||
                                         nextStage === 'development' ||
                                         nextStage === 'tests' ||
                                         nextStage === 'review';
@@ -804,7 +883,9 @@ export function FactoryFlowRoadmapModal({
                                     )}
                                     {stage.id === 'planning' && nextStage === 'development'
                                       ? 'Aprovar e Iniciar Desenvolvimento'
-                                      : `Avançar para ${getFactoryStageLabel(nextStage)}`}
+                                      : isTriageGateBlocked && approvedNotes.trim().length > 0
+                                        ? 'Enviar respostas e avançar'
+                                        : `Avançar para ${getFactoryStageLabel(nextStage)}`}
                                   </button>
                                 )}
 

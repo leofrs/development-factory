@@ -8,6 +8,8 @@ import {
   FactoryReviewSidecarSchema,
   FactoryTestsSidecarSchema,
   FactoryTriageSidecarSchema,
+  RerunFactoryStageRequestSchema,
+  evaluateFactoryTriageGate,
 } from '@development-factory/shared';
 import type {
   FactoryBackendCommandCheck,
@@ -314,4 +316,52 @@ test('rejeita referências de branches inválidas nos metadados de PR', () => {
   const invalidHead = { ...pr, headBranch: 'bad branch' };
   assert.equal(FactoryPrSidecarSchema.safeParse(invalidBase).success, false);
   assert.equal(FactoryPrSidecarSchema.safeParse(invalidHead).success, false);
+});
+
+test('valida jiraError no sidecar de triagem, avalia portão humano e aceita approvedNotes no rerun', () => {
+  const withJiraNull = FactoryTriageSidecarSchema.parse({ ...triage, jiraError: null });
+  assert.deepEqual(evaluateFactoryTriageGate(withJiraNull), {
+    blockers: [],
+    jiraError: null,
+    blocked: false,
+  });
+
+  const withBlocker = FactoryTriageSidecarSchema.parse({
+    ...triage,
+    blockers: ['Definir provedor de e-mail'],
+  });
+  assert.deepEqual(evaluateFactoryTriageGate(withBlocker), {
+    blockers: ['Definir provedor de e-mail'],
+    jiraError: null,
+    blocked: true,
+  });
+
+  const withJiraFailure = FactoryTriageSidecarSchema.parse({
+    ...triage,
+    jiraError: 'Jira MCP retornou 401 Unauthorized',
+  });
+  assert.deepEqual(evaluateFactoryTriageGate(withJiraFailure), {
+    blockers: [],
+    jiraError: 'Jira MCP retornou 401 Unauthorized',
+    blocked: true,
+  });
+
+  assert.equal(
+    FactoryTriageSidecarSchema.safeParse({ ...triage, jiraError: '   ' }).success,
+    false,
+  );
+  assert.equal(
+    RerunFactoryStageRequestSchema.safeParse({
+      stage: 'triage',
+      approvedNotes: 'Usar SendGrid no ambiente de produção.',
+    }).success,
+    true,
+  );
+  assert.equal(
+    RerunFactoryStageRequestSchema.safeParse({
+      stage: 'triage',
+      approvedNotes: '   ',
+    }).success,
+    false,
+  );
 });
