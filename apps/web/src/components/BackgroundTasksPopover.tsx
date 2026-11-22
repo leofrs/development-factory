@@ -1,10 +1,11 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type Dispatch, type SetStateAction } from 'react';
 import {
   ChevronRight,
   Compass,
   FileText,
   GitPullRequest,
   Loader2,
+  RotateCcw,
   Square,
   Terminal,
   X,
@@ -13,6 +14,7 @@ import {
   isFinalFactoryFlowState,
   type BackgroundSessionSummary,
   type FactoryFlow,
+  type FactoryStageName,
 } from '@development-factory/shared';
 import {
   getFactoryFlowStatePresentation,
@@ -39,6 +41,7 @@ interface BackgroundTasksPopoverProps {
   onViewReport: (reportPath: string) => void;
   onStopSession?: (sessionId: string) => Promise<BackgroundSessionSummary>;
   onCancelFlow?: (flowId: string) => Promise<FactoryFlow>;
+  onRerunFlowStage?: (flowId: string, stage: FactoryStageName) => Promise<void>;
   onClose: () => void;
 }
 
@@ -71,9 +74,11 @@ export function BackgroundTasksPopover({
   onViewReport,
   onStopSession,
   onCancelFlow,
+  onRerunFlowStage,
   onClose,
 }: BackgroundTasksPopoverProps) {
   const [stoppingIds, setStoppingIds] = useState<Set<string>>(() => new Set());
+  const [resumingIds, setResumingIds] = useState<Set<string>>(() => new Set());
   const [actionError, setActionError] = useState<string | null>(null);
   const items = useMemo<BackgroundOperationItem[]>(() => {
     const sessionsById = new Map<string, BackgroundSessionSummary>();
@@ -138,17 +143,19 @@ export function BackgroundTasksPopover({
   const isLoading = (loadingSessions || loadingFactoryFlows) && items.length === 0;
   const combinedError = actionError ?? sessionsError ?? factoryFlowsError;
 
-  async function runStopOperation(
+  async function runItemOperation(
     targetId: string,
+    busyIds: Set<string>,
+    setBusyIds: Dispatch<SetStateAction<Set<string>>>,
     operation: () => Promise<void>,
     fallbackError: string,
   ): Promise<void> {
-    if (stoppingIds.has(targetId)) {
+    if (busyIds.has(targetId)) {
       return;
     }
 
     setActionError(null);
-    setStoppingIds(current => {
+    setBusyIds(current => {
       const next = new Set(current);
       next.add(targetId);
       return next;
@@ -159,7 +166,7 @@ export function BackgroundTasksPopover({
     } catch (error) {
       setActionError(error instanceof Error ? error.message : fallbackError);
     } finally {
-      setStoppingIds(current => {
+      setBusyIds(current => {
         const next = new Set(current);
         next.delete(targetId);
         return next;
@@ -236,7 +243,11 @@ export function BackgroundTasksPopover({
                   meta.label === 'Em execução' &&
                   (Boolean(onCancelFlow) ||
                     (linkedSession?.status === 'running' && Boolean(onStopSession)));
+                const isPausedForResume =
+                  flow.state === 'waiting_action' && Boolean(flow.loopPausedReason);
+                const canResume = isPausedForResume && Boolean(onRerunFlowStage);
                 const isStopping = stoppingIds.has(flow.id);
+                const isResuming = resumingIds.has(flow.id);
 
                 return (
                   <li
@@ -289,11 +300,16 @@ export function BackgroundTasksPopover({
                         >
                           {flow.target.repoPath}
                         </p>
+                        {isPausedForResume && flow.loopPausedReason && (
+                          <p className="mt-1.5 text-[11px] leading-4 text-warning">
+                            {flow.loopPausedReason}
+                          </p>
+                        )}
                       </div>
                       <ChevronRight size={15} className="mt-1 shrink-0 text-muted" />
                     </button>
 
-                    {(reportPath || canStop) && (
+                    {(reportPath || canResume || canStop) && (
                       <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
                         {reportPath && (
                           <button
@@ -309,16 +325,44 @@ export function BackgroundTasksPopover({
                           </button>
                         )}
 
+                        {canResume && onRerunFlowStage && (
+                          <button
+                            type="button"
+                            disabled={isResuming || isStopping}
+                            aria-busy={isResuming}
+                            aria-label={`Retomar etapa do fluxo ${flow.title}`}
+                            className="modal-button border-accent/40 bg-selected/60 px-2.5 py-1.5 text-[11px] text-accent hover:bg-selected disabled:cursor-not-allowed disabled:opacity-60"
+                            onClick={() => {
+                              void runItemOperation(
+                                flow.id,
+                                resumingIds,
+                                setResumingIds,
+                                () => onRerunFlowStage(flow.id, flow.currentStage),
+                                'Não foi possível retomar a etapa do fluxo.',
+                              );
+                            }}
+                          >
+                            {isResuming ? (
+                              <Loader2 size={11} className="animate-spin" />
+                            ) : (
+                              <RotateCcw size={11} />
+                            )}
+                            <span>{isResuming ? 'Retomando...' : 'Retomar etapa'}</span>
+                          </button>
+                        )}
+
                         {canStop && (
                           <button
                             type="button"
-                            disabled={isStopping}
+                            disabled={isStopping || isResuming}
                             aria-busy={isStopping}
                             aria-label={`Parar fluxo ${flow.title}`}
                             className="modal-button ml-auto border-danger/30 px-2.5 py-1.5 text-[11px] text-danger hover:bg-danger/10 disabled:cursor-not-allowed disabled:opacity-60"
                             onClick={() => {
-                              void runStopOperation(
+                              void runItemOperation(
                                 flow.id,
+                                stoppingIds,
+                                setStoppingIds,
                                 async () => {
                                   if (onCancelFlow) {
                                     await onCancelFlow(flow.id);
@@ -445,8 +489,10 @@ export function BackgroundTasksPopover({
                         aria-label={`Parar execução de ${session.title}`}
                         className="modal-button ml-auto border-danger/30 px-2.5 py-1.5 text-[11px] text-danger hover:bg-danger/10 disabled:cursor-not-allowed disabled:opacity-60"
                         onClick={() => {
-                          void runStopOperation(
+                          void runItemOperation(
                             session.sessionId,
+                            stoppingIds,
+                            setStoppingIds,
                             async () => {
                               await onStopSession(session.sessionId);
                             },

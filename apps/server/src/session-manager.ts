@@ -6,12 +6,14 @@ import * as pty from 'node-pty';
 import { WebSocket } from 'ws';
 import {
   FACTORY_FLOW_CONTRACT_VERSION,
+  FACTORY_STAGE_ORDER,
   REVIEW_CONTRACT_VERSION,
   getReadyFactoryStageArtifact,
   isFactoryReviewApprovedVerdict,
   isFinalFactoryFlowState,
   type AppEvent,
   type BackgroundSessionSummary,
+  type FactoryFlow,
   type FactoryFlowArtifactKind,
   type FactoryFlowDetails,
   type FactoryFlowError,
@@ -77,6 +79,88 @@ export const DEFAULT_COMPLETED_SESSION_TTL_MS = 30 * 60 * 1000;
 const DEFAULT_CLEANUP_INTERVAL_MS = 60 * 1000;
 const APP_EVENT_NAME = 'app_event';
 
+export type FactoryStageTimeoutsMs = Readonly<Record<FactoryStageName, number>>;
+
+export const DEFAULT_FACTORY_STAGE_TIMEOUTS_MS: FactoryStageTimeoutsMs = Object.freeze({
+  triage: 15 * 60 * 1000,
+  planning: 15 * 60 * 1000,
+  development: 30 * 60 * 1000,
+  tests: 20 * 60 * 1000,
+  review: 20 * 60 * 1000,
+  pr: 15 * 60 * 1000,
+});
+
+const FACTORY_STAGE_LABELS: Readonly<Record<FactoryStageName, string>> = {
+  triage: 'Triagem',
+  planning: 'Planejamento',
+  development: 'Desenvolvimento',
+  tests: 'Testes',
+  review: 'Code Review',
+  pr: 'PR',
+};
+
+const FACTORY_STAGE_TIMEOUT_ENV_KEYS: Readonly<Record<FactoryStageName, string>> = {
+  triage: 'FACTORY_STAGE_TIMEOUT_TRIAGE_MS',
+  planning: 'FACTORY_STAGE_TIMEOUT_PLANNING_MS',
+  development: 'FACTORY_STAGE_TIMEOUT_DEVELOPMENT_MS',
+  tests: 'FACTORY_STAGE_TIMEOUT_TESTS_MS',
+  review: 'FACTORY_STAGE_TIMEOUT_REVIEW_MS',
+  pr: 'FACTORY_STAGE_TIMEOUT_PR_MS',
+};
+
+function parsePositiveTimeoutEnv(raw: string | undefined): number | undefined {
+  const trimmed = raw?.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return undefined;
+  }
+  return Math.floor(parsed);
+}
+
+function resolveStageTimeoutsMs(
+  overrides?: Partial<Record<FactoryStageName, number>>,
+): FactoryStageTimeoutsMs {
+  const globalEnvTimeout = parsePositiveTimeoutEnv(process.env.FACTORY_STAGE_TIMEOUT_MS);
+  const resolved = { ...DEFAULT_FACTORY_STAGE_TIMEOUTS_MS };
+
+  for (const stage of FACTORY_STAGE_ORDER) {
+    if (globalEnvTimeout !== undefined) {
+      resolved[stage] = globalEnvTimeout;
+    }
+    const stageEnvTimeout = parsePositiveTimeoutEnv(process.env[FACTORY_STAGE_TIMEOUT_ENV_KEYS[stage]]);
+    if (stageEnvTimeout !== undefined) {
+      resolved[stage] = stageEnvTimeout;
+    }
+    const override = overrides?.[stage];
+    if (override !== undefined) {
+      if (!Number.isFinite(override) || override <= 0) {
+        throw new Error(`Timeout inválido para a etapa ${stage}: informe um número finito positivo em ms.`);
+      }
+      resolved[stage] = Math.floor(override);
+    }
+  }
+
+  return Object.freeze(resolved);
+}
+
+function formatTimeoutDuration(timeoutMs: number): string {
+  if (timeoutMs < 1000) {
+    return `${timeoutMs} ms`;
+  }
+  if (timeoutMs < 60_000) {
+    return `${Math.round(timeoutMs / 1000)}s`;
+  }
+  if (timeoutMs % 60_000 === 0) {
+    return `${timeoutMs / 60_000} min`;
+  }
+  const minutes = Math.floor(timeoutMs / 60_000);
+  const seconds = Math.round((timeoutMs % 60_000) / 1000);
+  return seconds > 0 ? `${minutes} min ${seconds}s` : `${minutes} min`;
+}
+
 export type SessionManagerErrorCode =
   | 'SESSION_NOT_FOUND'
   | FactoryRepositoryProfileErrorCode
@@ -110,6 +194,7 @@ export interface SessionManagerOptions {
   readonly completedSessionTtlMs?: number;
   readonly bufferMaxBytes?: number;
   readonly cleanupIntervalMs?: number;
+  readonly stageTimeoutsMs?: Partial<Record<FactoryStageName, number>>;
   readonly now?: () => number;
 }
 
@@ -133,6 +218,7 @@ interface SessionBackendChecks {
 interface SessionRuntime {
   readonly session: ManagedSession;
   readonly backendChecks?: SessionBackendChecks;
+  stageTimeoutTimer?: ReturnType<typeof setTimeout>;
   operationChain: Promise<void>;
   finalized: boolean;
 }
@@ -261,7 +347,7 @@ function broadcast(session: ManagedSession, message: ServerMessage): void {
   }
 }
 
-function disposePtyProcess(session: ManagedSession, killProcess: boolean): void {
+function disposePtyProcess(session: ManagedSession, killProcess: boolean, signal?: string): void {
   const current = session.ptyProcess;
   session.ptyProcess = undefined;
   for (const subscription of session.subscriptions) {
@@ -270,7 +356,7 @@ function disposePtyProcess(session: ManagedSession, killProcess: boolean): void 
   session.subscriptions = [];
   if (killProcess && current) {
     try {
-      current.kill();
+      current.kill(signal);
     } catch {
       // O processo pode já ter sido encerrado pelo sistema operacional.
     }
@@ -284,6 +370,7 @@ export class SessionManager {
   readonly #maxConcurrentSessions: number;
   readonly #completedSessionTtlMs: number;
   readonly #bufferMaxBytes: number;
+  readonly #stageTimeoutsMs: FactoryStageTimeoutsMs;
   readonly #now: () => number;
   readonly #runtimes = new Map<string, SessionRuntime>();
   readonly #startingFlowIds = new Set<string>();
@@ -310,18 +397,180 @@ export class SessionManager {
       throw new Error('cleanupIntervalMs deve ser um número finito positivo.');
     }
 
+    const stageTimeoutsMs = resolveStageTimeoutsMs(options.stageTimeoutsMs);
+
     this.#reviewService = reviewService;
     this.#factoryFlowService = options.factoryFlowService;
     this.#eventEmitter = options.eventEmitter ?? new EventEmitter();
     this.#maxConcurrentSessions = maxConcurrentSessions;
     this.#completedSessionTtlMs = completedSessionTtlMs;
     this.#bufferMaxBytes = bufferMaxBytes;
+    this.#stageTimeoutsMs = stageTimeoutsMs;
     this.#now = options.now ?? Date.now;
 
     this.#cleanupTimer = setInterval(() => {
       this.cleanupExpiredSessions();
     }, cleanupIntervalMs);
     this.#cleanupTimer.unref();
+
+    this.#reconcileOnStartup();
+  }
+
+  getStageTimeoutMs(stage: FactoryStageName): number {
+    return this.#stageTimeoutsMs[stage];
+  }
+
+  async reconcileInterruptedFlows(): Promise<FactoryFlow[]> {
+    if (!this.#factoryFlowService) {
+      return [];
+    }
+    const reconciled = await this.#factoryFlowService.reconcileInterruptedFlows(flow =>
+      this.#hasActiveRuntimeForFlow(flow),
+    );
+    for (const flow of reconciled) {
+      this.#emitEvent({
+        type: 'factory_flow.updated',
+        flow,
+      });
+    }
+    return reconciled;
+  }
+
+  #reconcileOnStartup(): void {
+    if (!this.#factoryFlowService) {
+      return;
+    }
+    const reconciled = this.#factoryFlowService.reconcileInterruptedFlowsSync(flow =>
+      this.#hasActiveRuntimeForFlow(flow),
+    );
+    for (const flow of reconciled) {
+      this.#emitEvent({
+        type: 'factory_flow.updated',
+        flow,
+      });
+    }
+  }
+
+  #hasActiveRuntimeForFlow(flow: FactoryFlow): boolean {
+    if (this.#startingFlowIds.has(flow.id)) {
+      return true;
+    }
+    for (const runtime of this.#runtimes.values()) {
+      if (
+        runtime.session.status === 'running' &&
+        runtime.session.activeFactorySession?.flowId === flow.id
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  #clearStageTimeout(runtime: SessionRuntime): void {
+    if (runtime.stageTimeoutTimer) {
+      clearTimeout(runtime.stageTimeoutTimer);
+      runtime.stageTimeoutTimer = undefined;
+    }
+  }
+
+  #scheduleStageTimeout(runtime: SessionRuntime, stage: FactoryStageName): void {
+    this.#clearStageTimeout(runtime);
+    const timeoutMs = this.getStageTimeoutMs(stage);
+    const timer = setTimeout(() => {
+      void this.#handleFactoryStageTimeout(runtime, timeoutMs).catch(() => {
+        // Falhas inesperadas no encerramento por timeout não devem derrubar o processo.
+      });
+    }, timeoutMs);
+    timer.unref();
+    runtime.stageTimeoutTimer = timer;
+  }
+
+  async #handleFactoryStageTimeout(runtime: SessionRuntime, timeoutMs: number): Promise<void> {
+    const { session } = runtime;
+    if (runtime.finalized || session.status !== 'running') {
+      return;
+    }
+
+    this.#clearStageTimeout(runtime);
+    runtime.finalized = true;
+    runtime.backendChecks?.abortController.abort();
+    disposePtyProcess(session, true, 'SIGTERM');
+
+    const stage = session.activeFactorySession?.stage;
+    const stageLabel = stage ? FACTORY_STAGE_LABELS[stage] : 'atual';
+    const formattedTimeout = formatTimeoutDuration(timeoutMs);
+    const timeoutErrorMessage = `Tempo limite (${formattedTimeout}) excedido na etapa ${stageLabel}.`;
+    const timeoutPausedReason = `Execução pausada após exceder o tempo limite (${formattedTimeout}) da etapa ${stageLabel}. Retome a etapa para tentar novamente.`;
+
+    const currentHistory = session.history;
+    session.history = undefined;
+    currentHistory?.finish(timeoutErrorMessage, false);
+
+    session.status = 'failed';
+    session.finishedAt = new Date(this.#now()).toISOString();
+    session.signal = 'SIGTERM';
+    session.error = timeoutErrorMessage;
+
+    broadcast(session, { type: 'error', message: timeoutErrorMessage });
+    broadcast(session, {
+      type: 'status',
+      state: 'exited',
+      sessionId: session.sessionId,
+    });
+
+    const activeFactory = session.activeFactorySession;
+    if (activeFactory && this.#factoryFlowService) {
+      const flowService = this.#factoryFlowService;
+      const timeoutError = buildFactoryFlowError('FACTORY_STAGE_TIMEOUT', timeoutErrorMessage, true);
+      this.#enqueue(runtime, async () => {
+        if (session.sessionPath) {
+          await flowService.registerArtifact(
+            activeFactory.flowId,
+            {
+              stage: activeFactory.stage,
+              sessionId: session.sessionId,
+              kind: 'session_log',
+              format: 'markdown',
+              path: session.sessionPath,
+              status: 'ready',
+            },
+            { sessionPath: session.sessionPath },
+          );
+        }
+        await this.#registerFactorySessionReport(session, activeFactory, 'failed', timeoutError);
+        const currentFlow = flowService.getFlow(activeFactory.flowId).flow;
+        if (!isFinalFactoryFlowState(currentFlow.state)) {
+          const paused = await flowService.transitionFlow(activeFactory.flowId, {
+            to: 'waiting_action',
+            stage: activeFactory.stage,
+            reason: timeoutErrorMessage,
+            currentSessionId: null,
+            loopPausedReason: timeoutPausedReason,
+            error: timeoutError,
+          });
+          this.#emitEvent({
+            type: 'factory_flow.updated',
+            flow: paused.flow,
+          });
+          broadcast(session, {
+            type: 'factory_flow',
+            flowId: activeFactory.flowId,
+            stage: activeFactory.stage,
+            state: paused.flow.state,
+          });
+        }
+      });
+      try {
+        await runtime.operationChain;
+      } catch {
+        // #enqueue já captura e transmite erros operacionais.
+      }
+    }
+
+    this.#emitEvent({
+      type: 'session.finished',
+      session: toBackgroundSessionSummary(session),
+    });
   }
 
   onEvent(listener: (event: AppEvent) => void): () => void {
@@ -1186,6 +1435,7 @@ export class SessionManager {
     ];
 
     this.#runtimes.set(session.sessionId, runtime);
+    this.#scheduleStageTimeout(runtime, stage);
     if (this.#factoryFlowService && activeFactorySession) {
       try {
         const attached = await this.#factoryFlowService.attachSession(
@@ -1475,6 +1725,7 @@ export class SessionManager {
     checksError?: FactoryStageArtifactError,
   ): void {
     const { session } = runtime;
+    this.#clearStageTimeout(runtime);
     runtime.finalized = true;
     const currentHistory = session.history;
     session.history = undefined;
@@ -2008,6 +2259,7 @@ export class SessionManager {
       return toBackgroundSessionSummary(session);
     }
 
+    this.#clearStageTimeout(runtime);
     runtime.finalized = true;
     runtime.backendChecks?.abortController.abort();
     disposePtyProcess(session, true);

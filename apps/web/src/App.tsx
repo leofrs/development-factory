@@ -250,6 +250,9 @@ export default function App() {
         onViewReport={path => setViewingMarkdownPath(path)}
         onStopSession={stopSession}
         onCancelFlow={cancelFlow}
+        onRerunFlowStage={async (flowId, stage) => {
+          await rerunFlowStage(flowId, { stage, cols: 120, rows: 36 });
+        }}
         theme={theme}
         onToggleTheme={toggleTheme}
       />

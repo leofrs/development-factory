@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Activity, Code2, Factory, GitPullRequest, History, Loader2, Scale } from 'lucide-react';
-import { isFinalFactoryFlowState, type BackgroundSessionSummary, type FactoryFlow } from '@development-factory/shared';
+import {
+  isFinalFactoryFlowState,
+  type BackgroundSessionSummary,
+  type FactoryFlow,
+  type FactoryStageName,
+} from '@development-factory/shared';
 import { BackgroundTasksPopover } from './BackgroundTasksPopover';
 import { ThemeToggle } from './ThemeToggle';
 import type { Theme } from '../theme';
@@ -26,6 +31,7 @@ interface FloatingDockProps {
   onViewReport: (reportPath: string) => void;
   onStopSession?: (sessionId: string) => Promise<BackgroundSessionSummary>;
   onCancelFlow?: (flowId: string) => Promise<FactoryFlow>;
+  onRerunFlowStage?: (flowId: string, stage: FactoryStageName) => Promise<void>;
   theme: Theme;
   onToggleTheme: () => void;
 }
@@ -49,6 +55,7 @@ export function FloatingDock({
   onViewReport,
   onStopSession,
   onCancelFlow,
+  onRerunFlowStage,
   theme,
   onToggleTheme,
 }: FloatingDockProps) {
@@ -139,6 +146,7 @@ export function FloatingDock({
             onViewReport={onViewReport}
             onStopSession={onStopSession}
             onCancelFlow={onCancelFlow}
+            onRerunFlowStage={onRerunFlowStage}
             onClose={() => setPopoverOpen(false)}
           />
         )}

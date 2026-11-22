@@ -438,10 +438,34 @@ export function FactoryFlowRoadmapModal({
           {flow.loopPausedReason && (
             <div
               role="alert"
-              className="mb-5 flex items-center gap-2 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-xs text-warning"
+              className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-xs text-warning"
             >
-              <AlertTriangle size={15} className="shrink-0" />
-              <span>{flow.loopPausedReason}</span>
+              <span className="flex min-w-0 flex-1 items-center gap-2">
+                <AlertTriangle size={15} className="shrink-0" />
+                <span>{flow.loopPausedReason}</span>
+              </span>
+              {flow.state === 'waiting_action' && (
+                <button
+                  type="button"
+                  disabled={busyAction !== null}
+                  aria-busy={busyAction === 'rerun'}
+                  onClick={() => {
+                    void runAction(
+                      'rerun',
+                      () => onRerunFlowStage(flow.id, flow.currentStage),
+                      'Não foi possível retomar a etapa.',
+                    );
+                  }}
+                  className="modal-button shrink-0 border-warning/40 bg-surface px-2.5 py-1 text-[11px] font-medium text-warning hover:bg-warning/15 disabled:opacity-60"
+                >
+                  {busyAction === 'rerun' ? (
+                    <Loader2 size={11} className="animate-spin" />
+                  ) : (
+                    <RotateCcw size={11} />
+                  )}
+                  {busyAction === 'rerun' ? 'Retomando...' : 'Retomar etapa'}
+                </button>
+              )}
             </div>
           )}
 

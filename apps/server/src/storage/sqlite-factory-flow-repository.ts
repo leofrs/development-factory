@@ -1014,9 +1014,11 @@ export class SqliteFactoryFlowRepository {
     const nextError =
       nextStageState === 'failed'
         ? (updatedFlow.error ?? currentStage.error)
-        : nextIndex < prevIndex
+        : nextIndex < prevIndex || (nextStageState === 'running' && command.error === null)
           ? null
-          : currentStage.error;
+          : command.error !== undefined
+            ? command.error
+            : currentStage.error;
 
     this.updateStage(updatedFlow.id, updatedFlow.currentStage, {
       state: nextStageState,

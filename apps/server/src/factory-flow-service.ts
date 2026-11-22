@@ -147,6 +147,20 @@ export interface UpdateStagePathsInput {
   readonly at?: string;
 }
 
+export interface ReconcileInterruptedFlowsOptions {
+  readonly reason?: string;
+  readonly at?: string;
+}
+
+const FACTORY_STAGE_LABELS: Readonly<Record<FactoryStageName, string>> = {
+  triage: 'Triagem',
+  planning: 'Planejamento',
+  development: 'Desenvolvimento',
+  tests: 'Testes',
+  review: 'Code Review',
+  pr: 'PR',
+};
+
 /** Erro de domínio/aplicação do serviço de fluxos da Factory com código estável e status HTTP associado. */
 export class FactoryFlowServiceError extends Error {
   constructor(
@@ -997,6 +1011,7 @@ export class FactoryFlowService {
           at,
           reason: options.reason ?? `Sessão ${parsedSessionId.data} vinculada à etapa ${targetStage}`,
           currentSessionId: parsedSessionId.data,
+          loopPausedReason: null,
           error: null,
         });
       });
@@ -1403,6 +1418,69 @@ export class FactoryFlowService {
           sessionPath: patch.sessionPath,
           updatedAt: patch.at ?? this.now(),
         }),
+      );
+    } catch (error) {
+      throw mapUnexpectedError(error);
+    }
+  }
+
+  /**
+   * Reconcilia sincronamente no startup fluxos que ficaram presos em `running` no SQLite sem runtime ativo.
+   */
+  reconcileInterruptedFlowsSync(
+    isFlowActive: (flow: FactoryFlow) => boolean,
+    options: ReconcileInterruptedFlowsOptions = {},
+  ): FactoryFlow[] {
+    try {
+      return this.repository.runInTransaction(() => {
+        const runningFlows = this.repository.listFlows({ state: 'running' });
+        const reconciled: FactoryFlow[] = [];
+        const baseAt = options.at ?? this.now();
+        const baseAtMs = Date.parse(baseAt);
+
+        for (const flow of runningFlows) {
+          if (isFlowActive(flow)) {
+            continue;
+          }
+
+          const flowUpdatedMs = Date.parse(flow.updatedAt);
+          const effectiveAt =
+            Number.isFinite(baseAtMs) && Number.isFinite(flowUpdatedMs) && baseAtMs >= flowUpdatedMs
+              ? baseAt
+              : flow.updatedAt;
+          const stageLabel = FACTORY_STAGE_LABELS[flow.currentStage];
+          const loopPausedReason =
+            options.reason ??
+            `Reinício do servidor interrompeu a etapa ${stageLabel} em execução. Retome a etapa para continuar.`;
+          const updated = this.repository.saveFlowTransition(flow.id, {
+            to: 'waiting_action',
+            stage: flow.currentStage,
+            at: effectiveAt,
+            reason: `Reconciliação automática: ${loopPausedReason}`,
+            currentSessionId: null,
+            loopPausedReason,
+            error: null,
+          });
+          reconciled.push(updated.flow);
+        }
+
+        return reconciled;
+      });
+    } catch (error) {
+      throw mapUnexpectedError(error);
+    }
+  }
+
+  /**
+   * Reconcilia com lock assíncrono fluxos presos em `running` no SQLite sem runtime ativo em memória.
+   */
+  async reconcileInterruptedFlows(
+    isFlowActive: (flow: FactoryFlow) => boolean,
+    options: ReconcileInterruptedFlowsOptions = {},
+  ): Promise<FactoryFlow[]> {
+    try {
+      return await this.repository.withWriteLock(() =>
+        this.reconcileInterruptedFlowsSync(isFlowActive, options),
       );
     } catch (error) {
       throw mapUnexpectedError(error);

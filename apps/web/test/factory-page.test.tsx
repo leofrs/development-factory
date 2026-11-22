@@ -559,3 +559,51 @@ test('Etapas 04 (tests) e 05 (review) geram notificações e botões de reexecu�
   assert.match(viewerHtml, /Plano técnico/);
   assert.match(viewerHtml, /artifacts\/11111111-1111-4111-8111-111111111111\/plano\.md/);
 });
+
+test('FactoryFlowRoadmapModal e BackgroundTasksPopover exibem motivo de pausa e botão Retomar etapa em 1 clique', () => {
+  const reconciledFlow = createFlow({
+    id: '66666666-6666-4666-8666-666666666666',
+    title: 'RES-405 · Retomada após restart',
+    currentStage: 'development',
+    state: 'waiting_action',
+    currentSessionId: null,
+    loopPausedReason:
+      'Reinício do servidor interrompeu a etapa Desenvolvimento em execução. Retome a etapa para continuar.',
+    error: {
+      contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+      code: 'FACTORY_STAGE_TIMEOUT',
+      message: 'Tempo limite (30 min) excedido na etapa Desenvolvimento.',
+      occurredAt: '2026-11-19T12:30:00.000Z',
+      retryable: true,
+    },
+  });
+
+  const roadmapHtml = renderToStaticMarkup(
+    createElement(FactoryFlowRoadmapModal, {
+      flow: reconciledFlow,
+      onClose: noop,
+      onAdvanceFlowStage: noopAsync,
+      onRerunFlowStage: noopAsync,
+      onViewMarkdown: noop,
+    }),
+  );
+  assert.match(roadmapHtml, /Reinício do servidor interrompeu a etapa Desenvolvimento/);
+  assert.match(roadmapHtml, /Tempo limite \(30 min\) excedido na etapa Desenvolvimento/);
+  assert.match(roadmapHtml, />Retomar etapa</);
+
+  const popoverHtml = renderToStaticMarkup(
+    createElement(BackgroundTasksPopover, {
+      id: 'bg-reconciled',
+      sessions: [],
+      factoryFlows: [reconciledFlow],
+      onOpenTerminal: noop,
+      onOpenFlowRoadmap: noop,
+      onViewReport: noop,
+      onRerunFlowStage: noopAsync,
+      onClose: noop,
+    }),
+  );
+  assert.match(popoverHtml, /Reinício do servidor interrompeu a etapa Desenvolvimento/);
+  assert.match(popoverHtml, /Retomar etapa do fluxo RES-405 · Retomada após restart/);
+  assert.match(popoverHtml, />Retomar etapa</);
+});

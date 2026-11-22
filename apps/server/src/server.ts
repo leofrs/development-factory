@@ -17,6 +17,7 @@ import {
   type AppEvent,
   type FactoryFlowApiErrorCode,
   type FactoryFlowApiErrorResponse,
+  type FactoryStageName,
   type FactoryWorktreeRetentionPolicy,
   type ReviewApiErrorResponse,
 } from '@development-factory/shared';
@@ -826,6 +827,7 @@ async function handleFactoryFlowApiRequest(
 
 export interface CreateReviewServerOptions extends ReviewRepositoryOptions {
   readonly worktreeRetentionPolicy?: FactoryWorktreeRetentionPolicy;
+  readonly stageTimeoutsMs?: Partial<Record<FactoryStageName, number>>;
 }
 
 export function createReviewServer(options?: CreateReviewServerOptions) {
@@ -837,7 +839,10 @@ export function createReviewServer(options?: CreateReviewServerOptions) {
       ? { worktreeRetentionPolicy: options.worktreeRetentionPolicy }
       : {}),
   });
-  const sessionManager = new SessionManager(reviewService, { factoryFlowService });
+  const sessionManager = new SessionManager(reviewService, {
+    factoryFlowService,
+    ...(options?.stageTimeoutsMs ? { stageTimeoutsMs: options.stageTimeoutsMs } : {}),
+  });
   const sseClients = new Set<() => void>();
   const server = createServer(async (req, res) => {
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
