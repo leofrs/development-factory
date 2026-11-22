@@ -34,6 +34,9 @@ import type {
   TransitionFactoryFlowResponse,
 } from '@development-factory/shared';
 import { resolveReviewReportDirectory } from './artifacts.js';
+import type { BackendCommandStartListener } from './factory-backend-checks.js';
+import { FactoryCliOutput, formatFactoryActivityValue } from './factory-cli-output.js';
+import type { FactoryActivityField } from './factory-cli-output.js';
 import { appendFactoryDevelopmentChecks } from './factory-development-checks.js';
 import { buildDevelopmentRunnerArgs, readFactoryDevelopmentInputs } from './factory-development.js';
 import { FactoryFlowServiceError, type FactoryFlowService } from './factory-flow-service.js';
@@ -106,6 +109,12 @@ const FACTORY_STAGE_LABELS: Readonly<Record<FactoryStageName, string>> = {
   tests: 'Testes',
   review: 'Code Review',
   pr: 'PR',
+};
+
+const FACTORY_ACTIVITY_LABELS: Record<FactoryActivityField, string> = {
+  lastReadFile: 'Leitura',
+  lastEditedFile: 'Edição',
+  lastCommand: 'Comando',
 };
 
 const FACTORY_STAGE_TIMEOUT_ENV_KEYS: Readonly<Record<FactoryStageName, string>> = {
@@ -373,6 +382,12 @@ function broadcast(session: ManagedSession, message: ServerMessage): void {
   for (const subscriber of session.subscribers) {
     sendToSocket(subscriber, message);
   }
+}
+
+function recordSessionOutput(session: ManagedSession, data: string): void {
+  session.buffer.append(data);
+  session.history?.record(data);
+  broadcast(session, { type: 'output', data });
 }
 
 function disposePtyProcess(session: ManagedSession, killProcess: boolean, signal?: string): void {
@@ -1435,7 +1450,7 @@ export class SessionManager {
     try {
       child = pty.spawn(
         'claude',
-        ['--verbose', ...runnerArgs, '-p', prompt],
+        ['--verbose', '--output-format', 'stream-json', ...runnerArgs, '-p', prompt],
         {
           name: 'xterm-256color',
           cols: input.cols,
@@ -1463,18 +1478,22 @@ export class SessionManager {
       );
     }
 
+    const runnerOutput = new FactoryCliOutput(
+      data => recordSessionOutput(session, data),
+      (field, value) => this.#recordFactoryActivity(session, field, value),
+    );
     session.ptyProcess = child;
     session.subscriptions = [
       child.onData(data => {
-        if (session.ptyProcess !== child) {
-          return;
+        if (session.ptyProcess === child) {
+          runnerOutput.append(data);
         }
-        session.buffer.append(data);
-        session.history?.record(data);
-        broadcast(session, { type: 'output', data });
       }),
       child.onExit(({ exitCode, signal }) => {
-        this.#handlePtyExit(runtime, child, exitCode, signal);
+        if (session.ptyProcess === child) {
+          runnerOutput.finish();
+          this.#handlePtyExit(runtime, child, exitCode, signal);
+        }
       }),
     ];
 
@@ -1514,6 +1533,19 @@ export class SessionManager {
     });
 
     return session;
+  }
+
+  #recordFactoryActivity(session: ManagedSession, field: FactoryActivityField, value: string): void {
+    if (session.status !== 'running' || !value || session.factoryActivity?.[field] === value) {
+      return;
+    }
+    session.factoryActivity = {
+      ...session.factoryActivity,
+      revision: (session.factoryActivity?.revision ?? 0) + 1,
+      [field]: value,
+    };
+    this.#emitEvent({ type: 'session.updated', session: toBackgroundSessionSummary(session) });
+    recordSessionOutput(session, `${FACTORY_ACTIVITY_LABELS[field]} · ${value}\r\n`);
   }
 
   async #failFactoryStart(
@@ -1750,6 +1782,15 @@ export class SessionManager {
     if (exitCode === 0 && checks && reportPath) {
       this.#enqueue(runtime, async () => {
         let checksError: FactoryStageArtifactError | undefined;
+        const onCommandStart: BackendCommandStartListener = command => {
+          if (!checks.abortController.signal.aborted) {
+            this.#recordFactoryActivity(
+              session,
+              'lastCommand',
+              formatFactoryActivityValue(command.join(' ')),
+            );
+          }
+        };
         try {
           if (checks.stage === 'development') {
             checksError = await appendFactoryDevelopmentChecks(
@@ -1757,6 +1798,7 @@ export class SessionManager {
               checks.worktreePath,
               checks.commands,
               checks.abortController.signal,
+              onCommandStart,
             );
           } else {
             await appendFactoryTestsChecks(
@@ -1764,6 +1806,7 @@ export class SessionManager {
               checks.worktreePath,
               checks.commands,
               checks.abortController.signal,
+              onCommandStart,
             );
           }
         } catch (error) {

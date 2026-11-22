@@ -8,6 +8,7 @@ import {
 } from '@development-factory/shared';
 import { BackgroundTasksPopover } from './BackgroundTasksPopover';
 import { ThemeToggle } from './ThemeToggle';
+import type { BackgroundOperationsState } from '../hooks/useBackgroundOperations.js';
 import type { Theme } from '../theme';
 import { isFactoryFlowActivelyRunning } from '../utils/factory-flow-status';
 import { isSessionActivelyRunning } from '../utils/session-status';
@@ -26,7 +27,8 @@ interface FloatingDockProps {
   sessionsError?: string | null;
   loadingFactoryFlows?: boolean;
   factoryFlowsError?: string | null;
-  onOpenTerminal: (sessionId: string) => void;
+  onOpenTerminal: BackgroundOperationsState['openTerminal'];
+  onOpenFlowTerminal: (flowId: string) => boolean;
   onOpenFlowRoadmap?: (flowId: string) => void;
   onViewReport: (reportPath: string) => void;
   onStopSession?: (sessionId: string) => Promise<BackgroundSessionSummary>;
@@ -51,6 +53,7 @@ export function FloatingDock({
   loadingFactoryFlows,
   factoryFlowsError,
   onOpenTerminal,
+  onOpenFlowTerminal,
   onOpenFlowRoadmap,
   onViewReport,
   onStopSession,
@@ -142,6 +145,7 @@ export function FloatingDock({
             loadingFactoryFlows={loadingFactoryFlows}
             factoryFlowsError={factoryFlowsError}
             onOpenTerminal={onOpenTerminal}
+            onOpenFlowTerminal={onOpenFlowTerminal}
             onOpenFlowRoadmap={onOpenFlowRoadmap}
             onViewReport={onViewReport}
             onStopSession={onStopSession}

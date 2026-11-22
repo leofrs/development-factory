@@ -1,8 +1,13 @@
 import { useId, useState } from 'react';
 import { Activity, CircleCheck, Clock, FolderGit2, GitPullRequest, Plus } from 'lucide-react';
-import type { FactoryFlow, FactoryStageName } from '@development-factory/shared';
+import type {
+  BackgroundSessionSummary,
+  FactoryFlow,
+  FactoryStageName,
+} from '@development-factory/shared';
 import type { FactoryPreflight } from '../hooks/useFactoryPreflight.js';
 import {
+  getRunningFactorySession,
   isFactoryFlowActivelyRunning,
   isFactoryFlowReadyForPr,
 } from '../utils/factory-flow-status.js';
@@ -13,10 +18,12 @@ interface FactoryPageProps {
   repoPath: string;
   preflight: FactoryPreflight;
   factoryFlows: readonly FactoryFlow[];
+  sessionsById: ReadonlyMap<string, BackgroundSessionSummary>;
   loadingFactoryFlows: boolean;
   factoryFlowsError: string | null;
   onPickDirectory: () => void;
   onOpenNewFlow: () => void;
+  onOpenFlowTerminal: (flowId: string) => boolean;
   onOpenFlowRoadmap: (flowId: string) => void;
   onCancelFlow: (flowId: string) => Promise<FactoryFlow>;
   onRerunFlowStage: (flowId: string, stage: FactoryStageName) => Promise<void>;
@@ -46,10 +53,12 @@ export function FactoryPage({
   repoPath,
   preflight,
   factoryFlows,
+  sessionsById,
   loadingFactoryFlows,
   factoryFlowsError,
   onPickDirectory,
   onOpenNewFlow,
+  onOpenFlowTerminal,
   onOpenFlowRoadmap,
   onCancelFlow,
   onRerunFlowStage,
@@ -212,10 +221,12 @@ export function FactoryPage({
                           <li key={flow.id}>
                             <FactoryFlowCard
                               flow={flow}
+                              runningSession={getRunningFactorySession(flow, sessionsById)}
                               readyForPr={id === 'readyForPr'}
                               actionPending={action?.pending === true}
                               actionError={action?.pending === false ? action.error : undefined}
                               onOpenRoadmap={() => onOpenFlowRoadmap(flow.id)}
+                              onOpenTerminal={() => onOpenFlowTerminal(flow.id)}
                               onStop={() => {
                                 runFlowAction(
                                   flow.id,

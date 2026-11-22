@@ -32,7 +32,11 @@ import {
   parseAppEventMessage,
   stopSessionRequest,
 } from '../api/sessions';
-import { getFactoryStageLabel, isFactoryFlowReadyForPr } from '../utils/factory-flow-status.js';
+import {
+  getFactoryStageLabel,
+  getRunningFactorySession,
+  isFactoryFlowReadyForPr,
+} from '../utils/factory-flow-status.js';
 
 const INITIAL_RECONNECT_DELAY_MS = 1_000;
 const MAX_RECONNECT_DELAY_MS = 10_000;
@@ -42,6 +46,10 @@ export type ActiveTerminalSession =
   | { mode: 'review'; request: ReviewRequest; sessionId?: string }
   | { mode: 'factory'; request: FactoryRequest; sessionId?: string }
   | { mode: BackgroundSessionMode; sessionId: string };
+
+interface OpenTerminalOptions {
+  liveOnly?: boolean;
+}
 
 /** Notificação in-app gerada por marcos das operações em background. */
 export interface AppNotification {
@@ -88,8 +96,8 @@ export interface BackgroundOperationsState {
     request: ReturnFactoryStageRequest,
   ) => Promise<AdvanceFactoryFlowResult>;
   cancelFlow: (flowId: string, request?: CancelFactoryFlowRequest) => Promise<FactoryFlow>;
-  openTerminal: (sessionId: string) => void;
-  openFlowTerminal: (flowId: string) => boolean;
+  openTerminal: (sessionId: string, options?: OpenTerminalOptions) => boolean;
+  openFlowTerminal: (flowId: string, options?: OpenTerminalOptions) => boolean;
   minimizeTerminal: () => void;
   bindActiveSessionId: (sessionId: string) => void;
   stopSession: (sessionId: string) => Promise<BackgroundSessionSummary>;
@@ -105,6 +113,22 @@ function sortSessionsByRecent(
   return Array.from(sessionsMap.values()).sort(
     (a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt),
   );
+}
+
+function mergeSessionSummary(
+  previous: BackgroundSessionSummary | undefined,
+  incoming: BackgroundSessionSummary,
+): BackgroundSessionSummary {
+  if (previous && previous.status !== 'running' && incoming.status === 'running') {
+    return previous;
+  }
+  if (
+    previous?.factoryActivity &&
+    previous.factoryActivity.revision > (incoming.factoryActivity?.revision ?? 0)
+  ) {
+    return { ...incoming, factoryActivity: previous.factoryActivity };
+  }
+  return incoming;
 }
 
 function sortFactoryFlowsByRecent(flowsMap: ReadonlyMap<string, FactoryFlow>): FactoryFlow[] {
@@ -364,7 +388,7 @@ export function useBackgroundOperations(): BackgroundOperationsState {
   const upsertSession = useCallback((session: BackgroundSessionSummary) => {
     setSessionsMap((current) => {
       const next = new Map(current);
-      next.set(session.sessionId, session);
+      next.set(session.sessionId, mergeSessionSummary(current.get(session.sessionId), session));
       sessionsMapRef.current = next;
       return next;
     });
@@ -383,18 +407,26 @@ export function useBackgroundOperations(): BackgroundOperationsState {
   }, []);
 
   const hydrateSessions = useCallback(async (signal?: AbortSignal) => {
+    const sessionsAtRequestStart = sessionsMapRef.current;
     try {
       const list = await fetchSessions(signal);
       if (signal?.aborted) {
         return;
       }
 
-      const next = new Map<string, BackgroundSessionSummary>();
-      for (const item of list) {
-        next.set(item.sessionId, item);
-      }
-      sessionsMapRef.current = next;
-      setSessionsMap(next);
+      setSessionsMap(current => {
+        const next = new Map<string, BackgroundSessionSummary>();
+        for (const session of list) {
+          next.set(session.sessionId, mergeSessionSummary(current.get(session.sessionId), session));
+        }
+        for (const [id, session] of current) {
+          if (!next.has(id) && session !== sessionsAtRequestStart.get(id)) {
+            next.set(id, session);
+          }
+        }
+        sessionsMapRef.current = next;
+        return next;
+      });
       setSessionsError(null);
     } catch (error) {
       if (isAbortError(error) || signal?.aborted) {
@@ -611,8 +643,7 @@ export function useBackgroundOperations(): BackgroundOperationsState {
     let eventSource: EventSource | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
     let reconnectDelay = INITIAL_RECONNECT_DELAY_MS;
-    let hasDisconnected = false;
-    let reconnectAbortController: AbortController | null = null;
+    let streamHydration: AbortController | null = null;
 
     const connect = () => {
       if (disposed) {
@@ -624,13 +655,14 @@ export function useBackgroundOperations(): BackgroundOperationsState {
 
       source.onopen = () => {
         reconnectDelay = INITIAL_RECONNECT_DELAY_MS;
-        if (hasDisconnected) {
-          hasDisconnected = false;
-          reconnectAbortController?.abort();
-          reconnectAbortController = new AbortController();
-          void hydrateSessions(reconnectAbortController.signal);
-          void hydrateFactoryFlows(reconnectAbortController.signal);
-        }
+        streamHydration?.abort();
+        streamHydration = new AbortController();
+        const { signal } = streamHydration;
+        Promise.all([hydrateSessions(signal), hydrateFactoryFlows(signal)]).catch(() => {
+          if (!signal.aborted) {
+            setSessionsError('Não foi possível atualizar as operações.');
+          }
+        });
       };
 
       source.onmessage = (messageEvent: MessageEvent<string>) => {
@@ -641,7 +673,6 @@ export function useBackgroundOperations(): BackgroundOperationsState {
       };
 
       source.onerror = () => {
-        hasDisconnected = true;
         if (source.readyState !== EventSource.CLOSED) {
           return;
         }
@@ -666,7 +697,7 @@ export function useBackgroundOperations(): BackgroundOperationsState {
       if (reconnectTimer !== undefined) {
         clearTimeout(reconnectTimer);
       }
-      reconnectAbortController?.abort();
+      streamHydration?.abort();
       eventSource?.close();
     };
   }, [handleAppEvent, hydrateFactoryFlows, hydrateSessions]);
@@ -743,31 +774,30 @@ export function useBackgroundOperations(): BackgroundOperationsState {
     [upsertFactoryFlow],
   );
 
-  const openTerminal = useCallback((sessionId: string) => {
+  const openTerminal = useCallback((sessionId: string, options?: OpenTerminalOptions) => {
     const existing = sessionsMapRef.current.get(sessionId);
-    if (!existing) {
-      return;
+    if (!existing || (options?.liveOnly && existing.status !== 'running')) {
+      return false;
     }
     setActiveTerminalSession({ mode: existing.mode, sessionId: existing.sessionId });
+    return true;
   }, []);
 
   const openFlowTerminal = useCallback(
-    (flowId: string): boolean => {
+    (flowId: string, options?: OpenTerminalOptions): boolean => {
       const flow = factoryFlowsMapRef.current.get(flowId);
+      if (options?.liveOnly) {
+        const session = flow ? getRunningFactorySession(flow, sessionsMapRef.current) : undefined;
+        return session ? openTerminal(session.sessionId, options) : false;
+      }
       if (flow?.currentSessionId && sessionsMapRef.current.has(flow.currentSessionId)) {
-        openTerminal(flow.currentSessionId);
-        return true;
+        return openTerminal(flow.currentSessionId);
       }
 
       const matchingSession = sortSessionsByRecent(sessionsMapRef.current).find(
         (item) => item.flowId === flowId,
       );
-      if (!matchingSession) {
-        return false;
-      }
-
-      openTerminal(matchingSession.sessionId);
-      return true;
+      return matchingSession ? openTerminal(matchingSession.sessionId) : false;
     },
     [openTerminal],
   );

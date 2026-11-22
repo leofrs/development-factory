@@ -34,6 +34,7 @@ import {
   type FactoryStageState,
   type ReturnFactoryTargetStage,
 } from '@development-factory/shared';
+import type { BackgroundSessionSummary } from '@development-factory/shared';
 import { fetchFactoryFlowDetails } from '../api/factory-flows';
 import {
   getFactoryFlowStatePresentation,
@@ -42,6 +43,7 @@ import {
   getFactoryStageStatePresentation,
   getFactoryStageStep,
 } from '../utils/factory-flow-status';
+import { FactoryLiveTerminalButton } from './FactoryLiveTerminalButton.js';
 import {
   FactoryPlanningGatePanel,
   createPlanningGateDrafts,
@@ -49,11 +51,14 @@ import {
   type PlanningCriterionDraft,
   type PlanningDecisionDraft,
 } from './FactoryPlanningGatePanel';
+import { FactoryStageActivity } from './FactoryStageActivity.js';
 
 interface FactoryFlowRoadmapModalProps {
   flow: FactoryFlow;
+  runningSession?: BackgroundSessionSummary;
   initialDetails?: FactoryFlowDetails;
   onClose: () => void;
+  onOpenFlowTerminal: (flowId: string) => boolean;
   onAdvanceFlowStage: (
     flowId: string,
     options?: {
@@ -228,8 +233,10 @@ function renderStageIconBadge(
 
 export function FactoryFlowRoadmapModal({
   flow,
+  runningSession,
   initialDetails,
   onClose,
+  onOpenFlowTerminal,
   onAdvanceFlowStage,
   onRerunFlowStage,
   onReturnFlowStage,
@@ -746,6 +753,7 @@ export function FactoryFlowRoadmapModal({
                         canReturnFromReview;
                       const canStopCurrent =
                         isCurrentStage && flow.state === 'running' && Boolean(onCancelFlow);
+                      const stageSession = isCurrentStage ? runningSession : undefined;
 
                       return (
                         <Fragment key={stage.id}>
@@ -778,6 +786,14 @@ export function FactoryFlowRoadmapModal({
                               <p className="mt-2 text-xs leading-5 text-muted">
                                 {stage.description}
                               </p>
+                              {stageSession && (
+                                <div className="mt-3">
+                                  <FactoryStageActivity
+                                    key={stageSession.sessionId}
+                                    session={stageSession}
+                                  />
+                                </div>
+                              )}
 
                               {isTriageGateBlocked && triageGate && (
                                 <div
@@ -853,8 +869,17 @@ export function FactoryFlowRoadmapModal({
                               canRerunCurrent ||
                               canAdvanceCurrent ||
                               canReturnFromReview ||
+                              stageSession ||
                               canStopCurrent) && (
                               <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-line-subtle pt-3">
+                                {stageSession && (
+                                  <FactoryLiveTerminalButton
+                                    key={stageSession.sessionId}
+                                    title={flow.title}
+                                    onOpen={() => onOpenFlowTerminal(flow.id)}
+                                    onOpened={closeRoadmap}
+                                  />
+                                )}
                                 {stageMarkdownPath && (
                                   <button
                                     type="button"

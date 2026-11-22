@@ -8,6 +8,7 @@ import { DirectoryPicker } from './components/DirectoryPicker';
 import { HistoryModal } from './components/HistoryModal';
 import { FloatingDock, type AppView } from './components/FloatingDock';
 import { FactoryPage } from './components/FactoryPage.js';
+import { getRunningFactorySession } from './utils/factory-flow-status.js';
 import { FactoryFlowRoadmapModal } from './components/FactoryFlowRoadmapModal';
 import { FactoryTaskModal } from './components/FactoryTaskModal';
 import { MarkdownViewerModal } from './components/MarkdownViewerModal';
@@ -154,6 +155,10 @@ export default function App() {
     ? (factoryFlows.find(item => item.id === roadmapFlowId) ?? null)
     : null;
 
+  function openLiveFlowTerminal(flowId: string): boolean {
+    return openFlowTerminal(flowId, { liveOnly: true });
+  }
+
   return (
     <div className="min-h-screen bg-page text-primary">
       {view === 'factory' ? (
@@ -161,6 +166,7 @@ export default function App() {
           repoPath={repoPath}
           preflight={repositoryPreflight}
           factoryFlows={factoryFlows}
+          sessionsById={sessionsById}
           loadingFactoryFlows={loadingFactoryFlows}
           factoryFlowsError={factoryFlowsError}
           onPickDirectory={() => setPickingDirectory('repository')}
@@ -169,6 +175,7 @@ export default function App() {
             setConfiguringFactoryTask(true);
           }}
           onOpenFlowRoadmap={setRoadmapFlowId}
+          onOpenFlowTerminal={openLiveFlowTerminal}
           onCancelFlow={cancelFlow}
           onRerunFlowStage={rerunStage}
         />
@@ -262,6 +269,7 @@ export default function App() {
         factoryFlowsError={factoryFlowsError}
         onOpenTerminal={openTerminal}
         onOpenFlowRoadmap={setRoadmapFlowId}
+        onOpenFlowTerminal={openLiveFlowTerminal}
         onViewReport={path => setViewingMarkdownPath(path)}
         onStopSession={stopSession}
         onCancelFlow={cancelFlow}
@@ -321,7 +329,9 @@ export default function App() {
       {roadmapFlow && (
         <FactoryFlowRoadmapModal
           flow={roadmapFlow}
+          runningSession={getRunningFactorySession(roadmapFlow, sessionsById)}
           onClose={() => setRoadmapFlowId(null)}
+          onOpenFlowTerminal={openLiveFlowTerminal}
           onAdvanceFlowStage={async (flowId, options) => {
             await advanceFlowStage(flowId, {
               startSession: true,

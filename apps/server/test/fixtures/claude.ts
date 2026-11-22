@@ -11,6 +11,26 @@ process.stdin.on('data', chunk => {
   if (text.includes('\u0003')) process.exit(130);
   if (text === 'EXIT0') process.exit(0);
   if (text === 'EXIT') process.exit(7);
+  if (text === 'ACTIVITY' && process.argv.includes('stream-json')) {
+    const tools = [
+      { id: 'read', name: 'Read', input: { file_path: 'src/index.ts' } },
+      { id: 'write', name: 'Write', input: { file_path: 'triage.md', content: 'relatório bruto' } },
+    ];
+    console.log(
+      JSON.stringify({
+        type: 'assistant',
+        message: { content: tools.map(tool => ({ type: 'tool_use', ...tool })) },
+      }),
+    );
+    console.log(
+      JSON.stringify({
+        type: 'user',
+        message: {
+          content: tools.map(({ id }) => ({ type: 'tool_result', tool_use_id: id, content: 'ok' })),
+        },
+      }),
+    );
+  }
   if (text === 'SAVE') {
     const promptArg = process.argv.slice(2).find(arg => arg.includes('no arquivo '));
     const match = promptArg?.match(/no arquivo ("(?:\\.|[^"\\])*")\./);

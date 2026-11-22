@@ -1,20 +1,24 @@
 import { useId } from 'react';
 import { ArrowUpRight, GitPullRequest, Loader2, RotateCcw, Square } from 'lucide-react';
 import { FACTORY_STAGE_ORDER } from '@development-factory/shared';
-import type { FactoryFlow } from '@development-factory/shared';
+import type { BackgroundSessionSummary, FactoryFlow } from '@development-factory/shared';
 import {
   getFactoryFlowStatePresentation,
   getFactoryStageLabel,
   getFactoryStageStatePresentation,
   getFactoryStageStep,
 } from '../utils/factory-flow-status.js';
+import { FactoryLiveTerminalButton } from './FactoryLiveTerminalButton.js';
+import { FactoryStageActivity } from './FactoryStageActivity.js';
 
 interface FactoryFlowCardProps {
   flow: FactoryFlow;
+  runningSession?: BackgroundSessionSummary;
   readyForPr: boolean;
   actionPending: boolean;
   actionError?: string;
   onOpenRoadmap: () => void;
+  onOpenTerminal: () => boolean;
   onStop: () => void;
   onRerun: () => void;
 }
@@ -66,10 +70,12 @@ function FactoryFlowProgress({ flow }: { flow: FactoryFlow }) {
 
 export function FactoryFlowCard({
   flow,
+  runningSession,
   readyForPr,
   actionPending,
   actionError,
   onOpenRoadmap,
+  onOpenTerminal,
   onStop,
   onRerun,
 }: FactoryFlowCardProps) {
@@ -128,6 +134,9 @@ export function FactoryFlowCard({
       </div>
 
       <FactoryFlowProgress flow={flow} />
+      {runningSession && (
+        <FactoryStageActivity key={runningSession.sessionId} session={runningSession} />
+      )}
 
       <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 gap-y-1 text-[11px]">
         <dt className="text-muted">Branch</dt>
@@ -180,6 +189,13 @@ export function FactoryFlowCard({
       )}
 
       <div className="flex flex-wrap items-center gap-2 border-t border-line-subtle pt-3">
+        {runningSession && (
+          <FactoryLiveTerminalButton
+            key={runningSession.sessionId}
+            title={flow.title}
+            onOpen={onOpenTerminal}
+          />
+        )}
         <button
           type="button"
           onClick={onOpenRoadmap}

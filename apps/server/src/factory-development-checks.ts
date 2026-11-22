@@ -1,6 +1,7 @@
 import { FactoryDevelopmentSidecarSchema } from '@development-factory/shared';
 import type { FactoryDevelopmentChecks, FactoryRepositoryProfile } from '@development-factory/shared';
 import { runBackendCommandCheck, writeValidatedStageSidecar } from './factory-backend-checks.js';
+import type { BackendCommandStartListener } from './factory-backend-checks.js';
 import { FactoryStageArtifactError, getFactoryStageSidecarPath } from './factory-stage-runners.js';
 import { validateFactoryStageArtifacts } from './history.js';
 
@@ -47,14 +48,17 @@ export async function appendFactoryDevelopmentChecks(
   worktreePath: string,
   commands: Pick<FactoryRepositoryProfile['commands'], 'typecheck' | 'lint'>,
   signal: AbortSignal,
+  onCommandStart?: BackendCommandStartListener,
 ): Promise<FactoryStageArtifactError | undefined> {
   signal.throwIfAborted();
   const sidecar = validateFactoryStageArtifacts('development', reportPath);
   const typecheckResult = await runBackendCommandCheck(commands.typecheck, worktreePath, signal, {
     summarizeFailure: summarizeDevelopmentFailure,
+    onStart: onCommandStart,
   });
   const lintResult = await runBackendCommandCheck(commands.lint, worktreePath, signal, {
     summarizeFailure: summarizeDevelopmentFailure,
+    onStart: onCommandStart,
   });
   const backendChecks: FactoryDevelopmentChecks = {
     typecheck: typecheckResult.check,

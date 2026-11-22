@@ -37,6 +37,16 @@ export type BackgroundSessionStatus = z.infer<typeof BackgroundSessionStatusSche
 export const BackgroundSessionHistoryStateSchema = z.enum(['pending', 'saved', 'incomplete']);
 export type BackgroundSessionHistoryState = z.infer<typeof BackgroundSessionHistoryStateSchema>;
 
+export const MAX_FACTORY_ACTIVITY_LENGTH = 512;
+const factoryActivityText = nonEmptyTextSchema.max(MAX_FACTORY_ACTIVITY_LENGTH);
+export const FactorySessionActivitySchema = z.strictObject({
+  revision: z.number().int().positive(),
+  lastReadFile: factoryActivityText.optional(),
+  lastEditedFile: factoryActivityText.optional(),
+  lastCommand: factoryActivityText.optional(),
+});
+export type FactorySessionActivity = z.infer<typeof FactorySessionActivitySchema>;
+
 export const BackgroundSessionSummarySchema = z.strictObject({
   sessionId: uuidSchema,
   mode: BackgroundSessionModeSchema,
@@ -50,6 +60,7 @@ export const BackgroundSessionSummarySchema = z.strictObject({
   executionId: uuidSchema.nullable().optional(),
   flowId: uuidSchema.nullable().optional(),
   stage: FactoryStageNameSchema.nullable().optional(),
+  factoryActivity: FactorySessionActivitySchema.optional(),
   startedAt: isoDatetimeSchema,
   finishedAt: isoDatetimeSchema.nullable(),
   exitCode: z.number().int().nullable().optional(),

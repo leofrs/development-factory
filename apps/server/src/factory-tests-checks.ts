@@ -7,6 +7,7 @@ import type {
   FactoryTestsSidecar,
 } from '@development-factory/shared';
 import { runBackendCommandCheck, writeValidatedStageSidecar } from './factory-backend-checks.js';
+import type { BackendCommandStartListener } from './factory-backend-checks.js';
 import { validateFactoryStageArtifacts } from './history.js';
 
 const TEST_OUTPUT_BYTES = 64 * 1024;
@@ -124,6 +125,7 @@ export async function appendFactoryTestsChecks(
   worktreePath: string,
   commands: Pick<FactoryRepositoryProfile['commands'], 'test' | 'coverage'>,
   signal: AbortSignal,
+  onCommandStart?: BackendCommandStartListener,
 ): Promise<void> {
   signal.throwIfAborted();
   const sidecar = validateFactoryStageArtifacts('tests', reportPath);
@@ -131,10 +133,12 @@ export async function appendFactoryTestsChecks(
   const testResult = await runBackendCommandCheck(commands.test, worktreePath, signal, {
     maxOutputBytes: TEST_OUTPUT_BYTES,
     summarizeFailure: summarizeTestFailure,
+    onStart: onCommandStart,
   });
   const coverageResult = await runBackendCommandCheck(commands.coverage, worktreePath, signal, {
     maxOutputBytes: TEST_OUTPUT_BYTES,
     summarizeFailure: summarizeTestFailure,
+    onStart: onCommandStart,
   });
   signal.throwIfAborted();
 

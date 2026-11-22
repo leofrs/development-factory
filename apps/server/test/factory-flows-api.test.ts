@@ -377,14 +377,50 @@ test('API REST /api/factory/flows valida origem, idempotência, filtros e ciclo 
   assert.ok(sessionASummary.reportPath && sessionBSummary.reportPath);
   assert.deepEqual(triageA.args.slice(0, -1), [
     '--verbose',
+    '--output-format',
+    'stream-json',
     ...buildTriageAndPlanningRunnerArgs('triage', sessionASummary.reportPath),
     '-p',
   ]);
   assert.deepEqual(triageB.args.slice(0, -1), [
     '--verbose',
+    '--output-format',
+    'stream-json',
     ...buildTriageAndPlanningRunnerArgs('triage', sessionBSummary.reportPath),
     '-p',
   ]);
+
+  // A atividade da sessão chega por SSE sem conectar um terminal ao fluxo A.
+  const childA = sessionManager.getSession(sessionAId)?.ptyProcess;
+  assert(childA);
+  childA.write('ACTIVITY');
+  const expectedActivity = {
+    revision: 2,
+    lastReadFile: 'src/index.ts',
+    lastEditedFile: 'triage.md',
+  };
+  const readActivityEvent = () =>
+    events.find(
+      event =>
+        event.type === 'session.updated' &&
+        event.session.sessionId === sessionAId &&
+        event.session.factoryActivity?.revision === 2,
+    );
+  await waitFor(() => Boolean(readActivityEvent()));
+  const activityEvent = readActivityEvent();
+  assert(activityEvent?.type === 'session.updated');
+  assert.equal(activityEvent.session.status, 'running');
+  assert.deepEqual(activityEvent.session.factoryActivity, expectedActivity);
+  assert.equal(sessionManager.getSessionSummary(sessionBId)?.factoryActivity, undefined);
+
+  const sessionSnapshotRes = await fetch(`${baseUrl}/api/sessions/${sessionAId}`, {
+    headers: { Origin: ALLOWED_ORIGIN },
+  });
+  assert.equal(sessionSnapshotRes.status, 200);
+  const snapshot = z.object({ session: BackgroundSessionSummarySchema }).parse(
+    await sessionSnapshotRes.json(),
+  );
+  assert.deepEqual(snapshot.session.factoryActivity, expectedActivity);
 
   // Confere que não é possível avançar ou reexecutar enquanto a sessão está running.
   const advanceRunningRes = await fetch(`${baseUrl}/api/factory/flows/${flowAId}/advance`, {
@@ -506,6 +542,8 @@ test('API REST /api/factory/flows valida origem, idempotência, filtros e ciclo 
   assert.equal(planning.cwd, detailsA.flow.worktreePath);
   assert.deepEqual(planning.args.slice(0, -1), [
     '--verbose',
+    '--output-format',
+    'stream-json',
     ...buildTriageAndPlanningRunnerArgs('planning', planningReport),
     '-p',
   ]);

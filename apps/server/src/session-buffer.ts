@@ -5,6 +5,7 @@ import type {
   BackgroundSessionMode,
   BackgroundSessionStatus,
   BackgroundSessionSummary,
+  FactorySessionActivity,
   FactoryStageName,
 } from '@development-factory/shared';
 import type { createFactoryHistory } from './history.js';
@@ -162,6 +163,7 @@ export interface ManagedSession {
   history: SessionHistoryHandle | undefined;
   activeReviewSession: ActiveReviewSession | undefined;
   activeFactorySession: ActiveFactorySession | undefined;
+  factoryActivity?: FactorySessionActivity;
   readonly subscribers: Set<WebSocket>;
   readonly buffer: SessionOutputBuffer;
   readonly startedAt: string;
@@ -185,6 +187,7 @@ export function toBackgroundSessionSummary(session: ManagedSession): BackgroundS
     executionId: session.activeReviewSession?.executionId ?? null,
     flowId: session.activeFactorySession?.flowId ?? null,
     stage: session.activeFactorySession?.stage ?? null,
+    ...(session.factoryActivity ? { factoryActivity: session.factoryActivity } : {}),
     startedAt: session.startedAt,
     finishedAt: session.finishedAt,
     exitCode: session.exitCode,

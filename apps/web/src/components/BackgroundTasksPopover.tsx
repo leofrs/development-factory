@@ -16,16 +16,19 @@ import {
   type FactoryFlow,
   type FactoryStageName,
 } from '@development-factory/shared';
+import type { BackgroundOperationsState } from '../hooks/useBackgroundOperations.js';
 import {
   getFactoryFlowStatePresentation,
   getFactoryStageLabel,
   getFactoryStageStep,
+  getRunningFactorySession,
   isFactoryFlowActivelyRunning,
 } from '../utils/factory-flow-status';
 import {
   getSessionStatusPresentation,
   isSessionActivelyRunning,
 } from '../utils/session-status';
+import { FactoryLiveTerminalButton } from './FactoryLiveTerminalButton.js';
 
 interface BackgroundTasksPopoverProps {
   id: string;
@@ -36,7 +39,8 @@ interface BackgroundTasksPopoverProps {
   sessionsError?: string | null;
   loadingFactoryFlows?: boolean;
   factoryFlowsError?: string | null;
-  onOpenTerminal: (sessionId: string) => void;
+  onOpenTerminal: BackgroundOperationsState['openTerminal'];
+  onOpenFlowTerminal: (flowId: string) => boolean;
   onOpenFlowRoadmap?: (flowId: string) => void;
   onViewReport: (reportPath: string) => void;
   onStopSession?: (sessionId: string) => Promise<BackgroundSessionSummary>;
@@ -52,6 +56,7 @@ type BackgroundOperationItem =
       sortTime: number;
       flow: FactoryFlow;
       linkedSession?: BackgroundSessionSummary;
+      runningSession?: BackgroundSessionSummary;
     }
   | {
       kind: 'session';
@@ -70,6 +75,7 @@ export function BackgroundTasksPopover({
   loadingFactoryFlows = false,
   factoryFlowsError = null,
   onOpenTerminal,
+  onOpenFlowTerminal,
   onOpenFlowRoadmap,
   onViewReport,
   onStopSession,
@@ -104,6 +110,7 @@ export function BackgroundTasksPopover({
         sortTime: Date.parse(flow.updatedAt),
         flow,
         linkedSession,
+        runningSession: getRunningFactorySession(flow, sessionsById),
       });
     }
 
@@ -226,7 +233,7 @@ export function BackgroundTasksPopover({
           <ul className="space-y-2.5">
             {items.map(item => {
               if (item.kind === 'flow') {
-                const { flow, linkedSession } = item;
+                const { flow, linkedSession, runningSession } = item;
                 const stageStep = getFactoryStageStep(flow.currentStage);
                 const stageLabel = getFactoryStageLabel(flow.currentStage);
                 const meta =
@@ -317,8 +324,16 @@ export function BackgroundTasksPopover({
                       <ChevronRight size={15} className="mt-1 shrink-0 text-muted" />
                     </button>
 
-                    {(reportPath || canResume || canStop) && (
+                    {(reportPath || canResume || canStop || runningSession) && (
                       <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+                        {runningSession && (
+                          <FactoryLiveTerminalButton
+                            key={runningSession.sessionId}
+                            title={flow.title}
+                            onOpen={() => onOpenFlowTerminal(flow.id)}
+                            onOpened={onClose}
+                          />
+                        )}
                         {reportPath && (
                           <button
                             type="button"
@@ -461,6 +476,13 @@ export function BackgroundTasksPopover({
                   </div>
 
                   <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+                    {isFactory && session.status === 'running' && (
+                      <FactoryLiveTerminalButton
+                        title={session.title}
+                        onOpen={() => onOpenTerminal(session.sessionId, { liveOnly: true })}
+                        onOpened={onClose}
+                      />
+                    )}
                     {!isFactory && (
                       <button
                         type="button"

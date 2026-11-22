@@ -14,10 +14,12 @@ import { redactSecrets, redactSecretsInValue } from './secret-redaction.js';
 import { SessionOutputBuffer } from './session-buffer.js';
 
 export type ProfileCommand = FactoryRepositoryProfile['commands']['typecheck'];
+export type BackendCommandStartListener = (command: NonNullable<ProfileCommand>) => void;
 
 export interface BackendCommandCheckOptions {
   readonly maxOutputBytes?: number;
   readonly summarizeFailure?: (plainOutput: string, exitCode: number | null) => string | undefined;
+  readonly onStart?: BackendCommandStartListener;
 }
 
 export interface BackendCommandCheckResult {
@@ -66,6 +68,7 @@ export function runBackendCommandCheck(
     signal.addEventListener('abort', abort, { once: true });
 
     let launchError: NodeJS.ErrnoException | undefined;
+    child.once('spawn', () => options.onStart?.(command));
     child.once('error', (error: NodeJS.ErrnoException) => {
       launchError = error;
     });

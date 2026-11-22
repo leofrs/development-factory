@@ -1,4 +1,5 @@
 import type {
+  BackgroundSessionSummary,
   FactoryFlow,
   FactoryFlowArtifactKind,
   FactoryFlowArtifactStatus,
@@ -73,6 +74,26 @@ export function getFactoryArtifactKindLabel(kind: FactoryFlowArtifactKind): stri
 /** Indica se um fluxo da Factory está em execução ativa ou na fila. */
 export function isFactoryFlowActivelyRunning(flow: Pick<FactoryFlow, 'state'>): boolean {
   return flow.state === 'running' || flow.state === 'queued';
+}
+
+export function getRunningFactorySession(
+  flow: FactoryFlow,
+  sessionsById: ReadonlyMap<string, BackgroundSessionSummary>,
+): BackgroundSessionSummary | undefined {
+  if (flow.state !== 'running' || !flow.currentSessionId) {
+    return undefined;
+  }
+
+  const session = sessionsById.get(flow.currentSessionId);
+  if (
+    session?.mode === 'factory' &&
+    session.status === 'running' &&
+    session.flowId === flow.id &&
+    session.stage === flow.currentStage
+  ) {
+    return session;
+  }
+  return undefined;
 }
 
 /** Indica que a etapa de PR aguarda o disparo manual. */

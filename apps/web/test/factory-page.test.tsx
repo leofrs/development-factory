@@ -1,13 +1,16 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { createElement } from 'react';
+import { act, createElement, useState } from 'react';
 import type { ComponentProps } from 'react';
+import { createRoot } from 'react-dom/client';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { parseHTML } from 'linkedom';
 import {
   FACTORY_FLOW_CONTRACT_VERSION,
   FACTORY_MAX_AUTO_ITERATIONS,
 } from '@development-factory/shared';
 import type {
+  AppEvent,
   BackgroundSessionSummary,
   FactoryFlow,
   FactoryFlowDetails,
@@ -24,9 +27,10 @@ import { FactoryTaskModal } from '../src/components/FactoryTaskModal';
 import { HistoryModal } from '../src/components/HistoryModal';
 import { MarkdownViewerModal } from '../src/components/MarkdownViewerModal';
 import { NotificationToastCenter } from '../src/components/NotificationToastCenter';
-import { buildNotification } from '../src/hooks/useBackgroundOperations';
+import { buildNotification, useBackgroundOperations } from '../src/hooks/useBackgroundOperations';
 import type { AppNotification } from '../src/hooks/useBackgroundOperations';
 import type { FactoryPreflight } from '../src/hooks/useFactoryPreflight.js';
+import { getRunningFactorySession } from '../src/utils/factory-flow-status.js';
 
 function createFlow(overrides: Partial<FactoryFlow> = {}): FactoryFlow {
   return {
@@ -79,6 +83,7 @@ function createSession(
 
 const noop = () => undefined;
 const noopAsync = async () => undefined;
+const unavailableTerminal = () => false;
 const repoPath = '/home/dev/repos/api-core';
 const checkingPreflight: FactoryPreflight = { state: { status: 'checking' }, revalidate: noop };
 const approvedPreflight: FactoryPreflightResponse = {
@@ -93,23 +98,240 @@ const approvedPreflight: FactoryPreflightResponse = {
   },
 };
 
-function renderFactoryPage(props: Partial<ComponentProps<typeof FactoryPage>> = {}): string {
-  return renderToStaticMarkup(
-    createElement(FactoryPage, {
-      repoPath,
-      preflight: checkingPreflight,
-      factoryFlows: [],
-      loadingFactoryFlows: false,
-      factoryFlowsError: null,
-      onPickDirectory: noop,
-      onOpenNewFlow: noop,
-      onOpenFlowRoadmap: noop,
-      onCancelFlow: async flowId => createFlow({ id: flowId, state: 'cancelled' }),
-      onRerunFlowStage: noopAsync,
-      ...props,
-    }),
-  );
+function factoryPageElement(props: Partial<ComponentProps<typeof FactoryPage>> = {}) {
+  return createElement(FactoryPage, {
+    repoPath,
+    preflight: checkingPreflight,
+    factoryFlows: [],
+    sessionsById: new Map(),
+    loadingFactoryFlows: false,
+    factoryFlowsError: null,
+    onPickDirectory: noop,
+    onOpenNewFlow: noop,
+    onOpenFlowRoadmap: noop,
+    onOpenFlowTerminal: unavailableTerminal,
+    onCancelFlow: async flowId => createFlow({ id: flowId, state: 'cancelled' }),
+    onRerunFlowStage: noopAsync,
+    ...props,
+  });
 }
+
+function renderFactoryPage(props: Partial<ComponentProps<typeof FactoryPage>> = {}): string {
+  return renderToStaticMarkup(factoryPageElement(props));
+}
+
+test('Factory abre o terminal da etapa atual pelas três telas e atualiza a atividade em tempo real', async context => {
+  const runningFlow = createFlow({
+    transitions: [
+      {
+        from: 'queued',
+        to: 'running',
+        stage: 'triage',
+        at: '2026-11-19T12:05:00.000Z',
+        reason: 'Sessão iniciada',
+      },
+    ],
+  });
+  const session = createSession({ startedAt: runningFlow.updatedAt });
+  const oldSession = createSession({
+    sessionId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+    status: 'exited',
+    finishedAt: session.startedAt,
+  });
+  const standaloneSession = createSession({
+    sessionId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+    title: 'Sessão avulsa',
+    flowId: null,
+  });
+  const queuedFlow = createFlow({
+    id: '22222222-2222-4222-8222-222222222222',
+    title: 'Fluxo na fila',
+    state: 'queued',
+    currentSessionId: null,
+    updatedAt: runningFlow.createdAt,
+  });
+  const snapshot = { sessions: [session, oldSession, standaloneSession] };
+  const streams: FakeEventSource[] = [];
+  class FakeEventSource {
+    onopen?: () => void;
+    onmessage?: (event: { data: string }) => void;
+
+    constructor() {
+      streams.push(this);
+    }
+
+    close() {}
+
+    emit(event: AppEvent) {
+      this.onmessage?.({ data: JSON.stringify(event) });
+    }
+  }
+
+  const window = parseHTML('<html><body><div id="test-root"></div></body></html>');
+  const { document } = window;
+  function replaceProperty(target: object, name: string, value: unknown) {
+    const original = Object.getOwnPropertyDescriptor(target, name);
+    Object.defineProperty(target, name, { configurable: true, value, writable: true });
+    context.after(() => {
+      if (original) {
+        Object.defineProperty(target, name, original);
+      } else {
+        Reflect.deleteProperty(target, name);
+      }
+    });
+  }
+  replaceProperty(window.HTMLElement.prototype, 'showModal', function (this: HTMLElement) {
+    this.setAttribute('open', '');
+  });
+  replaceProperty(window.HTMLElement.prototype, 'close', function (this: HTMLElement) {
+    this.removeAttribute('open');
+  });
+  replaceProperty(globalThis, 'window', window);
+  replaceProperty(globalThis, 'document', document);
+  replaceProperty(globalThis, 'EventSource', FakeEventSource);
+  replaceProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', true);
+  context.mock.timers.enable({ apis: ['Date', 'setInterval'], now: Date.parse(session.startedAt) });
+
+  let finishSnapshot: (() => void) | undefined;
+  const delayedSnapshot = new Promise<Response>(resolve => {
+    finishSnapshot = () => resolve(Response.json(snapshot));
+  });
+  let requestedSessions = false;
+  context.mock.method(globalThis, 'fetch', (input: RequestInfo | URL) => {
+    const path = new URL(input instanceof Request ? input.url : input).pathname;
+    if (path === '/api/sessions') {
+      if (requestedSessions) {
+        return delayedSnapshot;
+      }
+      requestedSessions = true;
+      return Promise.resolve(Response.json(snapshot));
+    }
+    if (path === '/api/factory/flows') {
+      return Promise.resolve(
+        Response.json({
+          contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+          flows: [runningFlow, queuedFlow],
+        }),
+      );
+    }
+    return Promise.resolve(Response.json({}, { status: 404 }));
+  });
+
+  function Harness() {
+    const operations = useBackgroundOperations();
+    const [roadmapOpen, setRoadmapOpen] = useState(true);
+    const [popoverOpen, setPopoverOpen] = useState(true);
+    const flow = operations.factoryFlowsById.get(runningFlow.id);
+    const openFlowTerminal = (flowId: string) =>
+      operations.openFlowTerminal(flowId, { liveOnly: true });
+
+    return (
+      <>
+        {factoryPageElement({
+          factoryFlows: operations.factoryFlows,
+          sessionsById: operations.sessionsById,
+          onOpenFlowTerminal: openFlowTerminal,
+        })}
+        {roadmapOpen && flow && (
+          <FactoryFlowRoadmapModal
+            flow={flow}
+            runningSession={getRunningFactorySession(flow, operations.sessionsById)}
+            onClose={() => setRoadmapOpen(false)}
+            onOpenFlowTerminal={openFlowTerminal}
+            onAdvanceFlowStage={noopAsync}
+            onRerunFlowStage={noopAsync}
+            onViewMarkdown={noop}
+          />
+        )}
+        {popoverOpen && (
+          <BackgroundTasksPopover
+            id="live-operations"
+            sessions={operations.sessions}
+            factoryFlows={operations.factoryFlows}
+            onOpenTerminal={operations.openTerminal}
+            onOpenFlowTerminal={openFlowTerminal}
+            onViewReport={noop}
+            onClose={() => setPopoverOpen(false)}
+          />
+        )}
+        <button id="reset-terminal" type="button" onClick={operations.minimizeTerminal}>
+          Minimizar terminal
+        </button>
+        <button id="open-operations" type="button" onClick={() => setPopoverOpen(true)}>
+          Operações
+        </button>
+        <output id="terminal-session">{operations.activeTerminalSession?.sessionId}</output>
+      </>
+    );
+  }
+
+  const container = document.getElementById('test-root');
+  assert(container);
+  const root = createRoot(container);
+  const terminalButton = 'button[aria-label^="Abrir terminal ao vivo"]';
+  const activeSession = () => container.querySelector('#terminal-session')?.textContent;
+  const click = async (selector: string) => {
+    const button = container.querySelector<HTMLButtonElement>(selector);
+    assert(button, `Botão ausente: ${selector}`);
+    await act(() => button.click());
+  };
+
+  try {
+    await act(() => root.render(<Harness />));
+    assert.equal(container.querySelectorAll(`main ${terminalButton}`).length, 1);
+    assert.equal(container.querySelectorAll(`dialog ${terminalButton}`).length, 1);
+    assert.equal(container.querySelectorAll(`#live-operations ${terminalButton}`).length, 2);
+    assert.match(container.querySelector('main')?.textContent ?? '', /Aguardando atividade/);
+
+    const [events] = streams;
+    assert(events);
+    const active = {
+      ...session,
+      factoryActivity: {
+        revision: 1,
+        lastReadFile: 'src/entrada.ts',
+        lastEditedFile: 'src/saida.ts',
+        lastCommand: 'npm test',
+      },
+    };
+    await act(() => {
+      events.onopen?.();
+      events.emit({ type: 'session.updated', session: active });
+      context.mock.timers.tick(2000);
+    });
+    await act(() => finishSnapshot?.());
+    const stageCard = container.querySelector('main article');
+    assert.match(stageCard?.textContent ?? '', /Último arquivo lidosrc\/entrada\.ts/);
+    assert.match(stageCard?.textContent ?? '', /Último arquivo editadosrc\/saida\.ts/);
+    assert.match(stageCard?.textContent ?? '', /Último comandonpm test/);
+    assert.equal(stageCard?.querySelector('[role="timer"]')?.textContent, '00:02');
+
+    for (const location of ['main', 'dialog', '#live-operations']) {
+      await click(`${location} button[aria-label="Abrir terminal ao vivo · ${runningFlow.title}"]`);
+      assert.equal(activeSession(), session.sessionId);
+      await click('#reset-terminal');
+      assert.equal(activeSession(), '');
+    }
+    assert.equal(container.querySelector('dialog'), null);
+    assert.equal(container.querySelector('#live-operations'), null);
+
+    await click('#open-operations');
+    await click('button[aria-label="Abrir terminal ao vivo · Sessão avulsa"]');
+    assert.equal(activeSession(), standaloneSession.sessionId);
+
+    await act(() => {
+      events.emit({
+        type: 'session.finished',
+        session: { ...active, status: 'exited', finishedAt: new Date().toISOString() },
+      });
+      events.emit({ type: 'session.updated', session });
+    });
+    assert.equal(container.querySelector(`main ${terminalButton}`), null);
+    assert.equal(container.querySelector('main [role="timer"]'), null);
+  } finally {
+    await act(() => root.unmount());
+  }
+});
 
 function renderFactoryViews(preflight: FactoryPreflight) {
   return [
@@ -389,6 +611,7 @@ test('FactoryFlowRoadmapModal exibe botão Parar apenas quando o fluxo está Em 
       flow: waitingFlow,
       onClose: noop,
       onAdvanceFlowStage: noopAsync,
+      onOpenFlowTerminal: unavailableTerminal,
       onRerunFlowStage: noopAsync,
       onCancelFlow: noopAsync,
       onViewMarkdown: noop,
@@ -420,6 +643,7 @@ test('FactoryFlowRoadmapModal exibe botão Parar apenas quando o fluxo está Em 
       flow: runningFlow,
       onClose: noop,
       onAdvanceFlowStage: noopAsync,
+      onOpenFlowTerminal: unavailableTerminal,
       onRerunFlowStage: noopAsync,
       onCancelFlow: noopAsync,
       onViewMarkdown: noop,
@@ -511,7 +735,8 @@ test('BackgroundTasksPopover exibe múltiplos fluxos da Factory em paralelo com 
         reviewSessionRunning,
       ],
       factoryFlows: [flowA, flowB, flowC, cancelledFlow],
-      onOpenTerminal: noop,
+      onOpenTerminal: unavailableTerminal,
+      onOpenFlowTerminal: unavailableTerminal,
       onOpenFlowRoadmap: noop,
       onViewReport: noop,
       onStopSession: async () => reviewSessionRunning,
@@ -657,6 +882,7 @@ test('Etapas 04 (tests) e 05 (review) geram notificações e botões de reexecu�
       flow: testsFlow,
       onClose: noop,
       onAdvanceFlowStage: noopAsync,
+      onOpenFlowTerminal: unavailableTerminal,
       onRerunFlowStage: noopAsync,
       onReturnFlowStage: noopAsync,
       onViewMarkdown: noop,
@@ -678,6 +904,7 @@ test('Etapas 04 (tests) e 05 (review) geram notificações e botões de reexecu�
       flow: prFlow,
       onClose: noop,
       onAdvanceFlowStage: noopAsync,
+      onOpenFlowTerminal: unavailableTerminal,
       onRerunFlowStage: noopAsync,
       onReturnFlowStage: noopAsync,
       onViewMarkdown: noop,
@@ -702,6 +929,7 @@ test('Etapas 04 (tests) e 05 (review) geram notificações e botões de reexecu�
       flow: circuitBreakerFlow,
       onClose: noop,
       onAdvanceFlowStage: noopAsync,
+      onOpenFlowTerminal: unavailableTerminal,
       onRerunFlowStage: noopAsync,
       onReturnFlowStage: noopAsync,
       onViewMarkdown: noop,
@@ -716,7 +944,8 @@ test('Etapas 04 (tests) e 05 (review) geram notificações e botões de reexecu�
       id: 'bg-loop',
       sessions: [],
       factoryFlows: [prFlow],
-      onOpenTerminal: noop,
+      onOpenTerminal: unavailableTerminal,
+      onOpenFlowTerminal: unavailableTerminal,
       onOpenFlowRoadmap: noop,
       onViewReport: noop,
       onClose: noop,
@@ -774,6 +1003,7 @@ test('FactoryFlowRoadmapModal e BackgroundTasksPopover exibem motivo de pausa e 
       flow: reconciledFlow,
       onClose: noop,
       onAdvanceFlowStage: noopAsync,
+      onOpenFlowTerminal: unavailableTerminal,
       onRerunFlowStage: noopAsync,
       onViewMarkdown: noop,
     }),
@@ -787,7 +1017,8 @@ test('FactoryFlowRoadmapModal e BackgroundTasksPopover exibem motivo de pausa e 
       id: 'bg-reconciled',
       sessions: [],
       factoryFlows: [reconciledFlow],
-      onOpenTerminal: noop,
+      onOpenTerminal: unavailableTerminal,
+      onOpenFlowTerminal: unavailableTerminal,
       onOpenFlowRoadmap: noop,
       onViewReport: noop,
       onRerunFlowStage: noopAsync,
@@ -866,6 +1097,7 @@ test('FactoryFlowRoadmapModal exibe portão humano estruturado do Bloco 01 com b
       initialDetails,
       onClose: noop,
       onAdvanceFlowStage: noopAsync,
+      onOpenFlowTerminal: unavailableTerminal,
       onRerunFlowStage: noopAsync,
       onViewMarkdown: noop,
     }),
@@ -991,6 +1223,7 @@ test('FactoryFlowRoadmapModal exibe portão humano estruturado do Bloco 02 e man
       initialDetails: editableDetails,
       onClose: noop,
       onAdvanceFlowStage: noopAsync,
+      onOpenFlowTerminal: unavailableTerminal,
       onRerunFlowStage: noopAsync,
       onViewMarkdown: noop,
     }),
@@ -1061,6 +1294,7 @@ test('FactoryFlowRoadmapModal exibe portão humano estruturado do Bloco 02 e man
       },
       onClose: noop,
       onAdvanceFlowStage: noopAsync,
+      onOpenFlowTerminal: unavailableTerminal,
       onRerunFlowStage: noopAsync,
       onViewMarkdown: noop,
     }),
@@ -1077,7 +1311,8 @@ test('FactoryFlowRoadmapModal exibe portão humano estruturado do Bloco 02 e man
       id: 'bg-planning-approval',
       sessions: [],
       factoryFlows: [developmentFlow],
-      onOpenTerminal: noop,
+      onOpenTerminal: unavailableTerminal,
+      onOpenFlowTerminal: unavailableTerminal,
       onOpenFlowRoadmap: noop,
       onViewReport: noop,
       onClose: noop,
