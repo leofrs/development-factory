@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
 import { ArrowRight, Check, ChevronRight, Folder, FolderGit2, GitBranch, GitPullRequest, Layers3, LockKeyhole, ScanLine, Terminal } from 'lucide-react';
 import { ClientMessageSchema, ReviewDestinationSchema } from '@development-factory/shared';
-import type { FactoryFlowInputType, TargetType } from '@development-factory/shared';
+import type { FactoryFlowInputType, FactoryStageName, TargetType } from '@development-factory/shared';
 import { TerminalModal } from './components/TerminalModal';
 import { readSavedTheme, themeStorageKey } from './theme';
 import { DirectoryPicker } from './components/DirectoryPicker';
 import { HistoryModal } from './components/HistoryModal';
 import { FloatingDock, type AppView } from './components/FloatingDock';
-import { FactoryPage } from './components/FactoryPage';
+import { FactoryPage } from './components/FactoryPage.js';
 import { FactoryFlowRoadmapModal } from './components/FactoryFlowRoadmapModal';
 import { FactoryTaskModal } from './components/FactoryTaskModal';
 import { MarkdownViewerModal } from './components/MarkdownViewerModal';
@@ -141,6 +141,15 @@ export default function App() {
     });
   }
 
+  async function rerunStage(flowId: string, stage: FactoryStageName, approvedNotes?: string) {
+    await rerunFlowStage(flowId, {
+      stage,
+      cols: 120,
+      rows: 36,
+      ...(approvedNotes !== undefined ? { approvedNotes } : {}),
+    });
+  }
+
   const roadmapFlow = roadmapFlowId
     ? (factoryFlows.find(item => item.id === roadmapFlowId) ?? null)
     : null;
@@ -151,11 +160,17 @@ export default function App() {
         <FactoryPage
           repoPath={repoPath}
           preflight={repositoryPreflight}
+          factoryFlows={factoryFlows}
+          loadingFactoryFlows={loadingFactoryFlows}
+          factoryFlowsError={factoryFlowsError}
           onPickDirectory={() => setPickingDirectory('repository')}
           onOpenNewFlow={() => {
             setFactoryInputType('jira_key');
             setConfiguringFactoryTask(true);
           }}
+          onOpenFlowRoadmap={setRoadmapFlowId}
+          onCancelFlow={cancelFlow}
+          onRerunFlowStage={rerunStage}
         />
       ) : (
         <main className="mx-auto max-w-6xl px-6 pb-28 pt-12 sm:px-10 sm:pt-20">
@@ -246,13 +261,11 @@ export default function App() {
         loadingFactoryFlows={loadingFactoryFlows}
         factoryFlowsError={factoryFlowsError}
         onOpenTerminal={openTerminal}
-        onOpenFlowRoadmap={flowId => setRoadmapFlowId(flowId)}
+        onOpenFlowRoadmap={setRoadmapFlowId}
         onViewReport={path => setViewingMarkdownPath(path)}
         onStopSession={stopSession}
         onCancelFlow={cancelFlow}
-        onRerunFlowStage={async (flowId, stage) => {
-          await rerunFlowStage(flowId, { stage, cols: 120, rows: 36 });
-        }}
+        onRerunFlowStage={rerunStage}
         theme={theme}
         onToggleTheme={toggleTheme}
       />
@@ -322,14 +335,7 @@ export default function App() {
                 : {}),
             });
           }}
-          onRerunFlowStage={async (flowId, stage, approvedNotes) => {
-            await rerunFlowStage(flowId, {
-              stage,
-              cols: 120,
-              rows: 36,
-              ...(approvedNotes !== undefined ? { approvedNotes } : {}),
-            });
-          }}
+          onRerunFlowStage={rerunStage}
           onReturnFlowStage={async (flowId, targetStage, approvedNotes) => {
             await returnFlowStage(flowId, {
               targetStage,

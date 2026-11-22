@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createElement } from 'react';
+import type { ComponentProps } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
   FACTORY_FLOW_CONTRACT_VERSION,
@@ -14,7 +15,7 @@ import type {
 } from '@development-factory/shared';
 import { BackgroundTasksPopover } from '../src/components/BackgroundTasksPopover';
 import { FactoryFlowRoadmapModal } from '../src/components/FactoryFlowRoadmapModal';
-import { FactoryPage } from '../src/components/FactoryPage';
+import { FactoryPage } from '../src/components/FactoryPage.js';
 import {
   createPlanningGateDrafts,
   getNextAcceptanceCriterionId,
@@ -92,16 +93,27 @@ const approvedPreflight: FactoryPreflightResponse = {
   },
 };
 
+function renderFactoryPage(props: Partial<ComponentProps<typeof FactoryPage>> = {}): string {
+  return renderToStaticMarkup(
+    createElement(FactoryPage, {
+      repoPath,
+      preflight: checkingPreflight,
+      factoryFlows: [],
+      loadingFactoryFlows: false,
+      factoryFlowsError: null,
+      onPickDirectory: noop,
+      onOpenNewFlow: noop,
+      onOpenFlowRoadmap: noop,
+      onCancelFlow: async flowId => createFlow({ id: flowId, state: 'cancelled' }),
+      onRerunFlowStage: noopAsync,
+      ...props,
+    }),
+  );
+}
+
 function renderFactoryViews(preflight: FactoryPreflight) {
   return [
-    renderToStaticMarkup(
-      createElement(FactoryPage, {
-        repoPath,
-        preflight,
-        onPickDirectory: noop,
-        onOpenNewFlow: noop,
-      }),
-    ),
+    renderFactoryPage({ preflight }),
     renderToStaticMarkup(
       createElement(FactoryTaskModal, {
         repoPath,
@@ -123,22 +135,196 @@ function getStartButton(html: string): string {
 }
 
 test('FactoryPage exibe a seleção do repositório e aguarda o preflight', () => {
-  const html = renderToStaticMarkup(
-    createElement(FactoryPage, {
-      repoPath,
-      preflight: checkingPreflight,
-      onPickDirectory: noop,
-      onOpenNewFlow: noop,
-    }),
-  );
+  const html = renderFactoryPage();
 
   assert.match(html, /Iniciar fluxo/);
   assert.match(html, /\/home\/dev\/repos\/api-core/);
   assert.match(html, /Verificando o ambiente/);
   assert.match(getStartButton(html), / disabled=""/);
-  assert.doesNotMatch(html, /Fluxos em andamento e concluídos/);
-  assert.doesNotMatch(html, /Artefatos do fluxo selecionado/);
+  assert.match(html, /Fluxos ativos e recentes/);
+  assert.match(html, />0 fluxos</);
+  assert.equal([...html.matchAll(/>Nenhum fluxo</g)].length, 4);
   assert.doesNotMatch(html, /Parar/);
+});
+
+function getCockpitGroup(html: string, label: string): string {
+  const start = html.indexOf(`>${label}</h3>`);
+  const end = html.indexOf('</section>', start);
+  assert.ok(start >= 0 && end > start, `Grupo ausente: ${label}`);
+  return html.slice(start, end);
+}
+
+test('FactoryPage agrupa os fluxos, conta cada grupo e oferece ações pelo estado atual', () => {
+  const examples = [
+    { title: 'Fluxo em execução', state: 'running', currentStage: 'pr' },
+    { title: 'Fluxo na fila', state: 'queued' },
+    {
+      title: 'Triagem com bloqueadores',
+      state: 'waiting_action',
+      currentSessionId: null,
+      loopPausedReason: 'Responda aos bloqueadores da triagem.',
+    },
+    {
+      title: 'Ciclo de correção pausado',
+      state: 'waiting_action',
+      currentStage: 'review',
+      currentSessionId: null,
+      iteration: 2,
+      loopPausedReason: 'O ciclo de correção não teve progresso.',
+    },
+    {
+      title: 'Falha na preparação do PR',
+      state: 'waiting_action',
+      currentStage: 'pr',
+      currentSessionId: null,
+      error: {
+        contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+        code: 'FACTORY_ARTIFACT_INCOMPLETE',
+        message: 'O artefato do PR está incompleto.',
+        occurredAt: '2026-11-19T12:05:00.000Z',
+        retryable: true,
+      },
+    },
+    {
+      title: 'PR com disparo manual',
+      state: 'waiting_action',
+      currentStage: 'pr',
+      currentSessionId: null,
+      iteration: 2,
+      lastReviewVerdict: 'approved_with_warnings',
+    },
+    { title: 'Fluxo concluído', state: 'completed', currentStage: 'pr' },
+    { title: 'Fluxo cancelado', state: 'cancelled' },
+    { title: 'Fluxo com falha', state: 'failed' },
+  ] satisfies Partial<FactoryFlow>[];
+  const factoryFlows = examples.map((flow, index) =>
+    createFlow({ id: `11111111-1111-4111-8111-${String(index).padStart(12, '0')}`, ...flow }),
+  );
+  const html = renderFactoryPage({ factoryFlows });
+
+  const groups = [
+    ['Em execução', ['Fluxo em execução', 'Fluxo na fila']],
+    [
+      'Aguardando decisão humana',
+      ['Triagem com bloqueadores', 'Ciclo de correção pausado', 'Falha na preparação do PR'],
+    ],
+    ['Prontos para PR', ['PR com disparo manual']],
+    ['Finalizados', ['Fluxo concluído', 'Fluxo cancelado', 'Fluxo com falha']],
+  ] as const;
+  assert.match(html, />9 fluxos</);
+  for (const [label, titles] of groups) {
+    const group = getCockpitGroup(html, label);
+    assert.match(group, new RegExp(`class="sr-only">${label} · </span>${titles.length}</span>`));
+    assert.deepEqual(
+      Array.from(group.matchAll(/<h4[^>]*>([^<]+)<\/h4>/g), match => match[1]),
+      titles,
+    );
+  }
+
+  const running = getCockpitGroup(html, 'Em execução');
+  assert.match(running, /Na fila/);
+  assert.match(running, /Parar · Fluxo em execução/);
+  assert.doesNotMatch(running, /Parar · Fluxo na fila|Executar etapa PR/);
+
+  const waiting = getCockpitGroup(html, 'Aguardando decisão humana');
+  assert.match(waiting, /border-warning\/40 bg-warning\/5/);
+  assert.match(waiting, /Revisar pendência do fluxo Triagem com bloqueadores/);
+  assert.match(waiting, /Responda aos bloqueadores da triagem/);
+  assert.match(waiting, /Retomar etapa · Ciclo de correção pausado/);
+  assert.match(waiting, /O artefato do PR está incompleto/);
+  assert.doesNotMatch(waiting, /Retomar etapa · Triagem|Executar etapa PR/);
+
+  const readyForPr = getCockpitGroup(html, 'Prontos para PR');
+  assert.match(readyForPr, /Aguardando disparo do PR/);
+  assert.match(readyForPr, /Executar etapa PR · PR com disparo manual/);
+  assert.match(readyForPr, /5\/6 concluídos/);
+
+  const finished = getCockpitGroup(html, 'Finalizados');
+  assert.match(finished, />Concluído</);
+  assert.match(finished, />Cancelado</);
+  assert.match(finished, />Falhou</);
+  assert.match(finished, /6\/6 concluídos/);
+  assert.match(finished, /Ver roadmap do fluxo Fluxo concluído/);
+  assert.doesNotMatch(finished, /Parar|Retomar etapa|Executar etapa PR/);
+});
+
+test('FactoryPage mostra o progresso dos seis blocos, worktree e decisões aprovadas no card', () => {
+  const flow = createFlow({
+    currentStage: 'tests',
+    iteration: 2,
+    maxIterations: 4,
+    branchName: 'factory/auth-101',
+    worktreePath: '/tmp/worktrees/auth-101',
+    planningApproval: {
+      approvedAt: '2026-11-19T12:04:00.000Z',
+      decisions: [
+        {
+          id: 'D1',
+          question: 'Qual armazenamento usar?',
+          mode: 'recommended',
+          selectedOption: 'Usar SQLite',
+          recommendedOption: 'Usar SQLite',
+        },
+        {
+          id: 'D2',
+          question: 'Quando renovar a sessão?',
+          mode: 'custom',
+          selectedOption: 'Renovar após 10 minutos',
+          recommendedOption: 'Renovar após 15 minutos',
+        },
+        {
+          id: 'D3',
+          question: 'Como implantar a mudança?',
+          mode: 'recommended',
+          selectedOption: 'Implantar por etapas',
+          recommendedOption: 'Implantar por etapas',
+        },
+      ],
+      acceptanceCriteria: [],
+    },
+  });
+  const html = renderFactoryPage({ factoryFlows: [flow] });
+
+  assert.match(html, />1 fluxo</);
+  assert.match(html, /Iteração 2\/4/);
+  assert.match(html, /04 · Testes/);
+  assert.match(html, /3\/6 concluídos/);
+  const progress = html.match(/<ol[^>]*aria-label="Progresso dos 6 blocos"[^>]*>(.*?)<\/ol>/)?.[1];
+  assert.ok(progress);
+  assert.match(progress, /aria-current="step" title="Testes · Em execução"/);
+  assert.deepEqual(
+    Array.from(progress.matchAll(/title="([^"]+)"/g), match => match[1]),
+    [
+      'Triagem · Concluída',
+      'Planejamento · Concluída',
+      'Desenvolvimento · Concluída',
+      'Testes · Em execução',
+      'Code Review · Pendente',
+      'PR · Pendente',
+    ],
+  );
+  assert.match(html, />factory\/auth-101</);
+  assert.match(html, />\/tmp\/worktrees\/auth-101</);
+  assert.match(html, /Decisões aprovadas<span[^>]*>3<\/span>/);
+  assert.match(html, />Usar SQLite</);
+  assert.match(html, />Renovar após 10 minutos</);
+  assert.match(html, /Mais 1 no roadmap/);
+  assert.doesNotMatch(html, /Renovar após 15 minutos|Implantar por etapas|Abrir terminal/);
+});
+
+test('FactoryPage distingue listagem carregando, falha e fluxos já recebidos', () => {
+  const loading = renderFactoryPage({ loadingFactoryFlows: true });
+  assert.match(loading, /Carregando fluxos/);
+  assert.doesNotMatch(loading, /Nenhum fluxo/);
+
+  const factoryFlowsError = 'Não foi possível carregar os fluxos.';
+  const error = renderFactoryPage({ factoryFlowsError });
+  assert.match(error, /role="alert"[^>]*>Não foi possível carregar os fluxos\./);
+  assert.doesNotMatch(error, /Nenhum fluxo/);
+
+  const existing = renderFactoryPage({ factoryFlowsError, factoryFlows: [createFlow()] });
+  assert.match(existing, /role="alert"[^>]*>Não foi possível carregar os fluxos\./);
+  assert.match(existing, /FLUXO-1 · Autenticação JWT/);
 });
 
 test('FactoryPage e FactoryTaskModal exibem os checks e permitem iniciar com preflight aprovado', () => {

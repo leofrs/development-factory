@@ -8,7 +8,7 @@ import type {
   FactoryStageName,
   FactoryStageState,
 } from '@development-factory/shared';
-import type { SessionStatusPresentation } from './session-status';
+import type { SessionStatusPresentation } from './session-status.js';
 
 const STAGE_LABELS: Record<FactoryStageName, string> = {
   triage: 'Triagem',
@@ -73,6 +73,17 @@ export function getFactoryArtifactKindLabel(kind: FactoryFlowArtifactKind): stri
 /** Indica se um fluxo da Factory está em execução ativa ou na fila. */
 export function isFactoryFlowActivelyRunning(flow: Pick<FactoryFlow, 'state'>): boolean {
   return flow.state === 'running' || flow.state === 'queued';
+}
+
+/** Indica que a etapa de PR aguarda o disparo manual. */
+export function isFactoryFlowReadyForPr(flow: FactoryFlow): boolean {
+  return (
+    flow.state === 'waiting_action' &&
+    flow.currentStage === 'pr' &&
+    flow.currentSessionId === null &&
+    flow.loopPausedReason === null &&
+    flow.error === null
+  );
 }
 
 /** Resolve rótulo e classes visuais para o estado atual de um fluxo da Factory. */

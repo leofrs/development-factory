@@ -528,12 +528,17 @@ export function FactoryFlowRoadmapModal({
     ? getFactoryReviewVerdictPresentation(flow.lastReviewVerdict)
     : null;
 
+  function closeRoadmap() {
+    dialogRef.current?.close();
+    onClose();
+  }
+
   return (
     <dialog
       ref={dialogRef}
       onCancel={event => {
         event.preventDefault();
-        onClose();
+        closeRoadmap();
       }}
       aria-labelledby="flow-roadmap-title"
       className="m-auto max-h-[90dvh] w-[calc(100%-1rem)] max-w-6xl overflow-hidden rounded-2xl border border-line-strong bg-surface p-0 text-primary shadow-2xl sm:w-[calc(100%-3rem)]"
@@ -590,7 +595,7 @@ export function FactoryFlowRoadmapModal({
           <button
             type="button"
             className="modal-button"
-            onClick={onClose}
+            onClick={closeRoadmap}
             aria-label="Fechar roadmap do fluxo"
           >
             <X size={17} />

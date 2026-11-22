@@ -32,7 +32,7 @@ import {
   parseAppEventMessage,
   stopSessionRequest,
 } from '../api/sessions';
-import { getFactoryStageLabel } from '../utils/factory-flow-status';
+import { getFactoryStageLabel, isFactoryFlowReadyForPr } from '../utils/factory-flow-status.js';
 
 const INITIAL_RECONNECT_DELAY_MS = 1_000;
 const MAX_RECONNECT_DELAY_MS = 10_000;
@@ -110,6 +110,13 @@ function sortSessionsByRecent(
 function sortFactoryFlowsByRecent(flowsMap: ReadonlyMap<string, FactoryFlow>): FactoryFlow[] {
   return Array.from(flowsMap.values()).sort(
     (a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt),
+  );
+}
+
+function compareFactoryFlowRevisions(a: FactoryFlow, b: FactoryFlow): number {
+  return (
+    Date.parse(a.updatedAt) - Date.parse(b.updatedAt) ||
+    a.transitions.length - b.transitions.length
   );
 }
 
@@ -364,10 +371,13 @@ export function useBackgroundOperations(): BackgroundOperationsState {
   }, []);
 
   const upsertFactoryFlow = useCallback((flow: FactoryFlow) => {
-    setFactoryFlowsMap((current) => {
+    setFactoryFlowsMap(current => {
+      const previous = current.get(flow.id);
+      if (previous && compareFactoryFlowRevisions(flow, previous) < 0) {
+        return current;
+      }
       const next = new Map(current);
       next.set(flow.id, flow);
-      factoryFlowsMapRef.current = next;
       return next;
     });
   }, []);
@@ -401,18 +411,27 @@ export function useBackgroundOperations(): BackgroundOperationsState {
   }, []);
 
   const hydrateFactoryFlows = useCallback(async (signal?: AbortSignal) => {
+    const flowsAtRequestStart = factoryFlowsMapRef.current;
     try {
       const list = await fetchFactoryFlows(undefined, signal);
       if (signal?.aborted) {
         return;
       }
 
-      const next = new Map<string, FactoryFlow>();
-      for (const item of list) {
-        next.set(item.id, item);
-      }
-      factoryFlowsMapRef.current = next;
-      setFactoryFlowsMap(next);
+      setFactoryFlowsMap(current => {
+        const next = new Map(list.map(flow => [flow.id, flow]));
+        // Preserva atualizações recebidas enquanto a listagem estava em trânsito.
+        for (const [id, liveFlow] of current) {
+          const snapshotFlow = next.get(id);
+          if (
+            liveFlow !== flowsAtRequestStart.get(id) &&
+            (!snapshotFlow || compareFactoryFlowRevisions(liveFlow, snapshotFlow) >= 0)
+          ) {
+            next.set(id, liveFlow);
+          }
+        }
+        return next;
+      });
       setFactoryFlowsError(null);
     } catch (error) {
       if (isAbortError(error) || signal?.aborted) {
@@ -503,7 +522,7 @@ export function useBackgroundOperations(): BackgroundOperationsState {
       return;
     }
 
-    if (flow.currentStage === 'pr') {
+    if (isFactoryFlowReadyForPr(flow)) {
       const milestoneKey = `flow:${flow.id}:ready_for_pr:${flow.updatedAt}`;
       if (notifiedMilestonesRef.current.has(milestoneKey)) {
         return;
