@@ -46,7 +46,7 @@ test('SqliteFactoryFlowRepository aplica migrations e persiste múltiplos fluxos
     const applied = repo1.getAppliedMigrations();
     assert.equal(applied.length, REVIEW_MIGRATIONS.length);
     assert.ok(applied.some(migration => migration.name === 'add_factory_flows'));
-    assert.equal(applied.at(-1)?.name, 'add_factory_worktree_and_checkpoints');
+    assert.equal(applied.at(-1)?.name, 'add_factory_planning_approval');
 
     const service1 = new FactoryFlowService(repo1, { now: createClock() });
 
@@ -811,5 +811,222 @@ test('Migration v7 é idempotente e preserva fluxos históricos existentes antes
     repoAfterIdempotentReapply.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Migration v8 e FactoryFlowService persistem planningApproval e expõem planningGate após reinício', async () => {
+  const { dir, dbPath } = createTempDbPath();
+  const artifactsDir = mkdtempSync(join(tmpdir(), 'df-factory-planning-approval-'));
+
+  try {
+    const preV8Db = new DatabaseSync(dbPath);
+    const legacyFlowId = randomUUID();
+    const createdAt = '2026-11-18T10:00:00.000Z';
+    try {
+      runMigrations(preV8Db, REVIEW_MIGRATIONS.slice(0, 7));
+      preV8Db
+        .prepare(
+          `INSERT INTO factory_flows (
+            id, contract_version, title, input_type, target_value, repo_path, state, current_stage,
+            current_session_id, iteration, max_iterations, last_review_verdict, loop_paused_reason,
+            worktree_path, branch_name, base_branch, created_at, updated_at, finished_at, transitions_json, error_json
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          legacyFlowId,
+          FACTORY_FLOW_CONTRACT_VERSION,
+          'PROD-808 · Fluxo pré-v8',
+          'jira_key',
+          'PROD-808',
+          '/tmp/legacy-v8',
+          'queued',
+          'triage',
+          null,
+          0,
+          3,
+          null,
+          null,
+          null,
+          null,
+          null,
+          createdAt,
+          createdAt,
+          null,
+          '[]',
+          null,
+        );
+    } finally {
+      preV8Db.close();
+    }
+
+    const repo1 = SqliteFactoryFlowRepository.open({ dbPath });
+    const service1 = new FactoryFlowService(repo1, { now: createClock() });
+
+    const migratedLegacy = service1.getFlow(legacyFlowId);
+    assert.equal(migratedLegacy.flow.planningApproval, null);
+
+    const created = await service1.createFlow({
+      task: { inputType: 'jira_key', value: 'PROD-809', repoPath: '/tmp/repo-v8' },
+    });
+    const specPath = join(artifactsDir, 'spec.md');
+    const planPath = join(artifactsDir, 'plan.md');
+    writeFileSync(specPath, triageMarkdown('Triagem com CAs.'));
+    writeFactoryStageSidecar(specPath, 'triage', {
+      acceptanceCriteria: [
+        { id: 'CA1', description: 'Validar token JWT' },
+        { id: 'CA2', description: 'Invalidar sessão expirada' },
+      ],
+    });
+    writeFileSync(planPath, planningMarkdown('Plano com decisões pendentes.'));
+    writeFactoryStageSidecar(planPath, 'planning', {
+      pendingDecisions: [
+        {
+          question: 'Onde armazenar o refresh token?',
+          options: ['Tabela dedicada em SQLite', 'Cache em memória'],
+          recommendedOption: 'Tabela dedicada em SQLite',
+        },
+        {
+          question: 'Qual algoritmo de hash usar?',
+          options: ['SHA-256', 'SHA-512'],
+          recommendedOption: 'SHA-256',
+        },
+      ],
+    });
+
+    await service1.transitionFlow(created.flow.id, { to: 'running', reason: 'Triagem iniciada' });
+    await service1.registerArtifact(created.flow.id, {
+      stage: 'triage',
+      kind: 'specification',
+      path: specPath,
+      status: 'ready',
+    });
+    await service1.transitionFlow(created.flow.id, { to: 'waiting_action', reason: 'Triagem concluída' });
+
+    await assert.rejects(
+      () =>
+        service1.advanceStage(created.flow.id, {
+          planningApproval: { decisions: [], acceptanceCriteria: [] },
+        }),
+      error =>
+        error instanceof FactoryFlowServiceError &&
+        error.code === 'FACTORY_FLOW_INVALID_INPUT' &&
+        error.statusCode === 400,
+    );
+
+    await service1.advanceStage(created.flow.id);
+    await service1.registerArtifact(created.flow.id, {
+      stage: 'planning',
+      kind: 'plan',
+      path: planPath,
+      status: 'ready',
+    });
+    await service1.transitionFlow(created.flow.id, {
+      to: 'waiting_action',
+      reason: 'Planejamento concluído',
+    });
+
+    const beforeApproval = service1.getFlow(created.flow.id);
+    assert.deepEqual(beforeApproval.planningGate, {
+      pendingDecisions: [
+        {
+          question: 'Onde armazenar o refresh token?',
+          options: ['Tabela dedicada em SQLite', 'Cache em memória'],
+          recommendedOption: 'Tabela dedicada em SQLite',
+        },
+        {
+          question: 'Qual algoritmo de hash usar?',
+          options: ['SHA-256', 'SHA-512'],
+          recommendedOption: 'SHA-256',
+        },
+      ],
+      acceptanceCriteria: [
+        { id: 'CA1', description: 'Validar token JWT' },
+        { id: 'CA2', description: 'Invalidar sessão expirada' },
+      ],
+    });
+
+    // Falta D2 -> rejeita com 400.
+    await assert.rejects(
+      () =>
+        service1.advanceStage(created.flow.id, {
+          planningApproval: {
+            decisions: [
+              {
+                id: 'D1',
+                question: 'Onde armazenar o refresh token?',
+                mode: 'recommended',
+                selectedOption: 'Tabela dedicada em SQLite',
+                recommendedOption: 'Tabela dedicada em SQLite',
+              },
+            ],
+            acceptanceCriteria: [{ id: 'CA1', description: 'Validar token JWT', approved: true }],
+          },
+        }),
+      error =>
+        error instanceof FactoryFlowServiceError &&
+        error.code === 'FACTORY_FLOW_INVALID_INPUT' &&
+        error.statusCode === 400 &&
+        /D2/.test(error.message),
+    );
+
+    const approvalInput = {
+      decisions: [
+        {
+          id: 'D1',
+          question: 'Onde armazenar o refresh token?',
+          mode: 'recommended' as const,
+          selectedOption: 'Tabela dedicada em SQLite',
+          recommendedOption: 'Tabela dedicada em SQLite',
+        },
+        {
+          id: 'D2',
+          question: 'Qual algoritmo de hash usar?',
+          mode: 'custom' as const,
+          selectedOption: 'BLAKE2b com salt por usuário',
+          recommendedOption: 'SHA-256',
+        },
+      ],
+      acceptanceCriteria: [
+        { id: 'CA1', description: 'Validar token JWT com expiração curta', approved: true },
+        { id: 'CA2', description: 'Invalidar sessão expirada', approved: false },
+      ],
+      notes: 'Aplicar índice na coluna de expiração.',
+    };
+
+    const advanced = await service1.advanceStage(created.flow.id, {
+      planningApproval: approvalInput,
+    });
+    assert.equal(advanced.flow.currentStage, 'development');
+    assert.ok(advanced.flow.planningApproval);
+    assert.deepEqual(advanced.flow.planningApproval.decisions, approvalInput.decisions);
+    assert.deepEqual(
+      advanced.flow.planningApproval.acceptanceCriteria,
+      approvalInput.acceptanceCriteria,
+    );
+    assert.equal(advanced.flow.planningApproval.notes, approvalInput.notes);
+    repo1.close();
+
+    // Executa migration v8 novamente para comprovar idempotência.
+    const rawDb = new DatabaseSync(dbPath);
+    try {
+      const v8Migration = REVIEW_MIGRATIONS.find(migration => migration.version === 8);
+      assert.ok(v8Migration);
+      v8Migration.up(rawDb);
+    } finally {
+      rawDb.close();
+    }
+
+    const repo2 = SqliteFactoryFlowRepository.open({ dbPath });
+    const service2 = new FactoryFlowService(repo2);
+    const reloaded = FactoryFlowDetailsSchema.parse(service2.getFlow(created.flow.id));
+    assert.deepEqual(reloaded.flow.planningApproval, advanced.flow.planningApproval);
+    assert.equal(
+      reloaded.stages.find(stage => stage.name === 'development')?.approvedNotes,
+      approvalInput.notes,
+    );
+    repo2.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(artifactsDir, { recursive: true, force: true });
   }
 });

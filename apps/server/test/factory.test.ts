@@ -971,3 +971,48 @@ test('appendFactoryTestsChecks determina status, executedCommands e cobertura a 
   ]);
   assert.match(missingExecSidecar.backendChecks?.test?.errorSummary ?? '', /ENOENT/);
 });
+
+test('buildFactoryDevelopmentPrompt injeta decisões e critérios aprovados estruturados do Bloco 02', () => {
+  const prompt = buildFactoryDevelopmentPrompt({
+    task: 'PROD-990',
+    understandingReportPath: '/tmp/factory/spec.md',
+    implementationPlanPath: '/tmp/factory/plan.md',
+    reportPath: '/tmp/factory/dev.md',
+    planningApproval: {
+      approvedAt: '2026-11-22T10:00:00.000Z',
+      decisions: [
+        {
+          id: 'D1',
+          question: 'Estratégia de cache',
+          mode: 'alternative',
+          selectedOption: 'Cache em memória com TTL',
+          recommendedOption: 'Sem cache',
+        },
+        {
+          id: 'D2',
+          question: 'Formato de erro HTTP',
+          mode: 'custom',
+          selectedOption: 'RFC 7807 com código estável',
+          recommendedOption: 'JSON simples',
+        },
+      ],
+      acceptanceCriteria: [
+        { id: 'CA1', description: 'Expirar cache após 60s', approved: true },
+        { id: 'CA2', description: 'Métricas em Prometheus', approved: false },
+      ],
+      notes: 'Preservar compatibilidade da rota v1.',
+    },
+  });
+
+  assert.match(prompt, /Portão Humano do Bloco 02 — Decisões Aprovadas e Critérios de Aceite/);
+  assert.ok(prompt.includes('"id": "D1"'));
+  assert.ok(prompt.includes('"mode": "alternative"'));
+  assert.ok(prompt.includes('"selectedOption": "Cache em memória com TTL"'));
+  assert.ok(prompt.includes('"id": "D2"'));
+  assert.ok(prompt.includes('"selectedOption": "RFC 7807 com código estável"'));
+  assert.ok(prompt.includes('"id": "CA1"'));
+  assert.ok(prompt.includes('"approved": true'));
+  assert.ok(prompt.includes('"id": "CA2"'));
+  assert.ok(prompt.includes('"approved": false'));
+  assert.ok(prompt.includes('Preservar compatibilidade da rota v1.'));
+});

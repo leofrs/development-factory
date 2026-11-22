@@ -309,8 +309,18 @@ export default function App() {
         <FactoryFlowRoadmapModal
           flow={roadmapFlow}
           onClose={() => setRoadmapFlowId(null)}
-          onAdvanceFlowStage={async (flowId, approvedNotes) => {
-            await advanceFlowStage(flowId, { startSession: true, cols: 120, rows: 36, approvedNotes });
+          onAdvanceFlowStage={async (flowId, options) => {
+            await advanceFlowStage(flowId, {
+              startSession: true,
+              cols: 120,
+              rows: 36,
+              ...(options?.approvedNotes !== undefined
+                ? { approvedNotes: options.approvedNotes }
+                : {}),
+              ...(options?.planningApproval !== undefined
+                ? { planningApproval: options.planningApproval }
+                : {}),
+            });
           }}
           onRerunFlowStage={async (flowId, stage, approvedNotes) => {
             await rerunFlowStage(flowId, {

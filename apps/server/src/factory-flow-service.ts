@@ -13,6 +13,7 @@ import {
   FactoryFlowSchema,
   FactoryFlowStageSchema,
   FactoryIdempotencyKeySchema,
+  FactoryPlanningApprovalSchema,
   FactoryStageNameSchema,
   ListFactoryFlowsFilterSchema,
   RegisterFactoryFlowArtifactRequestSchema,
@@ -38,6 +39,9 @@ import {
   type FactoryFlowStage,
   type FactoryFlowState,
   type FactoryFlowTransitionCommand,
+  type FactoryPlanningApproval,
+  type FactoryPlanningApprovalInput,
+  type FactoryPlanningGate,
   type FactoryStageName,
   type FactoryTaskInput,
   type FactoryTriageGate,
@@ -229,6 +233,85 @@ function resolveTriageGateForFlow(
   } catch {
     return undefined;
   }
+}
+
+function resolvePlanningGateForFlow(
+  stages: FactoryFlowStage[],
+  artifacts: FactoryFlowArtifact[],
+): FactoryPlanningGate | undefined {
+  const planningArtifact = getReadyFactoryStageArtifact({ stages, artifacts }, 'planning');
+  if (!planningArtifact) {
+    return undefined;
+  }
+  try {
+    const planningSidecar = readFactoryStageSidecar('planning', planningArtifact.path);
+    const triageArtifact = getReadyFactoryStageArtifact({ stages, artifacts }, 'triage');
+    let acceptanceCriteria: FactoryPlanningGate['acceptanceCriteria'] = [];
+    if (triageArtifact) {
+      try {
+        acceptanceCriteria = readFactoryStageSidecar('triage', triageArtifact.path).acceptanceCriteria;
+      } catch {
+        acceptanceCriteria = [];
+      }
+    }
+    return {
+      pendingDecisions: planningSidecar.pendingDecisions,
+      acceptanceCriteria,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function buildValidatedPlanningApproval(
+  details: FactoryFlowDetails,
+  approvalInput: FactoryPlanningApprovalInput,
+  approvedAt: string,
+): FactoryPlanningApproval {
+  const planningArtifact = getReadyFactoryStageArtifact(details, 'planning');
+  if (planningArtifact) {
+    const planningSidecar = readFactoryStageSidecar('planning', planningArtifact.path);
+    for (let index = 0; index < planningSidecar.pendingDecisions.length; index += 1) {
+      const pending = planningSidecar.pendingDecisions[index];
+      if (!pending) {
+        continue;
+      }
+      const decisionId = `D${index + 1}`;
+      const decision =
+        approvalInput.decisions.find(item => item.id === decisionId) ??
+        approvalInput.decisions.find(item => item.question === pending.question);
+      if (!decision) {
+        throw new FactoryFlowServiceError(
+          'FACTORY_FLOW_INVALID_INPUT',
+          `Responda a decisão pendente ${decisionId} antes de aprovar o Planejamento.`,
+          400,
+        );
+      }
+      if (decision.mode === 'recommended' && decision.selectedOption !== pending.recommendedOption) {
+        throw new FactoryFlowServiceError(
+          'FACTORY_FLOW_INVALID_INPUT',
+          `A opção selecionada para ${decisionId} não corresponde à opção recomendada do plano.`,
+          400,
+        );
+      }
+      if (
+        decision.mode === 'alternative' &&
+        (!pending.options.includes(decision.selectedOption) ||
+          decision.selectedOption === pending.recommendedOption)
+      ) {
+        throw new FactoryFlowServiceError(
+          'FACTORY_FLOW_INVALID_INPUT',
+          `A opção alternativa selecionada para ${decisionId} não pertence às alternativas do plano.`,
+          400,
+        );
+      }
+    }
+  }
+
+  return FactoryPlanningApprovalSchema.parse({
+    ...approvalInput,
+    approvedAt,
+  });
 }
 
 function assertStageContracts(
@@ -543,6 +626,7 @@ export class FactoryFlowService {
       worktreePath: null,
       branchName: null,
       baseBranch: parsed.data.baseBranch ?? null,
+      planningApproval: null,
       createdAt,
       updatedAt: createdAt,
       finishedAt: null,
@@ -614,6 +698,7 @@ export class FactoryFlowService {
       const artifacts = this.repository.listArtifactsByFlowId(flow.id);
       const checkpoints = this.repository.listCheckpointsByFlowId(flow.id);
       const triageGate = resolveTriageGateForFlow(flow, stages, artifacts);
+      const planningGate = resolvePlanningGateForFlow(stages, artifacts);
 
       return {
         contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
@@ -625,6 +710,7 @@ export class FactoryFlowService {
         baseBranch: flow.baseBranch,
         checkpoints,
         ...(triageGate ? { triageGate } : {}),
+        ...(planningGate ? { planningGate } : {}),
       };
     } catch (error) {
       throw mapUnexpectedError(error);
@@ -828,9 +914,21 @@ export class FactoryFlowService {
               400,
             );
           }
-          this.assertStageHandoff(this.getFlow(flowId), nextStage);
+          if (parsed.data.planningApproval !== undefined && nextStage !== 'development') {
+            throw new FactoryFlowServiceError(
+              'FACTORY_FLOW_INVALID_INPUT',
+              'As decisões e critérios aprovados do planejamento só podem ser enviados no avanço para Desenvolvimento.',
+              400,
+            );
+          }
+          const details = this.getFlow(flowId);
+          this.assertStageHandoff(details, nextStage);
 
           const at = parsed.data.at ?? this.now();
+          const planningApproval =
+            parsed.data.planningApproval !== undefined && nextStage === 'development'
+              ? buildValidatedPlanningApproval(details, parsed.data.planningApproval, at)
+              : undefined;
           const nextIteration =
             nextStage === 'development' && flow.iteration === 0 ? 1 : undefined;
           const advanced = this.repository.saveFlowTransition(
@@ -842,14 +940,16 @@ export class FactoryFlowService {
               reason: parsed.data.reason ?? `Avanço da etapa ${flow.currentStage} para ${nextStage}`,
               currentSessionId: null,
               ...(nextIteration !== undefined ? { iteration: nextIteration } : {}),
+              ...(planningApproval !== undefined ? { planningApproval } : {}),
               loopPausedReason: null,
               error: null,
             },
             { expectedUpdatedAt: parsed.data.expectedUpdatedAt },
           );
-          if (parsed.data.approvedNotes !== undefined) {
+          const effectiveApprovedNotes = parsed.data.approvedNotes ?? planningApproval?.notes;
+          if (effectiveApprovedNotes !== undefined) {
             this.repository.updateStage(flowId, nextStage, {
-              approvedNotes: parsed.data.approvedNotes,
+              approvedNotes: effectiveApprovedNotes,
               updatedAt: at,
             });
           }

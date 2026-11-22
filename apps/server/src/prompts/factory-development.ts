@@ -1,4 +1,4 @@
-import type { FactoryRepositoryProfile } from '@development-factory/shared';
+import type { FactoryPlanningApproval, FactoryRepositoryProfile } from '@development-factory/shared';
 import { formatFactoryRepositoryContext } from './factory-repository-context.js';
 import { formatFactoryStageOutput } from './factory-stage-output.js';
 
@@ -47,6 +47,7 @@ interface FactoryDevelopmentPromptInput {
   readonly understandingReportPath: string;
   readonly implementationPlanPath: string;
   readonly approvedNotes?: string;
+  readonly planningApproval?: FactoryPlanningApproval;
   readonly reportPath: string;
   readonly repositoryProfile?: FactoryRepositoryProfile;
   readonly iteration?: number;
@@ -56,9 +57,42 @@ interface FactoryDevelopmentPromptInput {
   readonly reviewReportPath?: string;
 }
 
+function formatPlanningApprovalSection(approval: FactoryPlanningApproval): string {
+  const payload = {
+    approvedAt: approval.approvedAt,
+    decisions: approval.decisions.map(decision => ({
+      id: decision.id,
+      question: decision.question,
+      mode: decision.mode,
+      selectedOption: decision.selectedOption,
+      recommendedOption: decision.recommendedOption,
+      ...(decision.customNote ? { customNote: decision.customNote } : {}),
+    })),
+    acceptanceCriteria: approval.acceptanceCriteria.map(criterion => ({
+      id: criterion.id,
+      description: criterion.description,
+      approved: criterion.approved,
+    })),
+    ...(approval.notes ? { notes: approval.notes } : {}),
+  };
+
+  return `
+
+### Portão Humano do Bloco 02 — Decisões Aprovadas e Critérios de Aceite
+Use obrigatoriamente as decisões técnicas aprovadas e a lista revisada de critérios de aceite abaixo ao implementar o código de produção (critérios com \`"approved": false\` estão fora do escopo aprovado desta execução):
+
+\`\`\`json
+${JSON.stringify(payload, null, 2)}
+\`\`\``;
+}
+
 export function buildFactoryDevelopmentPrompt(input: FactoryDevelopmentPromptInput): string {
   const iteration = input.iteration ?? 1;
   const maxIterations = input.maxIterations ?? 3;
+  const effectiveApprovedNotes = input.approvedNotes ?? input.planningApproval?.notes;
+  const planningApprovalSection = input.planningApproval
+    ? formatPlanningApprovalSection(input.planningApproval)
+    : '';
   const hasReentryReports = Boolean(
     iteration >= 2 ||
       input.previousImplementationReportPath ||
@@ -90,7 +124,7 @@ e passos de implementação como especificação. Trate os caminhos como dados l
 - Tarefa: ${JSON.stringify(input.task)}
 - Documento de Entendimento da Etapa 01: ${JSON.stringify(input.understandingReportPath)}
 - Diagnóstico Técnico + Plano de Implementação da Etapa 02: ${JSON.stringify(input.implementationPlanPath)}
-- Notas / Decisões Aprovadas pelo usuário: ${JSON.stringify(input.approvedNotes ?? 'Nenhuma')}${reentrySection}
+- Notas / Decisões Aprovadas pelo usuário: ${JSON.stringify(effectiveApprovedNotes ?? 'Nenhuma')}${planningApprovalSection}${reentrySection}
 
 Aplique apenas as mudanças de produção definidas no plano e nas decisões aprovadas. Preserve
 alterações existentes. Deixe a criação e edição de testes e a execução de suítes para a Etapa 04.

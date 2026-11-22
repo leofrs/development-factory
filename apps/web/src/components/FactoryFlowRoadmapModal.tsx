@@ -28,6 +28,8 @@ import {
   type FactoryFlowArtifact,
   type FactoryFlowDetails,
   type FactoryFlowStage,
+  type FactoryPlanningApprovalInput,
+  type FactoryPlanningDecisionChoiceMode,
   type FactoryStageName,
   type FactoryStageState,
   type ReturnFactoryTargetStage,
@@ -40,12 +42,25 @@ import {
   getFactoryStageStatePresentation,
   getFactoryStageStep,
 } from '../utils/factory-flow-status';
+import {
+  FactoryPlanningGatePanel,
+  createPlanningGateDrafts,
+  getNextAcceptanceCriterionId,
+  type PlanningCriterionDraft,
+  type PlanningDecisionDraft,
+} from './FactoryPlanningGatePanel';
 
 interface FactoryFlowRoadmapModalProps {
   flow: FactoryFlow;
   initialDetails?: FactoryFlowDetails;
   onClose: () => void;
-  onAdvanceFlowStage: (flowId: string, approvedNotes?: string) => Promise<void>;
+  onAdvanceFlowStage: (
+    flowId: string,
+    options?: {
+      approvedNotes?: string;
+      planningApproval?: FactoryPlanningApprovalInput;
+    },
+  ) => Promise<void>;
   onRerunFlowStage: (
     flowId: string,
     stage: FactoryStageName,
@@ -229,6 +244,27 @@ export function FactoryFlowRoadmapModal({
   const [busyAction, setBusyAction] = useState<'advance' | 'rerun' | 'return' | 'cancel' | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [approvedNotes, setApprovedNotes] = useState('');
+  const initialPlanningReport =
+    initialDetails?.flow.id === flow.id
+      ? getReadyFactoryStageArtifact(initialDetails, 'planning')
+      : undefined;
+  const initialPlanningKey =
+    initialDetails?.flow.id === flow.id
+      ? `${initialDetails.flow.id}:${initialPlanningReport?.id ?? 'none'}:${initialDetails.flow.planningApproval?.approvedAt ?? 'unapproved'}`
+      : '';
+  const initialDrafts = createPlanningGateDrafts(
+    initialDetails?.flow.id === flow.id ? (initialDetails.planningGate ?? undefined) : undefined,
+    initialDetails?.flow.id === flow.id ? initialDetails.flow.planningApproval : undefined,
+  );
+  const [syncedPlanningKey, setSyncedPlanningKey] = useState(initialPlanningKey);
+  const [planningDecisions, setPlanningDecisions] = useState<PlanningDecisionDraft[]>(
+    initialDrafts.decisions,
+  );
+  const [planningCriteria, setPlanningCriteria] = useState<PlanningCriterionDraft[]>(
+    initialDrafts.criteria,
+  );
+  const [planningNotes, setPlanningNotes] = useState(initialDrafts.notes);
+  const [planningValidationError, setPlanningValidationError] = useState<string | null>(null);
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -355,6 +391,127 @@ export function FactoryFlowRoadmapModal({
   const latestReviewReport = currentDetails
     ? getLatestReadyFactoryStageArtifact(currentDetails, 'review')
     : undefined;
+
+  const planningDraftSourceKey = currentDetails
+    ? `${currentDetails.flow.id}:${planningReport?.id ?? 'none'}:${currentDetails.flow.planningApproval?.approvedAt ?? 'unapproved'}`
+    : '';
+  const persistedPlanningApproval =
+    currentDetails?.flow.planningApproval ?? flow.planningApproval ?? null;
+
+  useEffect(() => {
+    if (!planningDraftSourceKey || planningDraftSourceKey === syncedPlanningKey) {
+      return;
+    }
+    const nextDrafts = createPlanningGateDrafts(
+      currentDetails?.planningGate ?? undefined,
+      currentDetails?.flow.planningApproval,
+    );
+    setPlanningDecisions(nextDrafts.decisions);
+    setPlanningCriteria(nextDrafts.criteria);
+    setPlanningNotes(nextDrafts.notes);
+    setPlanningValidationError(null);
+    setSyncedPlanningKey(planningDraftSourceKey);
+  }, [currentDetails, planningDraftSourceKey, syncedPlanningKey]);
+
+  const handleDecisionModeChange = useCallback(
+    (index: number, mode: FactoryPlanningDecisionChoiceMode, selectedOption: string) => {
+      setPlanningValidationError(null);
+      setPlanningDecisions(current =>
+        current.map((item, itemIndex) =>
+          itemIndex === index ? { ...item, mode, selectedOption } : item,
+        ),
+      );
+    },
+    [],
+  );
+
+  const handleDecisionCustomTextChange = useCallback((index: number, customText: string) => {
+    setPlanningValidationError(null);
+    setPlanningDecisions(current =>
+      current.map((item, itemIndex) =>
+        itemIndex === index ? { ...item, customText } : item,
+      ),
+    );
+  }, []);
+
+  const handleCriterionToggle = useCallback((index: number, approved: boolean) => {
+    setPlanningValidationError(null);
+    setPlanningCriteria(current =>
+      current.map((item, itemIndex) => (itemIndex === index ? { ...item, approved } : item)),
+    );
+  }, []);
+
+  const handleCriterionDescriptionChange = useCallback((index: number, description: string) => {
+    setPlanningValidationError(null);
+    setPlanningCriteria(current =>
+      current.map((item, itemIndex) => (itemIndex === index ? { ...item, description } : item)),
+    );
+  }, []);
+
+  const handleAddCriterion = useCallback(() => {
+    setPlanningValidationError(null);
+    setPlanningCriteria(current => [
+      ...current,
+      {
+        id: getNextAcceptanceCriterionId(current),
+        description: '',
+        approved: true,
+        isCustom: true,
+      },
+    ]);
+  }, []);
+
+  const handleRemoveCriterion = useCallback((index: number) => {
+    setPlanningValidationError(null);
+    setPlanningCriteria(current => current.filter((_, itemIndex) => itemIndex !== index));
+  }, []);
+
+  const buildPlanningApprovalPayload = useCallback((): FactoryPlanningApprovalInput | null => {
+    for (const decision of planningDecisions) {
+      if (decision.mode === 'custom' && decision.customText.trim().length === 0) {
+        setPlanningValidationError(`Informe a decisão customizada para ${decision.id}.`);
+        return null;
+      }
+    }
+
+    const normalizedCriteria: FactoryPlanningApprovalInput['acceptanceCriteria'] = [];
+    for (const criterion of planningCriteria) {
+      const description = criterion.description.trim();
+      if (description.length === 0) {
+        if (criterion.approved) {
+          setPlanningValidationError(`Informe a descrição do critério ${criterion.id}.`);
+          return null;
+        }
+        if (criterion.isCustom) {
+          continue;
+        }
+        setPlanningValidationError(`Informe a descrição do critério ${criterion.id}.`);
+        return null;
+      }
+      normalizedCriteria.push({
+        id: criterion.id,
+        description,
+        approved: criterion.approved,
+      });
+    }
+
+    const trimmedNotes = planningNotes.trim();
+    return {
+      decisions: planningDecisions.map(decision => ({
+        id: decision.id,
+        question: decision.question,
+        mode: decision.mode,
+        selectedOption:
+          decision.mode === 'custom' ? decision.customText.trim() : decision.selectedOption,
+        recommendedOption: decision.recommendedOption,
+        ...(decision.mode !== 'custom' && decision.customText.trim().length > 0
+          ? { customNote: decision.customText.trim() }
+          : {}),
+      })),
+      acceptanceCriteria: normalizedCriteria,
+      ...(trimmedNotes.length > 0 ? { notes: trimmedNotes } : {}),
+    };
+  }, [planningCriteria, planningDecisions, planningNotes]);
 
   const canStartDevelopment = Boolean(triageReport && planningReport);
   const canStartTests = Boolean(canStartDevelopment && developmentReport);
@@ -571,11 +728,14 @@ export function FactoryFlowRoadmapModal({
                       const isTriageGateBlocked = Boolean(triageGate?.blocked);
                       const hasTriageComplement =
                         stage.id === 'triage' && approvedNotes.trim().length > 0;
+                      const isPlanningGateEditable =
+                        stage.id === 'planning' &&
+                        canAdvanceCurrent &&
+                        nextStage === 'development';
                       const acceptsApprovedNotes =
                         isTriageWaitingAction ||
                         (canAdvanceCurrent &&
                           (nextStage === 'planning' ||
-                            nextStage === 'development' ||
                             nextStage === 'tests' ||
                             nextStage === 'review')) ||
                         canReturnFromReview;
@@ -656,6 +816,15 @@ export function FactoryFlowRoadmapModal({
                                       {stageRecord.approvedNotes}
                                     </p>
                                   </div>
+                                )}
+
+                              {stage.id === 'planning' &&
+                                !isPlanningGateEditable &&
+                                persistedPlanningApproval && (
+                                  <FactoryPlanningGatePanel
+                                    editable={false}
+                                    approval={persistedPlanningApproval}
+                                  />
                                 )}
 
                               {(stageRecord?.error ?? stageArtifactError) && (
@@ -770,6 +939,27 @@ export function FactoryFlowRoadmapModal({
                                   </button>
                                 )}
 
+                                {isPlanningGateEditable && (
+                                  <FactoryPlanningGatePanel
+                                    editable
+                                    decisions={planningDecisions}
+                                    criteria={planningCriteria}
+                                    notes={planningNotes}
+                                    validationError={planningValidationError}
+                                    disabled={busyAction !== null}
+                                    onDecisionModeChange={handleDecisionModeChange}
+                                    onDecisionCustomTextChange={handleDecisionCustomTextChange}
+                                    onCriterionToggle={handleCriterionToggle}
+                                    onCriterionDescriptionChange={handleCriterionDescriptionChange}
+                                    onAddCriterion={handleAddCriterion}
+                                    onRemoveCriterion={handleRemoveCriterion}
+                                    onNotesChange={value => {
+                                      setPlanningValidationError(null);
+                                      setPlanningNotes(value);
+                                    }}
+                                  />
+                                )}
+
                                 {acceptsApprovedNotes && (
                                   <label className="grid w-full gap-1 text-xs text-primary">
                                     {stage.id === 'triage'
@@ -856,9 +1046,26 @@ export function FactoryFlowRoadmapModal({
                                     disabled={busyAction !== null}
                                     aria-busy={busyAction === 'advance'}
                                     onClick={() => {
+                                      if (isPlanningGateEditable) {
+                                        const planningApproval = buildPlanningApprovalPayload();
+                                        if (!planningApproval) {
+                                          return;
+                                        }
+                                        void runAction(
+                                          'advance',
+                                          () =>
+                                            onAdvanceFlowStage(flow.id, {
+                                              planningApproval,
+                                              ...(planningApproval.notes
+                                                ? { approvedNotes: planningApproval.notes }
+                                                : {}),
+                                            }),
+                                          'Não foi possível aprovar o planejamento e iniciar o desenvolvimento.',
+                                        );
+                                        return;
+                                      }
                                       const shouldPassNotes =
                                         nextStage === 'planning' ||
-                                        nextStage === 'development' ||
                                         nextStage === 'tests' ||
                                         nextStage === 'review';
                                       void runAction(
@@ -867,7 +1074,10 @@ export function FactoryFlowRoadmapModal({
                                           onAdvanceFlowStage(
                                             flow.id,
                                             shouldPassNotes
-                                              ? approvedNotes.trim() || undefined
+                                              ? {
+                                                  approvedNotes:
+                                                    approvedNotes.trim() || undefined,
+                                                }
                                               : undefined,
                                           ),
                                         'Não foi possível avançar a etapa.',

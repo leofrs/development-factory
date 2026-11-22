@@ -15,6 +15,10 @@ import type {
 import { BackgroundTasksPopover } from '../src/components/BackgroundTasksPopover';
 import { FactoryFlowRoadmapModal } from '../src/components/FactoryFlowRoadmapModal';
 import { FactoryPage } from '../src/components/FactoryPage';
+import {
+  createPlanningGateDrafts,
+  getNextAcceptanceCriterionId,
+} from '../src/components/FactoryPlanningGatePanel';
 import { FactoryTaskModal } from '../src/components/FactoryTaskModal';
 import { HistoryModal } from '../src/components/HistoryModal';
 import { MarkdownViewerModal } from '../src/components/MarkdownViewerModal';
@@ -692,4 +696,206 @@ test('FactoryFlowRoadmapModal exibe portão humano estruturado do Bloco 01 com b
   assert.match(html, /Respostas aos bloqueadores \/ Complemento de contexto/);
   assert.match(html, />Reexecutar</);
   assert.match(html, /Avançar para Planejamento/);
+});
+
+test('FactoryFlowRoadmapModal exibe portão humano estruturado do Bloco 02 e mantém decisões persistidas visíveis após aprovação', () => {
+  const flowId = 'aaaaaaaa-1111-4111-8111-111111111111';
+  const planningWaitingFlow = createFlow({
+    id: flowId,
+    title: 'PLAN-602 · Portão de Planejamento',
+    currentStage: 'planning',
+    state: 'waiting_action',
+    currentSessionId: null,
+  });
+
+  const editableDetails: FactoryFlowDetails = {
+    contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+    flow: planningWaitingFlow,
+    stages: [
+      {
+        contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+        id: 'bbbbbbbb-1111-4111-8111-111111111111',
+        flowId,
+        name: 'triage',
+        state: 'completed',
+        sessionId: null,
+        reportPath: '/tmp/artifacts/spec.md',
+        sessionPath: null,
+        createdAt: '2026-11-19T12:00:00.000Z',
+        updatedAt: '2026-11-19T12:02:00.000Z',
+        startedAt: '2026-11-19T12:00:00.000Z',
+        finishedAt: '2026-11-19T12:02:00.000Z',
+        error: null,
+      },
+      {
+        contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+        id: 'bbbbbbbb-1111-4111-8111-111111111112',
+        flowId,
+        name: 'planning',
+        state: 'waiting_action',
+        sessionId: null,
+        reportPath: '/tmp/artifacts/plan.md',
+        sessionPath: null,
+        createdAt: '2026-11-19T12:02:00.000Z',
+        updatedAt: '2026-11-19T12:05:00.000Z',
+        startedAt: '2026-11-19T12:02:00.000Z',
+        finishedAt: null,
+        error: null,
+      },
+    ],
+    artifacts: [
+      {
+        contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+        id: 'cccccccc-1111-4111-8111-111111111111',
+        flowId,
+        stage: 'triage',
+        sessionId: null,
+        kind: 'specification',
+        format: 'markdown',
+        path: '/tmp/artifacts/spec.md',
+        status: 'ready',
+        iteration: 0,
+        createdAt: '2026-11-19T12:02:00.000Z',
+        updatedAt: '2026-11-19T12:02:00.000Z',
+        error: null,
+      },
+      {
+        contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+        id: 'cccccccc-1111-4111-8111-111111111112',
+        flowId,
+        stage: 'planning',
+        sessionId: null,
+        kind: 'plan',
+        format: 'markdown',
+        path: '/tmp/artifacts/plan.md',
+        status: 'ready',
+        iteration: 0,
+        createdAt: '2026-11-19T12:05:00.000Z',
+        updatedAt: '2026-11-19T12:05:00.000Z',
+        error: null,
+      },
+    ],
+    worktreePath: null,
+    branchName: null,
+    baseBranch: null,
+    checkpoints: [],
+    planningGate: {
+      pendingDecisions: [
+        {
+          question: 'Onde armazenar os tokens revogados?',
+          options: ['Tabela SQLite dedicada', 'Arquivo JSON local'],
+          recommendedOption: 'Tabela SQLite dedicada',
+        },
+        {
+          question: 'Qual política de expiração adotar?',
+          options: ['TTL fixo de 15 min', 'Sliding expiration'],
+          recommendedOption: 'TTL fixo de 15 min',
+        },
+      ],
+      acceptanceCriteria: [
+        { id: 'CA1', description: 'Revogar token ao encerrar sessão' },
+        { id: 'CA2', description: 'Rejeitar token revogado com HTTP 401' },
+      ],
+    },
+  };
+
+  const editableHtml = renderToStaticMarkup(
+    createElement(FactoryFlowRoadmapModal, {
+      flow: planningWaitingFlow,
+      initialDetails: editableDetails,
+      onClose: noop,
+      onAdvanceFlowStage: noopAsync,
+      onRerunFlowStage: noopAsync,
+      onViewMarkdown: noop,
+    }),
+  );
+
+  assert.match(editableHtml, /Portão humano · Decisões e critérios/);
+  assert.match(editableHtml, />D1<.*Onde armazenar os tokens revogados\?/);
+  assert.match(editableHtml, />D2<.*Qual política de expiração adotar\?/);
+  assert.match(editableHtml, /Opção Recomendada/);
+  assert.match(editableHtml, /Tabela SQLite dedicada/);
+  assert.match(editableHtml, /Alternativa/);
+  assert.match(editableHtml, /Arquivo JSON local/);
+  assert.match(editableHtml, /Customizada/);
+  assert.match(editableHtml, /Checklist de critérios de aceite/);
+  assert.match(editableHtml, /Adicionar critério/);
+  assert.match(editableHtml, /value="Revogar token ao encerrar sessão"/);
+  assert.match(editableHtml, /value="Rejeitar token revogado com HTTP 401"/);
+  assert.match(editableHtml, /Aprovar e Iniciar Desenvolvimento/);
+  assert.doesNotMatch(editableHtml, /Notas \/ Decisões Aprovadas \(opcional\)/);
+
+  const persistedApproval = {
+    approvedAt: '2026-11-19T12:06:00.000Z',
+    decisions: [
+      {
+        id: 'D1',
+        question: 'Onde armazenar os tokens revogados?',
+        mode: 'recommended' as const,
+        selectedOption: 'Tabela SQLite dedicada',
+        recommendedOption: 'Tabela SQLite dedicada',
+      },
+      {
+        id: 'D2',
+        question: 'Qual política de expiração adotar?',
+        mode: 'custom' as const,
+        selectedOption: 'TTL de 10 min com renovação explícita',
+        recommendedOption: 'TTL fixo de 15 min',
+      },
+    ],
+    acceptanceCriteria: [
+      { id: 'CA1', description: 'Revogar token imediatamente no logout', approved: true },
+      { id: 'CA2', description: 'Rejeitar token revogado com HTTP 401', approved: false },
+    ],
+    notes: 'Manter índice em expires_at.',
+  };
+
+  const drafts = createPlanningGateDrafts(editableDetails.planningGate ?? undefined, persistedApproval);
+  assert.equal(drafts.decisions[0]?.mode, 'recommended');
+  assert.equal(drafts.decisions[1]?.mode, 'custom');
+  assert.equal(drafts.decisions[1]?.customText, 'TTL de 10 min com renovação explícita');
+  assert.equal(drafts.criteria[0]?.description, 'Revogar token imediatamente no logout');
+  assert.equal(drafts.criteria[1]?.approved, false);
+  assert.equal(getNextAcceptanceCriterionId(drafts.criteria), 'CA3');
+
+  const developmentFlow = createFlow({
+    id: flowId,
+    title: 'PLAN-602 · Portão de Planejamento',
+    currentStage: 'development',
+    state: 'running',
+    planningApproval: persistedApproval,
+  });
+
+  const persistedHtml = renderToStaticMarkup(
+    createElement(FactoryFlowRoadmapModal, {
+      flow: developmentFlow,
+      initialDetails: {
+        ...editableDetails,
+        flow: developmentFlow,
+      },
+      onClose: noop,
+      onAdvanceFlowStage: noopAsync,
+      onRerunFlowStage: noopAsync,
+      onViewMarkdown: noop,
+    }),
+  );
+
+  assert.match(persistedHtml, /Decisões e critérios aprovados/);
+  assert.match(persistedHtml, /2 decisões · 1\/2 CAs/);
+  assert.match(persistedHtml, /TTL de 10 min com renovação explícita/);
+  assert.match(persistedHtml, /Revogar token imediatamente no logout/);
+  assert.match(persistedHtml, /Manter índice em expires_at\./);
+
+  const popoverHtml = renderToStaticMarkup(
+    createElement(BackgroundTasksPopover, {
+      id: 'bg-planning-approval',
+      sessions: [],
+      factoryFlows: [developmentFlow],
+      onOpenTerminal: noop,
+      onOpenFlowRoadmap: noop,
+      onViewReport: noop,
+      onClose: noop,
+    }),
+  );
+  assert.match(popoverHtml, /Planejamento aprovado: 2 decisões · 1 CAs/);
 });

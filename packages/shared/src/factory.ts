@@ -496,6 +496,71 @@ const pendingDecisionSchema = z
     message: 'A recomendação deve corresponder a uma das opções',
   });
 
+export const FactoryPlanningDecisionChoiceModeSchema = z.enum([
+  'recommended',
+  'alternative',
+  'custom',
+]);
+export type FactoryPlanningDecisionChoiceMode = z.infer<
+  typeof FactoryPlanningDecisionChoiceModeSchema
+>;
+
+export const FactoryPlanningDecisionApprovalSchema = z.strictObject({
+  id: text.max(32),
+  question: text.max(1000),
+  mode: FactoryPlanningDecisionChoiceModeSchema,
+  selectedOption: text.max(2000),
+  recommendedOption: text.max(2000),
+  customNote: text.max(2000).optional(),
+});
+export type FactoryPlanningDecisionApproval = z.infer<
+  typeof FactoryPlanningDecisionApprovalSchema
+>;
+
+export const FactoryAcceptanceCriterionSchema = z.strictObject({
+  id: text.max(64),
+  description: text.max(2000),
+});
+export type FactoryAcceptanceCriterion = z.infer<typeof FactoryAcceptanceCriterionSchema>;
+
+export const FactoryApprovedAcceptanceCriterionSchema = z.strictObject({
+  id: text.max(64),
+  description: text.max(2000),
+  approved: z.boolean(),
+});
+export type FactoryApprovedAcceptanceCriterion = z.infer<
+  typeof FactoryApprovedAcceptanceCriterionSchema
+>;
+
+const uniqueAcceptanceCriteriaRefinement = (
+  criteria: readonly { id: string }[],
+): boolean => new Set(criteria.map(criterion => criterion.id)).size === criteria.length;
+
+export const FactoryPlanningApprovalInputSchema = z.strictObject({
+  decisions: z.array(FactoryPlanningDecisionApprovalSchema),
+  acceptanceCriteria: z
+    .array(FactoryApprovedAcceptanceCriterionSchema)
+    .refine(uniqueAcceptanceCriteriaRefinement, 'Os IDs dos critérios de aceite devem ser únicos'),
+  notes: approvedNotesSchema.optional(),
+});
+export type FactoryPlanningApprovalInput = z.infer<typeof FactoryPlanningApprovalInputSchema>;
+
+export const FactoryPlanningApprovalSchema = z.strictObject({
+  decisions: z.array(FactoryPlanningDecisionApprovalSchema),
+  acceptanceCriteria: z
+    .array(FactoryApprovedAcceptanceCriterionSchema)
+    .refine(uniqueAcceptanceCriteriaRefinement, 'Os IDs dos critérios de aceite devem ser únicos'),
+  notes: approvedNotesSchema.optional(),
+  approvedAt: timestamp,
+});
+export type FactoryPlanningApproval = z.infer<typeof FactoryPlanningApprovalSchema>;
+
+export const FactoryPlanningGateSchema = z.strictObject({
+  pendingDecisions: z.array(pendingDecisionSchema),
+  acceptanceCriteria: z.array(FactoryAcceptanceCriterionSchema),
+});
+export type FactoryPlanningGate = z.infer<typeof FactoryPlanningGateSchema>;
+
 export const FactoryPlanningSidecarSchema = z.strictObject({
   contractVersion: sidecarVersion,
   stage: z.literal('planning'),
@@ -690,6 +755,7 @@ export const FactoryFlowSchema = z
     worktreePath: absoluteWslPathSchema.nullable().default(null),
     branchName: gitBranchNameSchema.nullable().default(null),
     baseBranch: gitBranchNameSchema.nullable().default(null),
+    planningApproval: FactoryPlanningApprovalSchema.nullable().optional(),
     createdAt: timestamp,
     updatedAt: timestamp,
     finishedAt: timestamp.nullable(),
@@ -768,6 +834,7 @@ export const FactoryFlowTransitionCommandSchema = z.strictObject({
   worktreePath: absoluteWslPathSchema.nullable().optional(),
   branchName: gitBranchNameSchema.nullable().optional(),
   baseBranch: gitBranchNameSchema.nullable().optional(),
+  planningApproval: FactoryPlanningApprovalSchema.nullable().optional(),
   error: FactoryFlowErrorSchema.nullable().optional(),
 });
 export type FactoryFlowTransitionCommand = z.infer<typeof FactoryFlowTransitionCommandSchema>;
@@ -851,6 +918,10 @@ function applyFactoryFlowTransition(
       next.data.branchName !== undefined ? next.data.branchName : current.data.branchName,
     baseBranch:
       next.data.baseBranch !== undefined ? next.data.baseBranch : current.data.baseBranch,
+    planningApproval:
+      next.data.planningApproval !== undefined
+        ? next.data.planningApproval
+        : current.data.planningApproval,
     updatedAt: next.data.at,
     finishedAt: isFinalFactoryFlowState(next.data.to) ? next.data.at : null,
     error: next.data.error !== undefined ? next.data.error : current.data.error,
@@ -949,6 +1020,7 @@ export const FactoryFlowDetailsSchema = z
     baseBranch: gitBranchNameSchema.nullable().optional(),
     checkpoints: z.array(FactoryFlowCheckpointSchema).default([]),
     triageGate: FactoryTriageGateSchema.nullable().optional(),
+    planningGate: FactoryPlanningGateSchema.nullable().optional(),
   })
   .transform(details => ({
     ...details,
@@ -1052,6 +1124,7 @@ export const AdvanceFactoryStageRequestSchema = z.strictObject({
   expectedUpdatedAt: timestamp.optional(),
   startSession: z.boolean().optional(),
   approvedNotes: approvedNotesSchema.optional(),
+  planningApproval: FactoryPlanningApprovalInputSchema.optional(),
   cols: z.number().int().min(2).max(500).optional(),
   rows: z.number().int().min(1).max(300).optional(),
 });

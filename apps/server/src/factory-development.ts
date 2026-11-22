@@ -56,10 +56,14 @@ export async function readFactoryDevelopmentInputs(details: FactoryFlowDetails) 
         ])
       : [undefined, undefined, undefined];
 
+  const approvedNotes = details.stages.find(stage => stage.name === 'development')?.approvedNotes;
+  const planningApproval = details.flow.planningApproval ?? undefined;
+
   return {
     understandingReportPath: paths.triage,
     implementationPlanPath: paths.planning,
-    approvedNotes: details.stages.find(stage => stage.name === 'development')?.approvedNotes,
+    approvedNotes,
+    ...(planningApproval ? { planningApproval } : {}),
     iteration,
     maxIterations: details.flow.maxIterations,
     ...(previousImplementationReportPath ? { previousImplementationReportPath } : {}),

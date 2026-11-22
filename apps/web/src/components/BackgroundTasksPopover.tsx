@@ -305,6 +305,14 @@ export function BackgroundTasksPopover({
                             {flow.loopPausedReason}
                           </p>
                         )}
+                        {flow.planningApproval && (
+                          <p className="mt-1 font-mono text-[10px] text-accent">
+                            Planejamento aprovado: {flow.planningApproval.decisions.length}{' '}
+                            {flow.planningApproval.decisions.length === 1 ? 'decisão' : 'decisões'} ·{' '}
+                            {flow.planningApproval.acceptanceCriteria.filter(c => c.approved).length}{' '}
+                            CAs
+                          </p>
+                        )}
                       </div>
                       <ChevronRight size={15} className="mt-1 shrink-0 text-muted" />
                     </button>

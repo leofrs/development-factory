@@ -888,8 +888,8 @@ if (check === 'typecheck' || check === 'lint') {
     const triageError = FactoryFlowApiErrorResponseSchema.parse(await invalidTriage.json());
     assert.equal(triageError.error.code, 'FACTORY_FLOW_INVALID_CONTRACT');
     assert.match(triageError.error.details?.[0] ?? '', /^\$\.technicalContext /);
-    assert.deepEqual(await getDetails(), afterPlanOne);
     writeFactoryStageSidecar(specOne.path, 'triage');
+    assert.deepEqual(await getDetails(), afterPlanOne);
 
     const developmentResponse = await postAction('advance', { startSession: true, approvedNotes });
     assert.equal(developmentResponse.status, 200);
@@ -2589,5 +2589,224 @@ test(
 
     const flowBDetails = await getDetails(flowBId);
     assert.equal(flowBDetails.stages.find(s => s.name === 'planning')?.approvedNotes, userAnswer);
+  },
+);
+
+test(
+  'API de fluxos expõe planningGate do Bloco 02, persiste planningApproval e injeta decisões estruturadas no Bloco 03',
+  { timeout: 45_000 },
+  async context => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'df-factory-planning-gate-'));
+    const binDir = join(rootDir, 'bin');
+    const repoDir = join(rootDir, 'repo');
+    const xdgDataHome = join(rootDir, 'xdg-data');
+    const dbPath = join(rootDir, 'reviews.db');
+    mkdirSync(binDir);
+    mkdirSync(repoDir);
+    mkdirSync(xdgDataHome);
+    initGitRepo(repoDir, 'main');
+
+    const claudeTarget = join(binDir, 'claude');
+    copyFileSync(new URL('./fixtures/claude.ts', import.meta.url), claudeTarget);
+    chmodSync(claudeTarget, 0o755);
+
+    const previousPath = process.env.PATH;
+    const previousXdg = process.env.XDG_DATA_HOME;
+    process.env.PATH = `${binDir}:${previousPath ?? ''}`;
+    process.env.XDG_DATA_HOME = xdgDataHome;
+
+    const { server, sessionManager, shutdown } = createReviewServer({ dbPath });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+
+    const address = server.address();
+    assert(address && typeof address !== 'string');
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+
+    context.after(async () => {
+      await shutdown();
+      process.env.PATH = previousPath;
+      if (previousXdg === undefined) {
+        delete process.env.XDG_DATA_HOME;
+      } else {
+        process.env.XDG_DATA_HOME = previousXdg;
+      }
+      rmSync(rootDir, { recursive: true, force: true });
+    });
+
+    const getDetails = async (flowId: string) => {
+      const response = await fetch(`${baseUrl}/api/factory/flows/${flowId}`, {
+        headers: { Origin: ALLOWED_ORIGIN },
+      });
+      assert.equal(response.status, 200);
+      return FactoryFlowDetailsSchema.parse(await response.json());
+    };
+
+    const waitReady = async (sessionId: string) => {
+      await waitFor(() =>
+        /READY:[^\n]*\n/.test(sessionManager.getSession(sessionId)?.buffer.replay() ?? ''),
+      );
+      const readyLine = (sessionManager.getSession(sessionId)?.buffer.replay() ?? '')
+        .split(/\r?\n/)
+        .find(line => line.startsWith('READY:'));
+      assert.ok(readyLine);
+      return z
+        .object({ args: z.array(z.string()) })
+        .parse(JSON.parse(readyLine.slice('READY:'.length)) as unknown)
+        .args.at(-1) ?? '';
+    };
+
+    const createRes = await fetch(`${baseUrl}/api/factory/flows`, {
+      method: 'POST',
+      headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        task: { inputType: 'jira_key', value: 'PROD-602', repoPath: repoDir },
+        startSession: true,
+        cols: 100,
+        rows: 30,
+      }),
+    });
+    assert.equal(createRes.status, 201);
+    const created = (await createRes.json()) as {
+      flow: { id: string };
+      session: BackgroundSessionSummary;
+    };
+    const flowId = created.flow.id;
+    assert.ok(created.session.reportPath);
+    await waitReady(created.session.sessionId);
+
+    writeFileSync(created.session.reportPath, triageMarkdown('Triagem concluída.'));
+    writeFactoryStageSidecar(created.session.reportPath, 'triage', {
+      acceptanceCriteria: [
+        { id: 'CA1', description: 'Validar assinatura do webhook' },
+        { id: 'CA2', description: 'Registrar auditoria em log' },
+      ],
+      blockers: [],
+      jiraError: null,
+    });
+    sessionManager.writeInput(created.session.sessionId, 'EXIT0');
+
+    const planningRunning = await waitForFlowDetails(
+      () => getDetails(flowId),
+      details => details.flow.currentStage === 'planning' && details.flow.currentSessionId !== null,
+    );
+    const planningSessionId = planningRunning.flow.currentSessionId;
+    assert.ok(planningSessionId);
+    const planningSession = sessionManager.getSession(planningSessionId);
+    assert.ok(planningSession?.reportPath);
+    await waitReady(planningSessionId);
+
+    const pendingDecisions = [
+      {
+        question: 'Qual biblioteca usar para HMAC?',
+        options: ['node:crypto nativo', 'Dependência externa'],
+        recommendedOption: 'node:crypto nativo',
+      },
+      {
+        question: 'Como tratar payload inválido?',
+        options: ['Retornar HTTP 400', 'Enfileirar em DLQ'],
+        recommendedOption: 'Retornar HTTP 400',
+      },
+    ];
+    writeFileSync(planningSession.reportPath, planningMarkdown('Plano técnico com decisões D1 e D2.'));
+    writeFactoryStageSidecar(planningSession.reportPath, 'planning', {
+      pendingDecisions,
+    });
+    sessionManager.writeInput(planningSessionId, 'EXIT0');
+
+    const planningPaused = await waitForFlowDetails(
+      () => getDetails(flowId),
+      details => details.flow.state === 'waiting_action' && details.flow.currentSessionId === null,
+    );
+    assert.deepEqual(planningPaused.planningGate, {
+      pendingDecisions,
+      acceptanceCriteria: [
+        { id: 'CA1', description: 'Validar assinatura do webhook' },
+        { id: 'CA2', description: 'Registrar auditoria em log' },
+      ],
+    });
+
+    // Tentativa sem responder todas as decisões pendentes falha com 400.
+    const incompleteApprovalRes = await fetch(`${baseUrl}/api/factory/flows/${flowId}/advance`, {
+      method: 'POST',
+      headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        startSession: true,
+        planningApproval: {
+          decisions: [
+            {
+              id: 'D1',
+              question: 'Qual biblioteca usar para HMAC?',
+              mode: 'recommended',
+              selectedOption: 'node:crypto nativo',
+              recommendedOption: 'node:crypto nativo',
+            },
+          ],
+          acceptanceCriteria: [
+            { id: 'CA1', description: 'Validar assinatura do webhook', approved: true },
+          ],
+        },
+      }),
+    });
+    assert.equal(incompleteApprovalRes.status, 400);
+
+    const planningApproval = {
+      decisions: [
+        {
+          id: 'D1',
+          question: 'Qual biblioteca usar para HMAC?',
+          mode: 'recommended' as const,
+          selectedOption: 'node:crypto nativo',
+          recommendedOption: 'node:crypto nativo',
+          customNote: 'Usar timingSafeEqual na comparação.',
+        },
+        {
+          id: 'D2',
+          question: 'Como tratar payload inválido?',
+          mode: 'alternative' as const,
+          selectedOption: 'Enfileirar em DLQ',
+          recommendedOption: 'Retornar HTTP 400',
+        },
+      ],
+      acceptanceCriteria: [
+        { id: 'CA1', description: 'Validar assinatura HMAC-SHA256 do webhook', approved: true },
+        { id: 'CA2', description: 'Registrar auditoria em log', approved: false },
+        { id: 'CA3', description: 'Adicionar métrica de rejeição', approved: true },
+      ],
+      notes: 'Priorizar cobertura de timing attack.',
+    };
+
+    const advanceRes = await fetch(`${baseUrl}/api/factory/flows/${flowId}/advance`, {
+      method: 'POST',
+      headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        startSession: true,
+        cols: 100,
+        rows: 30,
+        planningApproval,
+      }),
+    });
+    assert.equal(advanceRes.status, 200);
+    const advancedBody = (await advanceRes.json()) as {
+      flow: { currentStage: string; planningApproval?: { approvedAt: string; notes?: string } | null };
+      session: BackgroundSessionSummary;
+    };
+    assert.equal(advancedBody.flow.currentStage, 'development');
+    assert.ok(advancedBody.flow.planningApproval?.approvedAt);
+    assert.equal(advancedBody.flow.planningApproval?.notes, 'Priorizar cobertura de timing attack.');
+
+    const devPrompt = await waitReady(advancedBody.session.sessionId);
+    assert.match(devPrompt, /Portão Humano do Bloco 02 — Decisões Aprovadas e Critérios de Aceite/);
+    assert.ok(devPrompt.includes('Usar timingSafeEqual na comparação.'));
+    assert.ok(devPrompt.includes('Enfileirar em DLQ'));
+    assert.ok(devPrompt.includes('Validar assinatura HMAC-SHA256 do webhook'));
+    assert.ok(devPrompt.includes('Adicionar métrica de rejeição'));
+
+    const persistedDetails = await getDetails(flowId);
+    assert.deepEqual(persistedDetails.flow.planningApproval?.decisions, planningApproval.decisions);
+    assert.deepEqual(
+      persistedDetails.flow.planningApproval?.acceptanceCriteria,
+      planningApproval.acceptanceCriteria,
+    );
   },
 );

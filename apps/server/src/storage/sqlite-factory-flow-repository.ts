@@ -93,6 +93,7 @@ interface FactoryFlowRow {
   worktree_path: string | null;
   branch_name: string | null;
   base_branch: string | null;
+  planning_approval_json: string | null;
   created_at: string;
   updated_at: string;
   finished_at: string | null;
@@ -183,6 +184,10 @@ function rowToFlow(row: FactoryFlowRow): FactoryFlow {
     worktreePath: row.worktree_path,
     branchName: row.branch_name,
     baseBranch: row.base_branch,
+    planningApproval:
+      row.planning_approval_json === null
+        ? null
+        : parseJson(row.planning_approval_json, `decisões aprovadas do fluxo ${row.id}`),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     finishedAt: row.finished_at,
@@ -577,6 +582,7 @@ export class SqliteFactoryFlowRepository {
                worktree_path = ?,
                branch_name = ?,
                base_branch = ?,
+               planning_approval_json = ?,
                updated_at = ?,
                finished_at = ?,
                transitions_json = ?,
@@ -594,6 +600,7 @@ export class SqliteFactoryFlowRepository {
           updated.worktreePath,
           updated.branchName,
           updated.baseBranch,
+          updated.planningApproval ? JSON.stringify(updated.planningApproval) : null,
           updated.updatedAt,
           updated.finishedAt,
           JSON.stringify(updated.transitions),
@@ -1051,12 +1058,13 @@ export class SqliteFactoryFlowRepository {
           worktree_path,
           branch_name,
           base_branch,
+          planning_approval_json,
           created_at,
           updated_at,
           finished_at,
           transitions_json,
           error_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         flow.id,
@@ -1075,6 +1083,7 @@ export class SqliteFactoryFlowRepository {
         flow.worktreePath,
         flow.branchName,
         flow.baseBranch,
+        flow.planningApproval ? JSON.stringify(flow.planningApproval) : null,
         flow.createdAt,
         flow.updatedAt,
         flow.finishedAt,

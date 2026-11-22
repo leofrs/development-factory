@@ -242,6 +242,20 @@ export const REVIEW_MIGRATIONS: readonly Migration[] = [
       `);
     },
   },
+  {
+    version: 8,
+    name: 'add_factory_planning_approval',
+    up(db) {
+      const existingFlowColumns = new Set(
+        (db.prepare('PRAGMA table_info(factory_flows)').all() as Array<{ name: string }>).map(
+          column => column.name,
+        ),
+      );
+      if (!existingFlowColumns.has('planning_approval_json')) {
+        db.exec('ALTER TABLE factory_flows ADD COLUMN planning_approval_json TEXT;');
+      }
+    },
+  },
 ];
 
 function validateMigrations(migrations: readonly Migration[]): void {
