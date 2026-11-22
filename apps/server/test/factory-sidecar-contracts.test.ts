@@ -10,6 +10,7 @@ import {
   FactoryTriageSidecarSchema,
 } from '@development-factory/shared';
 import type {
+  FactoryBackendCommandCheck,
   FactoryDevelopmentSidecar,
   FactoryPlanningSidecar,
   FactoryPrSidecar,
@@ -238,6 +239,63 @@ test('valida comandos, status, critérios de aceite e cobertura dos testes', () 
 
   const withoutCoverage: FactoryTestsSidecar = { ...tests, coverage: null };
   assert.deepEqual(FactoryTestsSidecarSchema.parse(withoutCoverage), withoutCoverage);
+});
+
+test('valida verificações de Testes pelo backend e consistência com status e comandos executados', () => {
+  const passedTest: FactoryBackendCommandCheck = {
+    command: ['npm', 'test'],
+    exitCode: 0,
+    errorSummary: null,
+  };
+  const passedCoverage: FactoryBackendCommandCheck = {
+    command: ['npm', 'run', 'coverage'],
+    exitCode: 0,
+    errorSummary: null,
+  };
+  const failedTest: FactoryBackendCommandCheck = {
+    command: ['npm', 'test'],
+    exitCode: 1,
+    errorSummary: 'O comando encerrou com código 1.',
+  };
+
+  const validPassed: FactoryTestsSidecar = {
+    ...tests,
+    executedCommands: [
+      { command: passedTest.command, exitCode: 0 },
+      { command: passedCoverage.command, exitCode: 0 },
+    ],
+    status: 'passed',
+    backendChecks: { test: passedTest, coverage: passedCoverage },
+  };
+  assert.deepEqual(FactoryTestsSidecarSchema.parse(validPassed), validPassed);
+
+  const validFailed: FactoryTestsSidecar = {
+    ...tests,
+    executedCommands: [{ command: failedTest.command, exitCode: 1 }],
+    status: 'failed',
+    backendChecks: { test: failedTest, coverage: null },
+  };
+  assert.deepEqual(FactoryTestsSidecarSchema.parse(validFailed), validFailed);
+
+  const validNotRun: FactoryTestsSidecar = {
+    ...tests,
+    executedCommands: [],
+    status: 'not_run',
+    coverage: null,
+    backendChecks: { test: null, coverage: null },
+  };
+  assert.deepEqual(FactoryTestsSidecarSchema.parse(validNotRun), validNotRun);
+
+  for (const inconsistent of [
+    { ...validFailed, status: 'passed' },
+    { ...validPassed, status: 'failed' },
+    { ...validNotRun, status: 'passed' },
+    { ...validFailed, executedCommands: [{ command: ['npm', 'test'], exitCode: 0 }] },
+    { ...validPassed, backendChecks: { test: passedTest, coverage: passedCoverage, extra: true } },
+    { ...validPassed, backendChecks: { test: { ...passedTest, stdout: 'extra' }, coverage: null } },
+  ]) {
+    assert.equal(FactoryTestsSidecarSchema.safeParse(inconsistent).success, false);
+  }
 });
 
 test('valida vereditos, severidades e linhas em findings de revisão', () => {

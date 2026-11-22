@@ -28,6 +28,7 @@ import {
   FactoryFlowDetailsSchema,
   FactoryFlowListResponseSchema,
   FactoryFlowSchema,
+  FactoryTestsSidecarSchema,
   RollbackFactoryFlowCheckpointResponseSchema,
   ServerMessageSchema,
   TransitionFactoryFlowResponseSchema,
@@ -608,21 +609,45 @@ test(
 import { existsSync, writeFileSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 const [check, literal, empty] = process.argv.slice(2);
-assert.equal(literal, ${JSON.stringify(literalArgument)});
-assert.equal(empty, '');
-if (existsSync('.hold-check')) {
-  writeFileSync('.check-started', '');
-  while (existsSync('.hold-check')) {
-    await delay(10);
+if (check === 'typecheck' || check === 'lint') {
+  assert.equal(literal, ${JSON.stringify(literalArgument)});
+  assert.equal(empty, '');
+  if (existsSync('.hold-check')) {
+    writeFileSync('.check-started', '');
+    while (existsSync('.hold-check')) {
+      await delay(10);
+    }
   }
-}
-if (!existsSync('src/jwt.ts')) {
-  if (check === 'typecheck') {
-    console.log('error TS2307: módulo ausente');
-    process.exitCode = 17;
+  if (!existsSync('src/jwt.ts')) {
+    if (check === 'typecheck') {
+      console.log('error TS2307: módulo ausente');
+      process.exitCode = 17;
+    } else {
+      console.error('error E1000: implementação ausente');
+      process.exitCode = 9;
+    }
+  }
+} else if (check === 'test' || check === 'coverage') {
+  if (existsSync('.hold-test')) {
+    writeFileSync('.test-started', '');
+    while (existsSync('.hold-test')) {
+      await delay(10);
+    }
+  }
+  if (!existsSync('.tests-passing')) {
+    if (check === 'test') {
+      console.log('ℹ fail 2');
+      process.exitCode = 1;
+    } else {
+      console.log('Lines : 62.5%');
+      console.log('Branches : 50%');
+      process.exitCode = 1;
+    }
+  } else if (check === 'test') {
+    console.log('ℹ tests 4\\nℹ pass 4\\nℹ fail 0');
   } else {
-    console.error('error E1000: implementação ausente');
-    process.exitCode = 9;
+    console.log('ℹ file | line % | branch % | funcs %');
+    console.log('ℹ all files | 94.50 | 82.25 | 100.00 |');
   }
 }
 `,
@@ -633,11 +658,13 @@ if (!existsSync('src/jwt.ts')) {
     const manifestName = '.development-factory.json';
     const typecheck = ['node', `./${checkScript}`, 'typecheck', literalArgument, ''];
     const lint = ['node', `./${checkScript}`, 'lint', literalArgument, ''];
+    const testCommand = ['node', `./${checkScript}`, 'test'];
+    const coverageCommand = ['node', `./${checkScript}`, 'coverage'];
     const manifest = {
       baseBranch: 'integration',
       branchPattern: 'feat/{slug}-factory',
       stack: ['Node.js'],
-      commands: { typecheck, lint, test: ['./scripts/test-integration'] },
+      commands: { typecheck, lint, test: testCommand, coverage: coverageCommand },
       protectedPaths: ['deploy/**'],
       architectureRules: ['O domínio depende de interfaces.'],
       prTemplate: '## Evidências do time\n\n## Plano de reversão',
@@ -1045,11 +1072,26 @@ if (!existsSync('src/jwt.ts')) {
     assert.ok(testsPrompt.includes(planPath));
     assert.ok(testsPrompt.includes(rerun.reportPath));
     assert.ok(testsPrompt.includes(JSON.stringify(passedChecks, null, 2)));
-    assert.match(testsPrompt, /\.\/scripts\/test-integration/);
+    assert.match(testsPrompt, /check\.mjs/);
     assert.ok(testsSpawn.args.includes('--restricted'));
     assert.equal(testsSpawn.args[testsSpawn.args.indexOf('--tools') + 1], 'Read,Glob,Grep,Edit,Write,Bash');
-    assert.match(testsSpawn.args[testsSpawn.args.indexOf('--allowedTools') + 1] ?? '', /Edit\(\*\*\/\*\.test\.\*\)/);
-    assert.match(testsSpawn.args[testsSpawn.args.indexOf('--allowedTools') + 1] ?? '', /Bash/);
+    const testsAllowedTools = (testsSpawn.args[testsSpawn.args.indexOf('--allowedTools') + 1] ?? '').split(',');
+    assert.ok(testsAllowedTools.includes('Edit(**/*.test.*)'));
+    assert.equal(testsAllowedTools.includes('Bash'), false);
+    assert.ok(testsAllowedTools.includes(`Bash(node ./${checkScript} test)`));
+    assert.ok(testsAllowedTools.includes(`Bash(node ./${checkScript} test *)`));
+    assert.ok(testsAllowedTools.includes(`Bash(node ./${checkScript} coverage)`));
+    assert.ok(testsAllowedTools.includes(`Bash(node ./${checkScript} coverage *)`));
+    assert.equal(
+      testsAllowedTools.some(entry => entry.includes('typecheck') || entry.includes('lint')),
+      false,
+    );
+    const testsDisallowedTools = (
+      testsSpawn.args[testsSpawn.args.indexOf('--disallowedTools') + 1] ?? ''
+    ).split(',');
+    assert.ok(testsDisallowedTools.includes('Bash(git push*)'));
+    assert.ok(testsDisallowedTools.includes('Bash(curl*)'));
+    assert.ok(testsDisallowedTools.includes('Edit(deploy/**)'));
 
     // O relatório de testes exige um sidecar válido antes do Code Review.
     const testsMarkdown = [
@@ -1077,7 +1119,7 @@ if (!existsSync('src/jwt.ts')) {
     );
     assert.equal((await postAction('advance', { startSession: true })).status, 409);
 
-    // 2. Reexecução de Tests reportando FAIL no código de produção: deve avançar automaticamente para Review (double-check).
+    // 2. Reexecução de Tests: mesmo se a IA alegar PASS, o backend sobrescreve com exitCode/cobertura reais e avança para Review (double-check).
     const rerunTestsResponse = await postAction('rerun', { stage: 'tests' });
     assert.equal(rerunTestsResponse.status, 200);
     const rerunTests = z.object({ session: BackgroundSessionSummarySchema }).parse(
@@ -1087,10 +1129,20 @@ if (!existsSync('src/jwt.ts')) {
     await waitFor(() => Boolean(sessionManager.getSession(rerunTests.sessionId)?.buffer.replay().includes('READY:')));
     writeFileSync(rerunTests.reportPath, testsMarkdown);
     writeFactoryStageSidecar(rerunTests.reportPath, 'tests', {
-      status: 'failed',
-      executedCommands: [{ command: ['npm', 'test'], exitCode: 1 }],
+      status: 'passed',
+      executedCommands: [{ command: ['claimed'], exitCode: 0 }],
+      coverage: { linesPercent: 100, branchesPercent: 100 },
     });
+    const holdTest = join(detailsOne.worktreePath, '.hold-test');
+    const testStarted = join(detailsOne.worktreePath, '.test-started');
+    writeFileSync(holdTest, '');
+    assert.equal(existsSync(testStarted), false);
     sessionManager.writeInput(rerunTests.sessionId, 'EXIT0');
+    await waitFor(() => existsSync(testStarted));
+    assert.equal((await postAction('advance', { startSession: true })).status, 409);
+    assert.equal((await postAction('rerun', { stage: 'tests' })).status, 409);
+    unlinkSync(holdTest);
+    unlinkSync(testStarted);
 
     await waitFor(() =>
       sessionManager
@@ -1102,6 +1154,33 @@ if (!existsSync('src/jwt.ts')) {
             session.status === 'running',
         ),
     );
+    const failedTestsSidecar = FactoryTestsSidecarSchema.parse(
+      JSON.parse(readFileSync(getFactoryStageSidecarPath(rerunTests.reportPath), 'utf8')),
+    );
+    const expectedFailedTestResults = {
+      status: 'failed',
+      executedCommands: [
+        { command: testCommand, exitCode: 1 },
+        { command: coverageCommand, exitCode: 1 },
+      ],
+      coverage: { linesPercent: 62.5, branchesPercent: 50 },
+      backendChecks: {
+        test: {
+          command: testCommand,
+          exitCode: 1,
+          errorSummary: 'O comando encerrou com código 1. Falharam 2 teste(s).',
+        },
+        coverage: {
+          command: coverageCommand,
+          exitCode: 1,
+          errorSummary: 'O comando encerrou com código 1.',
+        },
+      },
+    };
+    assert.equal(failedTestsSidecar.status, expectedFailedTestResults.status);
+    assert.deepEqual(failedTestsSidecar.executedCommands, expectedFailedTestResults.executedCommands);
+    assert.deepEqual(failedTestsSidecar.coverage, expectedFailedTestResults.coverage);
+    assert.deepEqual(failedTestsSidecar.backendChecks, expectedFailedTestResults.backendChecks);
     const autoReviewOneDetails = await getDetails();
     assert.equal(autoReviewOneDetails.flow.currentStage, 'review');
     assert.equal(autoReviewOneDetails.flow.state, 'running');
@@ -1126,6 +1205,7 @@ if (!existsSync('src/jwt.ts')) {
     assert.ok(reviewPrompt.includes(planPath));
     assert.ok(reviewPrompt.includes(rerun.reportPath));
     assert.ok(reviewPrompt.includes(rerunTests.reportPath));
+    assert.ok(reviewPrompt.includes(JSON.stringify(expectedFailedTestResults, null, 2)));
     assert.ok(reviewSpawn.args.includes('--restricted'));
     const reviewAllowedTools = reviewSpawn.args[reviewSpawn.args.indexOf('--allowedTools') + 1] ?? '';
     assert.ok(reviewAllowedTools.includes('Bash(git diff*)'));
@@ -1245,6 +1325,7 @@ if (!existsSync('src/jwt.ts')) {
     const iter2TestsSession = sessionManager.getSession(iter2TestsDetails.flow.currentSessionId);
     assert.ok(iter2TestsSession && iter2TestsSession.reportPath);
     await waitFor(() => iter2TestsSession.buffer.replay().includes('READY:'));
+    writeFileSync(join(detailsOne.worktreePath, '.tests-passing'), '');
     writeFileSync(
       iter2TestsSession.reportPath,
       [
@@ -1273,13 +1354,38 @@ if (!existsSync('src/jwt.ts')) {
           session.status === 'running',
       );
     });
+    const passedTestsSidecar = FactoryTestsSidecarSchema.parse(
+      JSON.parse(readFileSync(getFactoryStageSidecarPath(iter2TestsSession.reportPath), 'utf8')),
+    );
+    assert.equal(passedTestsSidecar.status, 'passed');
+    assert.deepEqual(passedTestsSidecar.executedCommands, [
+      { command: testCommand, exitCode: 0 },
+      { command: coverageCommand, exitCode: 0 },
+    ]);
+    assert.deepEqual(passedTestsSidecar.coverage, { linesPercent: 94.5, branchesPercent: 82.25 });
+    assert.deepEqual(passedTestsSidecar.backendChecks, {
+      test: { command: testCommand, exitCode: 0, errorSummary: null },
+      coverage: { command: coverageCommand, exitCode: 0, errorSummary: null },
+    });
     const iter2ReviewDetails = await getDetails();
     assert.equal(iter2ReviewDetails.flow.currentStage, 'review');
     assert.equal(iter2ReviewDetails.flow.iteration, 2);
     assert.ok(iter2ReviewDetails.flow.currentSessionId);
     const iter2ReviewSession = sessionManager.getSession(iter2ReviewDetails.flow.currentSessionId);
     assert.ok(iter2ReviewSession && iter2ReviewSession.reportPath);
-    await waitFor(() => iter2ReviewSession.buffer.replay().includes('READY:'));
+    await waitFor(() => /READY:[^\n]*\n/.test(iter2ReviewSession.buffer.replay()));
+    const iter2ReviewReadyLine = iter2ReviewSession.buffer
+      .replay()
+      .split(/\r?\n/)
+      .find(line => line.startsWith('READY:'));
+    assert.ok(iter2ReviewReadyLine);
+    const iter2ReviewPrompt =
+      z
+        .object({ args: z.array(z.string()) })
+        .parse(JSON.parse(iter2ReviewReadyLine.slice('READY:'.length)) as unknown)
+        .args.at(-1) ?? '';
+    assert.ok(iter2ReviewPrompt.includes('"linesPercent": 94.5'));
+    assert.ok(iter2ReviewPrompt.includes('"branchesPercent": 82.25'));
     writeFileSync(iter2ReviewSession.reportPath, approvedReviewMarkdown);
     writeFactoryStageSidecar(iter2ReviewSession.reportPath, 'review');
     sessionManager.writeInput(iter2ReviewSession.sessionId, 'EXIT0');

@@ -45,6 +45,7 @@ import {
   readFactoryStageDocument,
 } from './factory-stage-runners.js';
 import { buildTestsRunnerArgs, readFactoryTestsInputs } from './factory-tests.js';
+import { appendFactoryTestsChecks } from './factory-tests-checks.js';
 import {
   FactoryWorktreeError,
   getFactoryWorktreeHeadSha,
@@ -122,13 +123,16 @@ export interface StartFactorySessionInput extends FactoryRequest {
   readonly rows: number;
 }
 
+interface SessionBackendChecks {
+  readonly stage: 'development' | 'tests';
+  readonly worktreePath: string;
+  readonly commands: FactoryRepositoryProfile['commands'];
+  readonly abortController: AbortController;
+}
+
 interface SessionRuntime {
   readonly session: ManagedSession;
-  readonly developmentChecks?: {
-    readonly worktreePath: string;
-    readonly commands: FactoryRepositoryProfile['commands'];
-    readonly abortController: AbortController;
-  };
+  readonly backendChecks?: SessionBackendChecks;
   operationChain: Promise<void>;
   finalized: boolean;
 }
@@ -932,7 +936,7 @@ export class SessionManager {
       const inputs = await readFactoryTestsInputs(flowDetails);
       return reportPath => ({
         prompt: buildFactoryTestsPrompt({ ...inputs, task, reportPath, repositoryProfile }),
-        runnerArgs: buildTestsRunnerArgs(reportPath),
+        runnerArgs: buildTestsRunnerArgs(reportPath, repositoryProfile),
       });
     }
     if (stage === 'review') {
@@ -1010,18 +1014,19 @@ export class SessionManager {
     }
 
     const worktreePath = flowDetails?.flow.worktreePath;
-    const developmentChecks =
-      stage === 'development' && worktreePath && repositoryProfile
+    const backendChecks: SessionBackendChecks | undefined =
+      (stage === 'development' || stage === 'tests') && worktreePath && repositoryProfile
         ? {
+            stage,
             worktreePath,
             commands: repositoryProfile.commands,
             abortController: new AbortController(),
           }
         : undefined;
-    if (stage === 'development' && !developmentChecks) {
+    if ((stage === 'development' || stage === 'tests') && !backendChecks) {
       throw new SessionManagerError(
         'FACTORY_STAGE_CONFLICT',
-        'O Desenvolvimento requer um worktree e um perfil de repositório válidos.',
+        `${RESTRICTED_RUNNER_STAGE_CONFIG[stage].label} requer um worktree e um perfil de repositório válidos.`,
         409,
       );
     }
@@ -1051,7 +1056,7 @@ export class SessionManager {
 
     const runtime: SessionRuntime = {
       session,
-      developmentChecks,
+      backendChecks,
       operationChain: Promise.resolve(),
       finalized: false,
     };
@@ -1422,31 +1427,40 @@ export class SessionManager {
     }
     disposePtyProcess(session, false);
 
-    const checks = runtime.developmentChecks;
+    const checks = runtime.backendChecks;
     const reportPath = session.reportPath;
     if (exitCode === 0 && checks && reportPath) {
       this.#enqueue(runtime, async () => {
-        let developmentError: FactoryStageArtifactError | undefined;
+        let checksError: FactoryStageArtifactError | undefined;
         try {
-          developmentError = await appendFactoryDevelopmentChecks(
-            reportPath,
-            checks.worktreePath,
-            checks.commands,
-            checks.abortController.signal,
-          );
+          if (checks.stage === 'development') {
+            checksError = await appendFactoryDevelopmentChecks(
+              reportPath,
+              checks.worktreePath,
+              checks.commands,
+              checks.abortController.signal,
+            );
+          } else {
+            await appendFactoryTestsChecks(
+              reportPath,
+              checks.worktreePath,
+              checks.commands,
+              checks.abortController.signal,
+            );
+          }
         } catch (error) {
-          developmentError =
+          checksError =
             error instanceof FactoryStageArtifactError
               ? error
               : new FactoryStageArtifactError(
                   'FACTORY_SIDECAR_WRITE_FAILED',
-                  'development',
+                  checks.stage,
                   reportPath,
-                  'Não foi possível registrar as verificações de Desenvolvimento',
+                  `Não foi possível registrar as verificações de ${RESTRICTED_RUNNER_STAGE_CONFIG[checks.stage].label}`,
                 );
         }
         if (!runtime.finalized) {
-          this.#finalizePtyExit(runtime, exitCode, signal, developmentError);
+          this.#finalizePtyExit(runtime, exitCode, signal, checksError);
         }
       });
       return;
@@ -1458,7 +1472,7 @@ export class SessionManager {
     runtime: SessionRuntime,
     exitCode: number,
     signal: number | undefined,
-    developmentError?: FactoryStageArtifactError,
+    checksError?: FactoryStageArtifactError,
   ): void {
     const { session } = runtime;
     runtime.finalized = true;
@@ -1466,12 +1480,12 @@ export class SessionManager {
     session.history = undefined;
     const historyError = currentHistory?.finish(
       `processo finalizado com código ${exitCode}`,
-      developmentError === undefined &&
+      checksError === undefined &&
         (!isRestrictedRunnerStage(session.activeFactorySession?.stage) || exitCode === 0),
     );
-    const artifactError = historyError ?? developmentError;
-    if (developmentError && !historyError) {
-      broadcast(session, { type: 'error', message: developmentError.message });
+    const artifactError = historyError ?? checksError;
+    if (checksError && !historyError) {
+      broadcast(session, { type: 'error', message: checksError.message });
     }
 
     session.exitCode = exitCode;
@@ -1995,7 +2009,7 @@ export class SessionManager {
     }
 
     runtime.finalized = true;
-    runtime.developmentChecks?.abortController.abort();
+    runtime.backendChecks?.abortController.abort();
     disposePtyProcess(session, true);
 
     const currentHistory = session.history;

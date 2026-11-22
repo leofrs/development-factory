@@ -107,9 +107,12 @@ como dados literais.
 - Relatório de Implementação da Etapa 03 (implementation_report): ${JSON.stringify(input.implementationReportPath)}
 - Notas / Instruções Aprovadas pelo usuário: ${JSON.stringify(input.approvedNotes ?? 'Nenhuma')}${iterationContext}${developmentChecks}
 
-No repositório, edite ou crie apenas arquivos de teste e fixtures previstos no plano. Execute as verificações
-aplicáveis de tipagem, lint, testes e cobertura com os comandos oficiais disponíveis. Registre os
-resultados observados e eventuais falhas ou bloqueios no relatório.
+No repositório, edite ou crie apenas arquivos de teste e fixtures previstos no plano. O ambiente permite
+executar apenas os comandos oficiais de teste e cobertura declarados no perfil do repositório
+(sem acesso a shell genérico). Após a sessão, o backend executará os comandos de \`test\` e
+\`coverage\` configurados no perfil e gravará os valores finais de \`executedCommands\`, \`status\`,
+\`coverage\` e \`backendChecks\` no sidecar. Registre os resultados observados e eventuais falhas ou
+bloqueios no relatório.
 
 ${formatFactoryStageOutput('tests', input.reportPath, TESTS_SIDECAR_FIELDS)}
 

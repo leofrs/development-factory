@@ -486,7 +486,7 @@ export const FactoryPlanningSidecarSchema = z.strictObject({
 });
 export type FactoryPlanningSidecar = z.infer<typeof FactoryPlanningSidecarSchema>;
 
-const developmentCheckSchema = z
+const backendCommandCheckSchema = z
   .strictObject({
     command: manifestCommandTupleSchema,
     exitCode: z.number().int().nonnegative().nullable(),
@@ -496,12 +496,19 @@ const developmentCheckSchema = z
     path: ['errorSummary'],
     message: 'Informe um resumo de erro somente quando a verificação falhar',
   });
+export type FactoryBackendCommandCheck = z.infer<typeof backendCommandCheckSchema>;
 
 const developmentChecksSchema = z.strictObject({
-  typecheck: developmentCheckSchema.nullable(),
-  lint: developmentCheckSchema.nullable(),
+  typecheck: backendCommandCheckSchema.nullable(),
+  lint: backendCommandCheckSchema.nullable(),
 });
 export type FactoryDevelopmentChecks = z.infer<typeof developmentChecksSchema>;
+
+const testsChecksSchema = z.strictObject({
+  test: backendCommandCheckSchema.nullable(),
+  coverage: backendCommandCheckSchema.nullable(),
+});
+export type FactoryTestsChecks = z.infer<typeof testsChecksSchema>;
 
 export const FactoryDevelopmentSidecarSchema = z.strictObject({
   contractVersion: sidecarVersion,
@@ -515,31 +522,71 @@ export type FactoryDevelopmentSidecar = z.infer<typeof FactoryDevelopmentSidecar
 
 const coveragePercentSchema = z.number().min(0).max(100);
 
-export const FactoryTestsSidecarSchema = z.strictObject({
-  contractVersion: sidecarVersion,
-  stage: z.literal('tests'),
-  executedCommands: z.array(
-    z.strictObject({
-      command: z.tuple([text], z.string()),
-      exitCode: z.number().int().nonnegative().nullable(),
-    }),
-  ),
-  testCases: z.array(
-    z.strictObject({
-      id: text,
-      description: text,
-      acceptanceCriteriaIds: z.array(text).min(1),
-      status: z.enum(['passed', 'failed', 'skipped']),
-    }),
-  ),
-  status: z.enum(['passed', 'failed', 'not_run']),
-  coverage: z
-    .strictObject({
-      linesPercent: coveragePercentSchema,
-      branchesPercent: coveragePercentSchema.nullable(),
-    })
-    .nullable(),
-});
+function sameCommandTuple(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+export const FactoryTestsSidecarSchema = z
+  .strictObject({
+    contractVersion: sidecarVersion,
+    stage: z.literal('tests'),
+    executedCommands: z.array(
+      z.strictObject({
+        command: z.tuple([text], z.string()),
+        exitCode: z.number().int().nonnegative().nullable(),
+      }),
+    ),
+    testCases: z.array(
+      z.strictObject({
+        id: text,
+        description: text,
+        acceptanceCriteriaIds: z.array(text).min(1),
+        status: z.enum(['passed', 'failed', 'skipped']),
+      }),
+    ),
+    status: z.enum(['passed', 'failed', 'not_run']),
+    coverage: z
+      .strictObject({
+        linesPercent: coveragePercentSchema,
+        branchesPercent: coveragePercentSchema.nullable(),
+      })
+      .nullable(),
+    backendChecks: testsChecksSchema.optional(),
+  })
+  .superRefine((sidecar, context) => {
+    if (!sidecar.backendChecks) {
+      return;
+    }
+    const checks = [sidecar.backendChecks.test, sidecar.backendChecks.coverage].filter(
+      (check): check is FactoryBackendCommandCheck => check !== null,
+    );
+    const expectedStatus =
+      checks.length === 0 ? 'not_run' : checks.every(check => check.exitCode === 0) ? 'passed' : 'failed';
+    if (sidecar.status !== expectedStatus) {
+      context.addIssue({
+        code: 'custom',
+        path: ['status'],
+        message: 'O status dos testes deve corresponder às verificações executadas pelo backend',
+      });
+    }
+    const matchesCommands =
+      sidecar.executedCommands.length === checks.length &&
+      checks.every((check, index) => {
+        const executed = sidecar.executedCommands[index];
+        return (
+          executed !== undefined &&
+          executed.exitCode === check.exitCode &&
+          sameCommandTuple(executed.command, check.command)
+        );
+      });
+    if (!matchesCommands) {
+      context.addIssue({
+        code: 'custom',
+        path: ['executedCommands'],
+        message: 'Os comandos executados devem corresponder às verificações registradas pelo backend',
+      });
+    }
+  });
 export type FactoryTestsSidecar = z.infer<typeof FactoryTestsSidecarSchema>;
 
 export const FactoryReviewSidecarSchema = z.strictObject({

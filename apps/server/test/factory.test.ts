@@ -11,6 +11,8 @@ import { WebSocket } from 'ws';
 import {
   ClientMessageSchema,
   FACTORY_STAGE_SIDECAR_CONTRACT_VERSION,
+  FactoryRepositoryProfileSchema,
+  FactoryTestsSidecarSchema,
   HistoryFileSchema,
   ServerMessageSchema,
   type ServerMessage,
@@ -55,7 +57,15 @@ import {
   buildTriageAndPlanningRunnerArgs,
   getFactoryStageSidecarPath,
 } from '../src/factory-stage-runners.js';
-import { buildTestsRunnerArgs, isTestReport } from '../src/factory-tests.js';
+import {
+  buildTestsBashAllowedTools,
+  buildTestsRunnerArgs,
+  isTestReport,
+} from '../src/factory-tests.js';
+import {
+  appendFactoryTestsChecks,
+  parseTestCoverageFromOutput,
+} from '../src/factory-tests-checks.js';
 import { createReviewServer } from '../src/server.js';
 import { triageMarkdown, writeFactoryStageSidecar } from './fixtures/factory-stage-artifacts.js';
 
@@ -405,20 +415,67 @@ test('prompts, runners e validadores das Etapas 04 a 06 seguem contratos e permi
   assert.match(testsPrompt, /`passed`,\s+`failed` ou `skipped`/);
   assert.match(testsPrompt, /`passed`, `failed` ou `not_run`/);
 
-  const testsArgs = buildTestsRunnerArgs(testsReportPath);
+  const testsArgsWithoutProfile = buildTestsRunnerArgs(testsReportPath);
+  assert(testsArgsWithoutProfile.includes('--restricted'));
+  assert.equal(
+    testsArgsWithoutProfile[testsArgsWithoutProfile.indexOf('--tools') + 1],
+    'Read,Glob,Grep,Edit,Write',
+  );
+  const testsAllowedWithoutProfile =
+    testsArgsWithoutProfile[testsArgsWithoutProfile.indexOf('--allowedTools') + 1]?.split(',') ?? [];
+  assert.equal(testsAllowedWithoutProfile.includes('Bash'), false);
+  assert(testsAllowedWithoutProfile.includes('Edit(**/*.test.*)'));
+  assert(testsAllowedWithoutProfile.includes('Write(**/fixtures/**)'));
+  assert(
+    testsAllowedWithoutProfile.includes('Edit(//tmp/factory-artifacts/flow-1/tests-report.md)'),
+  );
+  assert(
+    testsAllowedWithoutProfile.includes('Write(//tmp/factory-artifacts/flow-1/tests-report.md)'),
+  );
+  assert.equal(testsAllowedWithoutProfile.includes('.code-reviews'), false);
+  assert.equal(testsAllowedWithoutProfile.includes('Edit(**/*.ts)'), false);
+  const testsDeniedWithoutProfile =
+    testsArgsWithoutProfile[testsArgsWithoutProfile.indexOf('--disallowedTools') + 1]?.split(',') ?? [];
+  assert(testsDeniedWithoutProfile.includes('Bash'));
+  assert(testsDeniedWithoutProfile.includes('Bash(git push*)'));
+  assert(testsDeniedWithoutProfile.includes('Edit(**/.git/**)'));
+
+  const testsProfile = FactoryRepositoryProfileSchema.parse({
+    commands: {
+      typecheck: ['npm', 'run', 'typecheck'],
+      lint: ['npm', 'run', 'lint'],
+      test: ['./scripts/test', '--filter', 'integração com espaços'],
+      coverage: ['npm', 'run', 'coverage'],
+    },
+    protectedPaths: ['deploy/**'],
+  });
+  const testsArgs = buildTestsRunnerArgs(testsReportPath, testsProfile);
   assert(testsArgs.includes('--restricted'));
+  assert.equal(
+    testsArgs[testsArgs.indexOf('--add-dir') + 1],
+    '/tmp/factory-artifacts/flow-1',
+  );
   assert.equal(testsArgs[testsArgs.indexOf('--tools') + 1], 'Read,Glob,Grep,Edit,Write,Bash');
-  const testsAllowed = testsArgs[testsArgs.indexOf('--allowedTools') + 1] ?? '';
-  assert(testsAllowed.includes('Bash'));
-  assert(testsAllowed.includes('Edit(**/*.test.*)'));
-  assert(testsAllowed.includes('Write(**/fixtures/**)'));
-  assert(testsAllowed.includes('Edit(//tmp/factory-artifacts/flow-1/tests-report.md)'));
-  assert(testsAllowed.includes('Write(//tmp/factory-artifacts/flow-1/tests-report.md)'));
-  assert.equal(testsAllowed.includes('.code-reviews'), false);
-  assert.equal(testsAllowed.includes('Edit(**/*.ts)'), false);
-  const testsDenied = testsArgs[testsArgs.indexOf('--disallowedTools') + 1] ?? '';
+  const testsAllowed = testsArgs[testsArgs.indexOf('--allowedTools') + 1]?.split(',') ?? [];
+  assert.equal(testsAllowed.includes('Bash'), false);
+  assert(testsAllowed.includes("Bash(./scripts/test --filter 'integração com espaços')"));
+  assert(testsAllowed.includes("Bash(./scripts/test --filter 'integração com espaços' *)"));
+  assert(testsAllowed.includes('Bash(npm run coverage)'));
+  assert(testsAllowed.includes('Bash(npm run coverage *)'));
+  assert.equal(testsAllowed.some(entry => entry.includes('typecheck') || entry.includes('lint')), false);
+  const testsDenied = testsArgs[testsArgs.indexOf('--disallowedTools') + 1]?.split(',') ?? [];
+  assert.equal(testsDenied.includes('Bash'), false);
+  assert(testsDenied.includes('Edit(deploy/**)'));
+  assert(testsDenied.includes('Write(deploy/**)'));
   assert(testsDenied.includes('Bash(git push*)'));
-  assert(testsDenied.includes('Edit(**/.git/**)'));
+  assert(testsDenied.includes('Bash(curl*)'));
+  assert.deepEqual(
+    buildTestsBashAllowedTools({
+      test: ['node', './check.mjs', 'test', 'arg com $(literal) e ,'],
+      coverage: ['npm', 'run', 'coverage'],
+    }),
+    ['Bash(npm run coverage)', 'Bash(npm run coverage *)'],
+  );
 
   const validTestReport = [
     `# ${TEST_REPORT_TITLE}`,
@@ -433,17 +490,32 @@ test('prompts, runners e validadores das Etapas 04 a 06 seguem contratos e permi
   assert.equal(isTestReport(`# ${TEST_REPORT_TITLE}\n\nIncompleto.`), false);
 
   const reviewReportPath = '/tmp/factory-artifacts/flow-1/review-report.md';
+  const reviewTestResults = {
+    status: 'failed' as const,
+    executedCommands: [{ command: ['npm', 'test'] as [string, ...string[]], exitCode: 1 }],
+    coverage: { linesPercent: 81.5, branchesPercent: 70 },
+    backendChecks: {
+      test: {
+        command: ['npm', 'test'] as [string, ...string[]],
+        exitCode: 1,
+        errorSummary: 'O comando encerrou com código 1. Falharam 1 teste(s).',
+      },
+      coverage: null,
+    },
+  };
   const reviewPrompt = buildFactoryReviewPrompt({
     task: 'PROD-1234',
     understandingReportPath: '/tmp/factory-artifacts/flow-1/spec.md',
     implementationPlanPath: '/tmp/factory-artifacts/flow-1/plan.md',
     implementationReportPath: '/tmp/factory-artifacts/flow-1/dev.md',
     testReportPath: '/tmp/factory-artifacts/flow-1/tests-report.md',
+    testResults: reviewTestResults,
     approvedNotes: 'Auditar exposição de tokens nos logs',
     reportPath: reviewReportPath,
   });
   assert(reviewPrompt.includes(FACTORY_REVIEW_SYSTEM_PROMPT));
   assert(reviewPrompt.includes('/tmp/factory-artifacts/flow-1/tests-report.md'));
+  assert(reviewPrompt.includes(JSON.stringify(reviewTestResults, null, 2)));
   assert(reviewPrompt.includes('Auditar exposição de tokens nos logs'));
   assert(reviewPrompt.includes(`# ${REVIEW_REPORT_TITLE}`));
   for (const heading of Object.values(REVIEW_REPORT_SECTIONS)) {
@@ -729,4 +801,162 @@ test('start_factory executa PTY, salva par em diretório externo sem sujar git s
   assert(sessionData.content.includes('PROD-1234'));
 
   socket.close();
+});
+
+test('parseTestCoverageFromOutput extrai métricas reais de múltiplos formatos de cobertura', () => {
+  assert.deepEqual(
+    parseTestCoverageFromOutput([
+      'ℹ -----------------------------------------------------------------',
+      'ℹ file                  | line % | branch % | funcs % | uncovered lines',
+      'ℹ all files             |  87.50 |    72.10 |   90.00 |',
+      'ℹ -----------------------------------------------------------------',
+    ].join('\n')),
+    { linesPercent: 87.5, branchesPercent: 72.1 },
+  );
+
+  assert.deepEqual(
+    parseTestCoverageFromOutput([
+      'File       | % Stmts | % Branch | % Funcs | % Lines | Uncovered Line #s',
+      'All files  |   90.00 |    81.25 |   88.00 |   91.50 |',
+    ].join('\n')),
+    { linesPercent: 91.5, branchesPercent: 81.25 },
+  );
+
+  assert.deepEqual(
+    parseTestCoverageFromOutput(
+      '\u001b[32mLines        : 88.5% ( 177/200 )\u001b[39m\nBranches     : 76.25% ( 61/80 )',
+    ),
+    { linesPercent: 88.5, branchesPercent: 76.25 },
+  );
+
+  assert.deepEqual(
+    parseTestCoverageFromOutput('Name   Stmts   Miss  Cover\nTOTAL    120     12    90%'),
+    { linesPercent: 90, branchesPercent: null },
+  );
+
+  assert.equal(parseTestCoverageFromOutput('All tests finished.\n'), null);
+  assert.equal(parseTestCoverageFromOutput('Lines: 140%'), null);
+});
+
+test('appendFactoryTestsChecks determina status, executedCommands e cobertura a partir de processos reais', async context => {
+  const rootDir = await mkdtemp(join(tmpdir(), 'df-tests-checks-'));
+  context.after(() => rm(rootDir, { recursive: true, force: true }));
+
+  const worktreePath = join(rootDir, 'worktree');
+  const artifactsPath = join(rootDir, 'artifacts');
+  mkdirSync(worktreePath);
+  mkdirSync(artifactsPath);
+
+  writeFileSync(
+    join(worktreePath, 'runner.mjs'),
+    [
+      "const mode = process.argv[2];",
+      "if (mode === 'test-fail') { console.log('ℹ fail 2'); process.exit(1); }",
+      "if (mode === 'cov-fail') { console.log('Lines : 62.5%\\nBranches : 50%'); process.exit(1); }",
+      "if (mode === 'test-ok') { console.log('ℹ pass 4'); process.exit(0); }",
+      "if (mode === 'cov-ok') {",
+      "  console.log('ℹ file | line % | branch % | funcs %');",
+      "  console.log('ℹ all files | 94.50 | 82.25 | 100.00 |');",
+      '  process.exit(0);',
+      '}',
+    ].join('\n'),
+  );
+
+  const reportPath = join(artifactsPath, 'tests-report.md');
+  const writeTestsReport = (claimedStatus: 'passed' | 'failed' | 'not_run') => {
+    writeFileSync(
+      reportPath,
+      [
+        `# ${TEST_REPORT_TITLE}`,
+        `## ${TEST_REPORT_SECTIONS.testFiles}`,
+        '- test/feature.test.ts',
+        `## ${TEST_REPORT_SECTIONS.executedCommands}`,
+        '- claimed',
+        `## ${TEST_REPORT_SECTIONS.results}`,
+        'Resultado.',
+      ].join('\n'),
+    );
+    writeFactoryStageSidecar(reportPath, 'tests', {
+      status: claimedStatus,
+      executedCommands: [{ command: ['claimed'], exitCode: 0 }],
+      coverage: { linesPercent: 100, branchesPercent: 100 },
+    });
+  };
+
+  // 1. IA alegou passed com 100%, mas processos reais falharam.
+  writeTestsReport('passed');
+  await appendFactoryTestsChecks(
+    reportPath,
+    worktreePath,
+    {
+      test: ['node', './runner.mjs', 'test-fail'],
+      coverage: ['node', './runner.mjs', 'cov-fail'],
+    },
+    new AbortController().signal,
+  );
+  const failedSidecar = FactoryTestsSidecarSchema.parse(
+    JSON.parse(readFileSync(getFactoryStageSidecarPath(reportPath), 'utf8')),
+  );
+  assert.equal(failedSidecar.status, 'failed');
+  assert.deepEqual(failedSidecar.executedCommands, [
+    { command: ['node', './runner.mjs', 'test-fail'], exitCode: 1 },
+    { command: ['node', './runner.mjs', 'cov-fail'], exitCode: 1 },
+  ]);
+  assert.deepEqual(failedSidecar.coverage, { linesPercent: 62.5, branchesPercent: 50 });
+  assert.equal(
+    failedSidecar.backendChecks?.test?.errorSummary,
+    'O comando encerrou com código 1. Falharam 2 teste(s).',
+  );
+
+  // 2. Execução real aprovada com tabela de cobertura.
+  writeTestsReport('failed');
+  await appendFactoryTestsChecks(
+    reportPath,
+    worktreePath,
+    {
+      test: ['node', './runner.mjs', 'test-ok'],
+      coverage: ['node', './runner.mjs', 'cov-ok'],
+    },
+    new AbortController().signal,
+  );
+  const passedSidecar = FactoryTestsSidecarSchema.parse(
+    JSON.parse(readFileSync(getFactoryStageSidecarPath(reportPath), 'utf8')),
+  );
+  assert.equal(passedSidecar.status, 'passed');
+  assert.deepEqual(passedSidecar.coverage, { linesPercent: 94.5, branchesPercent: 82.25 });
+  assert.equal(passedSidecar.backendChecks?.test?.errorSummary, null);
+  assert.equal(passedSidecar.backendChecks?.coverage?.errorSummary, null);
+
+  // 3. Perfil sem comandos de teste/cobertura resulta em not_run sem confiar na IA.
+  writeTestsReport('passed');
+  await appendFactoryTestsChecks(
+    reportPath,
+    worktreePath,
+    { test: null, coverage: null },
+    new AbortController().signal,
+  );
+  const notRunSidecar = FactoryTestsSidecarSchema.parse(
+    JSON.parse(readFileSync(getFactoryStageSidecarPath(reportPath), 'utf8')),
+  );
+  assert.equal(notRunSidecar.status, 'not_run');
+  assert.deepEqual(notRunSidecar.executedCommands, []);
+  assert.equal(notRunSidecar.coverage, null);
+  assert.deepEqual(notRunSidecar.backendChecks, { test: null, coverage: null });
+
+  // 4. Executável ausente registra exitCode null e status failed.
+  writeTestsReport('passed');
+  await appendFactoryTestsChecks(
+    reportPath,
+    worktreePath,
+    { test: ['./nao-existe'], coverage: null },
+    new AbortController().signal,
+  );
+  const missingExecSidecar = FactoryTestsSidecarSchema.parse(
+    JSON.parse(readFileSync(getFactoryStageSidecarPath(reportPath), 'utf8')),
+  );
+  assert.equal(missingExecSidecar.status, 'failed');
+  assert.deepEqual(missingExecSidecar.executedCommands, [
+    { command: ['./nao-existe'], exitCode: null },
+  ]);
+  assert.match(missingExecSidecar.backendChecks?.test?.errorSummary ?? '', /ENOENT/);
 });

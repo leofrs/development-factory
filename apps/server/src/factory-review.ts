@@ -7,6 +7,7 @@ import {
   GIT_WRITE_DENIED_BASH_TOOLS,
   buildReportFileToolPermissions,
   buildRestrictedRunnerArgs,
+  readFactoryStageSidecar,
   readOptionalLatestStageDocument,
   readReadyStageDocuments,
   validateStructuredMarkdownReport,
@@ -130,6 +131,16 @@ export async function readFactoryReviewInputs(details: FactoryFlowDetails) {
     ['triage', 'planning', 'development', 'tests'],
     'Os documentos das Etapas 01, 02, 03 e 04 são obrigatórios para executar o Code Review.',
   );
+  const testsSidecar = readFactoryStageSidecar('tests', paths.tests);
+  const testResults =
+    testsSidecar.stage === 'tests'
+      ? {
+          status: testsSidecar.status,
+          executedCommands: testsSidecar.executedCommands,
+          coverage: testsSidecar.coverage,
+          ...(testsSidecar.backendChecks ? { backendChecks: testsSidecar.backendChecks } : {}),
+        }
+      : undefined;
   const iteration = details.flow.iteration > 0 ? details.flow.iteration : 1;
   const previousReviewReportPath =
     iteration >= 2 ? await readOptionalLatestStageDocument(details, 'review') : undefined;
@@ -138,6 +149,7 @@ export async function readFactoryReviewInputs(details: FactoryFlowDetails) {
     implementationPlanPath: paths.planning,
     implementationReportPath: paths.development,
     testReportPath: paths.tests,
+    ...(testResults ? { testResults } : {}),
     approvedNotes: details.stages.find(stage => stage.name === 'review')?.approvedNotes,
     iteration,
     maxIterations: details.flow.maxIterations,
