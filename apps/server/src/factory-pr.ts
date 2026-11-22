@@ -291,6 +291,10 @@ export function buildFactoryPrGateForFlow(
   const jiraContext = resolveFactoryPrJiraContext(stages, artifacts);
   const savedReview =
     flow.prReview && flow.prReview.prArtifactId === prArtifact.id ? flow.prReview : null;
+  const savedPublication =
+    flow.prPublication && flow.prPublication.prArtifactId === prArtifact.id
+      ? flow.prPublication
+      : null;
 
   return FactoryPrGateSchema.parse({
     prArtifactId: prArtifact.id,
@@ -313,5 +317,6 @@ export function buildFactoryPrGateForFlow(
     satisfiedAcceptanceCriteriaIds: sidecar.satisfiedAcceptanceCriteriaIds,
     evidence: sidecar.evidence,
     jiraContext,
+    prPublication: savedPublication,
   });
 }

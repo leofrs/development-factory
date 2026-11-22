@@ -7,8 +7,12 @@ import {
   CancelFactoryFlowRequestSchema,
   FACTORY_FLOW_CONTRACT_VERSION,
   FactoryPreflightRequestSchema,
+  PublishFactoryPrRequestSchema,
+  PublishFactoryPrResponseSchema,
   REVIEW_CONTRACT_VERSION,
   RerunFactoryStageRequestSchema,
+  RetryFactoryPrJiraSyncRequestSchema,
+  RetryFactoryPrJiraSyncResponseSchema,
   ReturnFactoryStageRequestSchema,
   ReviewDestinationSchema,
   RollbackFactoryFlowCheckpointRequestSchema,
@@ -29,6 +33,7 @@ import { defaultReviewReportDirectory } from './artifacts.js';
 import { handleTerminalConnection } from './ws/terminal-handler.js';
 import { listDirectories } from './directories.js';
 import { FactoryFlowService, FactoryFlowServiceError } from './factory-flow-service.js';
+import type { FactoryPrPublishDependencies } from './factory-pr-publish.js';
 import { runFactoryPreflight } from './factory-preflight.js';
 import { listHistory, readHistoryFile } from './history-reader.js';
 import { ReviewService, ReviewServiceError } from './review-service.js';
@@ -895,6 +900,123 @@ async function handleFactoryFlowApiRequest(
       return;
     }
 
+    const prPublishMatch = /^\/api\/factory\/flows\/([^/]+)\/pr-publish$/.exec(url.pathname);
+    if (req.method === 'POST' && prPublishMatch?.[1] !== undefined) {
+      const flowId = decodeRouteParam(prPublishMatch[1]);
+      if (flowId === null) {
+        sendFactoryFlowApiError(res, 400, {
+          code: 'FACTORY_FLOW_INVALID_INPUT',
+          message: 'Identificador de fluxo inválido.',
+        });
+        return;
+      }
+      const body = await readJsonBody(req);
+      const parsedBody = PublishFactoryPrRequestSchema.safeParse(body);
+      if (!parsedBody.success) {
+        sendFactoryFlowApiError(res, 400, {
+          code: 'FACTORY_FLOW_INVALID_INPUT',
+          message: 'Os parâmetros para publicar o Pull Request são inválidos.',
+          details: parsedBody.error.issues.map(issue => issue.message),
+        });
+        return;
+      }
+      const currentDetails = factoryFlowService.getFlow(flowId);
+      if (
+        currentDetails.flow.currentSessionId &&
+        sessionManager.getSession(currentDetails.flow.currentSessionId)?.status === 'running'
+      ) {
+        sendFactoryFlowApiError(res, 409, {
+          code: 'FACTORY_FLOW_CONFLICT',
+          message: 'Encerre a sessão em execução antes de publicar o Pull Request.',
+        });
+        return;
+      }
+      const controller = new AbortController();
+      res.once('close', () => controller.abort());
+      try {
+        const published = await factoryFlowService.publishPr(
+          flowId,
+          parsedBody.data,
+          controller.signal,
+        );
+        sessionManager.emitAppEvent({
+          type: isFinalFactoryFlowState(published.flow.state)
+            ? 'factory_flow.finished'
+            : 'factory_flow.updated',
+          flow: published.flow,
+        });
+        res.writeHead(200).end(JSON.stringify(PublishFactoryPrResponseSchema.parse(published)));
+      } catch (error) {
+        if (
+          error instanceof FactoryFlowServiceError &&
+          (error.code === 'FACTORY_FLOW_SECRET_DETECTED' ||
+            error.code === 'FACTORY_FLOW_EXTERNAL_ERROR')
+        ) {
+          try {
+            const refreshed = factoryFlowService.getFlow(flowId);
+            sessionManager.emitAppEvent({
+              type: 'factory_flow.updated',
+              flow: refreshed.flow,
+            });
+          } catch {
+            // Ignora falha ao reemitir atualização caso o fluxo não exista mais.
+          }
+        }
+        throw error;
+      }
+      return;
+    }
+
+    const prJiraRetryMatch = /^\/api\/factory\/flows\/([^/]+)\/pr-jira-retry$/.exec(url.pathname);
+    if (req.method === 'POST' && prJiraRetryMatch?.[1] !== undefined) {
+      const flowId = decodeRouteParam(prJiraRetryMatch[1]);
+      if (flowId === null) {
+        sendFactoryFlowApiError(res, 400, {
+          code: 'FACTORY_FLOW_INVALID_INPUT',
+          message: 'Identificador de fluxo inválido.',
+        });
+        return;
+      }
+      const body = await readJsonBody(req);
+      const parsedBody = RetryFactoryPrJiraSyncRequestSchema.safeParse(body);
+      if (!parsedBody.success) {
+        sendFactoryFlowApiError(res, 400, {
+          code: 'FACTORY_FLOW_INVALID_INPUT',
+          message: 'Os parâmetros para reenviar o comentário ao Jira são inválidos.',
+          details: parsedBody.error.issues.map(issue => issue.message),
+        });
+        return;
+      }
+      const controller = new AbortController();
+      res.once('close', () => controller.abort());
+      try {
+        const synced = await factoryFlowService.retryPrJiraSync(
+          flowId,
+          parsedBody.data,
+          controller.signal,
+        );
+        sessionManager.emitAppEvent({
+          type: 'factory_flow.updated',
+          flow: synced.flow,
+        });
+        res.writeHead(200).end(JSON.stringify(RetryFactoryPrJiraSyncResponseSchema.parse(synced)));
+      } catch (error) {
+        if (error instanceof FactoryFlowServiceError && error.code === 'FACTORY_FLOW_EXTERNAL_ERROR') {
+          try {
+            const refreshed = factoryFlowService.getFlow(flowId);
+            sessionManager.emitAppEvent({
+              type: 'factory_flow.updated',
+              flow: refreshed.flow,
+            });
+          } catch {
+            // Ignora falha ao reemitir atualização caso o fluxo não exista mais.
+          }
+        }
+        throw error;
+      }
+      return;
+    }
+
     sendFactoryFlowApiError(res, 404, {
       code: 'FACTORY_FLOW_NOT_FOUND',
       message: 'Rota de fluxo da Factory não encontrada.',
@@ -937,6 +1059,7 @@ async function handleFactoryFlowApiRequest(
 export interface CreateReviewServerOptions extends ReviewRepositoryOptions {
   readonly worktreeRetentionPolicy?: FactoryWorktreeRetentionPolicy;
   readonly stageTimeoutsMs?: Partial<Record<FactoryStageName, number>>;
+  readonly prPublishDependencies?: FactoryPrPublishDependencies;
 }
 
 export function createReviewServer(options?: CreateReviewServerOptions) {
@@ -946,6 +1069,9 @@ export function createReviewServer(options?: CreateReviewServerOptions) {
   const factoryFlowService = new FactoryFlowService(factoryFlowRepository, {
     ...(options?.worktreeRetentionPolicy
       ? { worktreeRetentionPolicy: options.worktreeRetentionPolicy }
+      : {}),
+    ...(options?.prPublishDependencies
+      ? { prPublishDependencies: options.prPublishDependencies }
       : {}),
   });
   const sessionManager = new SessionManager(reviewService, {

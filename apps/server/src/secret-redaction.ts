@@ -26,6 +26,7 @@ const SENSITIVE_KEY_NAME =
 
 const PEM_PRIVATE_KEY_PATTERN =
   /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g;
+const PEM_PRIVATE_KEY_HEADER_PATTERN = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/g;
 const URL_CREDENTIALS_PATTERN = /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)([^/\s@?#"'`<>]+@)/g;
 const JWT_PATTERN = /\beyJ[A-Za-z0-9_-]{6,}\.eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\b/g;
 const KNOWN_PROVIDER_TOKEN_PATTERN =
@@ -81,6 +82,102 @@ function shouldRedactAssignedSecret(
   }
   // Evita falsos positivos em anotações de tipo ou prosa após `:` (ex.: `password: invalid`).
   return value.length >= 16 || /[\d._+/-=]/.test(value) || (/[A-Z]/.test(value) && /[a-z]/.test(value));
+}
+
+export interface SecretDetection {
+  readonly rule: string;
+}
+
+function addMatches(
+  detections: SecretDetection[],
+  seenRules: Set<string>,
+  input: string,
+  pattern: RegExp,
+  rule: string,
+  accept: (match: RegExpExecArray) => boolean = () => true,
+): void {
+  const matcher = new RegExp(pattern.source, pattern.flags);
+  for (const match of input.matchAll(matcher)) {
+    if (!accept(match)) {
+      continue;
+    }
+    if (!seenRules.has(rule)) {
+      seenRules.add(rule);
+      detections.push({ rule });
+    }
+  }
+}
+
+/**
+ * Detecta padrões sensíveis (chaves PEM, tokens de provedores, JWT, URLs com credenciais,
+ * cabeçalhos Authorization/Bearer e atribuições ou flags de credenciais) em um texto.
+ */
+export function detectSecretsInText(input: string): SecretDetection[] {
+  if (input.length === 0) {
+    return [];
+  }
+
+  const detections: SecretDetection[] = [];
+  const seenRules = new Set<string>();
+
+  addMatches(detections, seenRules, input, PEM_PRIVATE_KEY_HEADER_PATTERN, 'Chave privada PEM');
+  addMatches(detections, seenRules, input, URL_CREDENTIALS_PATTERN, 'Credenciais embutidas em URL');
+  addMatches(detections, seenRules, input, JWT_PATTERN, 'Token JWT');
+  addMatches(
+    detections,
+    seenRules,
+    input,
+    KNOWN_PROVIDER_TOKEN_PATTERN,
+    'Token ou chave de provedor conhecido',
+  );
+  addMatches(
+    detections,
+    seenRules,
+    input,
+    AUTH_HEADER_PATTERN,
+    'Cabeçalho Authorization',
+    match => !isPlaceholderOrAlreadyRedacted(match[2] ?? ''),
+  );
+  addMatches(detections, seenRules, input, BEARER_TOKEN_PATTERN, 'Token Bearer', match =>
+    looksLikeToken(match[2] ?? ''),
+  );
+  addMatches(
+    detections,
+    seenRules,
+    input,
+    QUERY_SECRET_PATTERN,
+    'Credencial em parâmetro de URL',
+    match => !isPlaceholderOrAlreadyRedacted(match[2] ?? ''),
+  );
+  addMatches(
+    detections,
+    seenRules,
+    input,
+    KEY_VALUE_SECRET_PATTERN,
+    'Atribuição de credencial ou segredo',
+    match => {
+      const key = match[2] ?? '';
+      const separator = match[4] ?? '';
+      const quote = match[5] ?? '';
+      const rawValue = match[6] ?? match[7] ?? '';
+      return shouldRedactAssignedSecret(key, separator, quote.length > 0, rawValue);
+    },
+  );
+  addMatches(
+    detections,
+    seenRules,
+    input,
+    CLI_FLAG_SECRET_PATTERN,
+    'Credencial em flag de comando',
+    match => {
+      const flag = match[2] ?? '';
+      const quote = match[4] ?? '';
+      const rawValue = match[5] ?? match[6] ?? '';
+      return !rawValue.startsWith('-') && shouldRedactAssignedSecret(flag, ' ', quote.length > 0, rawValue);
+    },
+  );
+
+  return detections;
 }
 
 /**

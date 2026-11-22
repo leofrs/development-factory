@@ -1,6 +1,7 @@
 import { useEffect, useId, useState, type FormEvent, type KeyboardEvent } from 'react';
 import {
   AlertCircle,
+  AlertTriangle,
   CheckCircle2,
   ExternalLink,
   Eye,
@@ -12,6 +13,8 @@ import {
   Plus,
   RotateCcw,
   Save,
+  Send,
+  ShieldAlert,
   ShieldCheck,
   UserPlus,
   X,
@@ -24,6 +27,7 @@ import {
   type FactoryFlow,
   type FactoryPrGate,
   type FactoryPrReviewFormErrors,
+  type PublishFactoryPrRequest,
   type SaveFactoryPrReviewRequest,
 } from '@development-factory/shared';
 import { MarkdownContent } from './MarkdownContent.js';
@@ -32,8 +36,10 @@ interface FactoryFlowPrPanelProps {
   flow: FactoryFlow;
   prGate: FactoryPrGate | null | undefined;
   editable: boolean;
-  busyAction: 'advance' | 'rerun' | 'return' | 'cancel' | 'triage' | 'pr' | null;
+  busyAction: 'advance' | 'rerun' | 'return' | 'cancel' | 'triage' | 'pr' | 'publish' | 'jira' | null;
   onSavePrReview: (request: SaveFactoryPrReviewRequest) => Promise<void>;
+  onPublishPr?: (request?: PublishFactoryPrRequest) => Promise<void>;
+  onRetryPrJiraSync?: () => Promise<void>;
   onRunPrPreparation?: () => Promise<void>;
   onViewMarkdown?: (filePath: string) => void;
 }
@@ -68,6 +74,8 @@ export function FactoryFlowPrPanel({
   editable,
   busyAction,
   onSavePrReview,
+  onPublishPr,
+  onRetryPrJiraSync,
   onRunPrPreparation,
   onViewMarkdown,
 }: FactoryFlowPrPanelProps) {
@@ -152,6 +160,9 @@ export function FactoryFlowPrPanel({
   }
 
   const isBusy = busyAction !== null;
+  const publication = prGate.prPublication ?? flow.prPublication ?? null;
+  const isPublished = publication?.status === 'published';
+  const effectiveEditable = editable && !isPublished;
   const conventionalTitle = isConventionalCommitPrTitle(formState.title);
   const hasJiraContext = prGate.jiraContext !== null;
   const isDirtyFromDraft =
@@ -168,7 +179,7 @@ export function FactoryFlowPrPanel({
   }
 
   function handleRestoreStage1Draft() {
-    if (!prGate || !editable || isBusy) {
+    if (!prGate || !effectiveEditable || isBusy) {
       return;
     }
     setFormState({
@@ -276,7 +287,7 @@ export function FactoryFlowPrPanel({
   }
 
   async function submitPrReview(confirmPublish: boolean) {
-    if (!editable || isBusy) {
+    if (!effectiveEditable || isBusy) {
       return;
     }
     clearFeedback();
@@ -307,7 +318,7 @@ export function FactoryFlowPrPanel({
   }
 
   function handlePrepareConfirmation() {
-    if (!editable || isBusy) {
+    if (!effectiveEditable || isBusy) {
       return;
     }
     clearFeedback();
@@ -316,6 +327,38 @@ export function FactoryFlowPrPanel({
       return;
     }
     setConfirmingPublish(true);
+  }
+
+  async function handlePublishPullRequest() {
+    if (!effectiveEditable || isBusy || !onPublishPr) {
+      return;
+    }
+    clearFeedback();
+    try {
+      await onPublishPr({ expectedUpdatedAt: flow.updatedAt });
+      setStatusMessage('Pull Request publicado com sucesso.');
+    } catch (error) {
+      setSubmitError(
+        error instanceof Error ? error.message : 'Não foi possível publicar o Pull Request.',
+      );
+    }
+  }
+
+  async function handleRetryJiraComment() {
+    if (isBusy || !onRetryPrJiraSync) {
+      return;
+    }
+    clearFeedback();
+    try {
+      await onRetryPrJiraSync();
+      setStatusMessage('Comentário publicado no card do Jira com sucesso.');
+    } catch (error) {
+      setSubmitError(
+        error instanceof Error
+          ? error.message
+          : 'Não foi possível reenviar o comentário ao card do Jira.',
+      );
+    }
   }
 
   function handleFormSubmit(event: FormEvent<HTMLFormElement>) {
@@ -361,7 +404,7 @@ export function FactoryFlowPrPanel({
               Ver pr_summary
             </button>
           )}
-          {editable && isDirtyFromDraft && (
+          {effectiveEditable && isDirtyFromDraft && (
             <button
               type="button"
               disabled={isBusy}
@@ -375,21 +418,191 @@ export function FactoryFlowPrPanel({
         </div>
       </div>
 
-      {prGate.confirmedForPublish && (
+      {isPublished && publication.prUrl && (
         <div
           role="status"
-          className="flex items-start gap-2.5 rounded-xl border border-accent/40 bg-selected/50 px-3.5 py-3 text-xs text-primary"
+          className="space-y-3 rounded-xl border border-accent/45 bg-selected/55 px-4 py-3.5 text-xs text-primary"
         >
-          <CheckCircle2 size={15} className="mt-0.5 shrink-0 text-accent" />
-          <div className="space-y-0.5">
-            <p className="font-semibold text-accent">
-              Parâmetros finais revisados e confirmados para publicação
-            </p>
-            <p className="text-[11px] text-secondary">
-              O envio determinístico (secret scanning, commit/push e abertura do PR) usará estes
-              parâmetros confirmados.
-            </p>
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div className="flex items-start gap-2.5">
+              <CheckCircle2 size={16} className="mt-0.5 shrink-0 text-accent" />
+              <div className="space-y-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <p className="font-semibold text-accent">
+                    Pull Request publicado
+                    {publication.prNumber ? ` #${publication.prNumber}` : ''}
+                  </p>
+                  {publication.provider && (
+                    <span className="rounded-full border border-accent/30 bg-page px-2 py-0.5 font-mono text-[10px] text-secondary">
+                      {publication.provider === 'gitlab' ? 'GitLab' : 'GitHub'}
+                    </span>
+                  )}
+                  {publication.draft && (
+                    <span className="rounded-full border border-line bg-page px-2 py-0.5 font-mono text-[10px] text-muted">
+                      Draft
+                    </span>
+                  )}
+                </div>
+                <p className="font-mono text-[11px] text-secondary">
+                  {publication.headBranch} → {publication.baseBranch}
+                  {publication.commitSha ? ` · commit ${publication.commitSha.slice(0, 7)}` : ''}
+                </p>
+              </div>
+            </div>
+
+            <a
+              href={publication.prUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="modal-button border-accent/40 bg-page px-3 py-1.5 text-xs font-medium text-accent hover:bg-selected"
+            >
+              Abrir Pull Request
+              <ExternalLink size={12} />
+            </a>
           </div>
+
+          {publication.jiraSync.status === 'updated' && (
+            <p className="flex items-center gap-1.5 rounded-lg border border-accent/30 bg-page px-3 py-2 text-[11px] text-accent">
+              <CheckCircle2 size={13} className="shrink-0" />
+              <span>
+                Comentário com link do PR e resumo das evidências publicado no card{' '}
+                <strong className="font-mono">{publication.jiraSync.issueKey}</strong>.
+              </span>
+            </p>
+          )}
+
+          {publication.jiraSync.status === 'failed' && (
+            <div
+              role="alert"
+              className="flex flex-wrap items-center justify-between gap-2.5 rounded-lg border border-warning/45 bg-warning/10 px-3 py-2.5 text-[11px] text-primary"
+            >
+              <div className="flex min-w-0 flex-1 items-start gap-2">
+                <AlertTriangle size={14} className="mt-0.5 shrink-0 text-warning" />
+                <div className="min-w-0 space-y-0.5">
+                  <p className="font-semibold text-warning">
+                    PR preservado, mas falhou ao comentar no Jira{' '}
+                    {publication.jiraSync.issueKey ? `(${publication.jiraSync.issueKey})` : ''}
+                  </p>
+                  {publication.jiraSync.error && (
+                    <p className="wrap-anywhere text-secondary">{publication.jiraSync.error}</p>
+                  )}
+                </div>
+              </div>
+              {onRetryPrJiraSync && (
+                <button
+                  type="button"
+                  disabled={isBusy}
+                  aria-busy={busyAction === 'jira'}
+                  onClick={() => {
+                    void handleRetryJiraComment();
+                  }}
+                  className="modal-button shrink-0 border-warning/45 bg-page px-3 py-1.5 text-[11px] font-medium text-warning hover:bg-warning/10 disabled:opacity-60"
+                >
+                  {busyAction === 'jira' ? (
+                    <Loader2 size={12} className="animate-spin" />
+                  ) : (
+                    <RotateCcw size={12} />
+                  )}
+                  Reenviar comentário ao Jira
+                </button>
+              )}
+            </div>
+          )}
+
+          {publication.jiraSync.status === 'not_requested' && publication.jiraSync.issueKey && (
+            <p className="text-[11px] text-muted">
+              Atualização automática do card {publication.jiraSync.issueKey} não solicitada.
+            </p>
+          )}
+        </div>
+      )}
+
+      {publication?.status === 'blocked_by_secrets' && (
+        <div
+          role="alert"
+          className="space-y-2.5 rounded-xl border border-danger/45 bg-danger/10 px-4 py-3 text-xs text-primary"
+        >
+          <div className="flex items-start gap-2.5">
+            <ShieldAlert size={16} className="mt-0.5 shrink-0 text-danger" />
+            <div className="space-y-1">
+              <p className="font-semibold text-danger">
+                Publicação bloqueada pelo secret scanning (antes de git push)
+              </p>
+              {publication.error && <p className="text-[11px] text-secondary">{publication.error}</p>}
+            </div>
+          </div>
+          {publication.secretFindings.length > 0 && (
+            <ul
+              aria-label="Segredos suspeitos detectados no diff"
+              className="space-y-1.5 pl-6 text-[11px]"
+            >
+              {publication.secretFindings.map((finding, index) => (
+                <li
+                  key={`${finding.file}:${finding.line}:${index}`}
+                  className="rounded-lg border border-danger/30 bg-page px-2.5 py-1.5"
+                >
+                  <p className="font-mono font-semibold text-danger">
+                    {finding.file}:{finding.line}{' '}
+                    <span className="font-sans font-normal text-secondary">· {finding.rule}</span>
+                  </p>
+                  <p className="mt-0.5 truncate font-mono text-[10px] text-muted">
+                    {finding.snippet}
+                  </p>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+
+      {publication?.status === 'failed' && publication.error && (
+        <div
+          role="alert"
+          className="flex items-start gap-2.5 rounded-xl border border-danger/40 bg-danger/10 px-3.5 py-3 text-xs text-danger"
+        >
+          <AlertCircle size={15} className="mt-0.5 shrink-0" />
+          <div className="space-y-0.5">
+            <p className="font-semibold">Falha na publicação do Pull Request</p>
+            <p className="text-[11px]">{publication.error}</p>
+          </div>
+        </div>
+      )}
+
+      {prGate.confirmedForPublish && !isPublished && (
+        <div
+          role="status"
+          className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-accent/40 bg-selected/50 px-3.5 py-3 text-xs text-primary"
+        >
+          <div className="flex min-w-0 flex-1 items-start gap-2.5">
+            <CheckCircle2 size={15} className="mt-0.5 shrink-0 text-accent" />
+            <div className="space-y-0.5">
+              <p className="font-semibold text-accent">
+                Parâmetros finais revisados e confirmados para publicação
+              </p>
+              <p className="text-[11px] text-secondary">
+                O envio determinístico (secret scanning, commit/push e abertura do PR) usará estes
+                parâmetros confirmados.
+              </p>
+            </div>
+          </div>
+          {effectiveEditable && onPublishPr && (
+            <button
+              type="button"
+              disabled={isBusy}
+              aria-busy={busyAction === 'publish'}
+              onClick={() => {
+                void handlePublishPullRequest();
+              }}
+              className="modal-button shrink-0 border-accent bg-accent px-3.5 py-1.5 text-xs font-semibold text-on-accent hover:bg-accent-hover disabled:opacity-60"
+            >
+              {busyAction === 'publish' ? (
+                <Loader2 size={13} className="animate-spin" />
+              ) : (
+                <Send size={13} />
+              )}
+              Publicar Pull Request
+            </button>
+          )}
         </div>
       )}
 
@@ -440,7 +653,7 @@ export function FactoryFlowPrPanel({
               type="text"
               value={formState.title}
               maxLength={200}
-              disabled={!editable || isBusy}
+              disabled={!effectiveEditable || isBusy}
               aria-invalid={fieldErrors.title !== undefined}
               aria-describedby={
                 fieldErrors.title ? `${formId}-title-error` : undefined
@@ -490,7 +703,7 @@ export function FactoryFlowPrPanel({
                 type="text"
                 value={formState.baseBranch}
                 maxLength={255}
-                disabled={!editable || isBusy}
+                disabled={!effectiveEditable || isBusy}
                 aria-invalid={fieldErrors.baseBranch !== undefined}
                 aria-describedby={
                   fieldErrors.baseBranch ? `${formId}-base-branch-error` : undefined
@@ -564,7 +777,7 @@ export function FactoryFlowPrPanel({
                 value={formState.description}
                 rows={11}
                 maxLength={65_536}
-                disabled={!editable || isBusy}
+                disabled={!effectiveEditable || isBusy}
                 aria-invalid={fieldErrors.description !== undefined}
                 aria-describedby={
                   fieldErrors.description ? `${formId}-description-error` : undefined
@@ -619,7 +832,7 @@ export function FactoryFlowPrPanel({
                   id={`${formId}-reviewer-input`}
                   type="text"
                   value={reviewerInput}
-                  disabled={!editable || isBusy}
+                  disabled={!effectiveEditable || isBusy}
                   aria-invalid={fieldErrors.reviewers !== undefined}
                   aria-describedby={
                     fieldErrors.reviewers ? `${formId}-reviewers-error` : `${formId}-reviewers-help`
@@ -633,7 +846,7 @@ export function FactoryFlowPrPanel({
                   className="w-full rounded-lg border border-line bg-page py-2 pl-8 pr-3 text-xs text-primary focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-70"
                 />
               </div>
-              {editable && (
+              {effectiveEditable && (
                 <button
                   type="button"
                   disabled={isBusy || reviewerInput.trim().length === 0}
@@ -668,7 +881,7 @@ export function FactoryFlowPrPanel({
                     className="inline-flex items-center gap-1.5 rounded-full border border-accent/35 bg-selected px-2.5 py-1 font-mono text-[11px] text-accent"
                   >
                     <span>@{reviewer}</span>
-                    {editable && (
+                    {effectiveEditable && (
                       <button
                         type="button"
                         disabled={isBusy}
@@ -690,7 +903,7 @@ export function FactoryFlowPrPanel({
               <input
                 type="checkbox"
                 checked={formState.draft}
-                disabled={!editable || isBusy}
+                disabled={!effectiveEditable || isBusy}
                 onChange={event => {
                   setFormState(current => ({ ...current, draft: event.target.checked }));
                   setConfirmingPublish(false);
@@ -714,7 +927,7 @@ export function FactoryFlowPrPanel({
               <input
                 type="checkbox"
                 checked={hasJiraContext ? formState.updateJira : false}
-                disabled={!editable || isBusy || !hasJiraContext}
+                disabled={!effectiveEditable || isBusy || !hasJiraContext}
                 onChange={event => {
                   setFormState(current => ({ ...current, updateJira: event.target.checked }));
                   setConfirmingPublish(false);
@@ -775,7 +988,7 @@ export function FactoryFlowPrPanel({
           </div>
         )}
 
-        {editable && (
+        {effectiveEditable && (
           <div className="space-y-3 rounded-xl border border-line bg-surface p-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <button

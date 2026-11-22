@@ -2578,3 +2578,349 @@ test('FactoryFlowRoadmapModal + FactoryFlowPrPanel pré-carregam Etapa 1, valida
     await act(() => root.unmount());
   }
 });
+
+test('FactoryFlowRoadmapModal + FactoryFlowPrPanel exibem bloqueio de secret scanning, PR publicado e reenvio ao Jira', async context => {
+  const window = parseHTML('<!doctype html><html><body><div id="pr-publish-root"></div></body></html>');
+  const { document } = window;
+  const originalFetch = globalThis.fetch;
+  const overrides: Array<[object, string, unknown]> = [
+    [globalThis, 'window', window],
+    [globalThis, 'document', document],
+    [globalThis, 'HTMLElement', window.HTMLElement],
+    [globalThis, 'IS_REACT_ACT_ENVIRONMENT', true],
+    [window.HTMLElement.prototype, 'showModal', function (this: HTMLElement) {
+      this.setAttribute('open', '');
+    }],
+    [window.HTMLElement.prototype, 'close', function (this: HTMLElement) {
+      this.removeAttribute('open');
+    }],
+    [window.HTMLElement.prototype, 'attachEvent', () => undefined],
+    [window.HTMLElement.prototype, 'detachEvent', () => undefined],
+  ];
+  for (const [target, name, value] of overrides) {
+    const original = Object.getOwnPropertyDescriptor(target, name);
+    Object.defineProperty(target, name, { configurable: true, value, writable: true });
+    context.after(() => {
+      if (original) {
+        Object.defineProperty(target, name, original);
+      } else {
+        Reflect.deleteProperty(target, name);
+      }
+    });
+  }
+  context.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  context.mock.method(window.HTMLElement.prototype, 'focus', () => undefined);
+
+  const flowId = '22222222-2222-4222-8222-222222222222';
+  const prArtifactId = 'dddddddd-3333-4333-8333-333333333307';
+  const confirmedReview = {
+    prArtifactId,
+    title: 'feat(auth): publicar entrega segura',
+    description: '## Resumo\nEntrega validada.',
+    baseBranch: 'main',
+    draft: false,
+    reviewers: ['alice'],
+    updateJira: true,
+    confirmedForPublish: true,
+    confirmedAt: '2026-11-22T12:05:00.000Z',
+    updatedAt: '2026-11-22T12:05:00.000Z',
+  };
+  let currentFlow = createFlow({
+    id: flowId,
+    title: 'AUTH-202 · Publicação do PR',
+    currentStage: 'pr',
+    state: 'waiting_action',
+    currentSessionId: null,
+    iteration: 1,
+    lastReviewVerdict: 'approved',
+    worktreePath: '/tmp/worktree-auth-202',
+    branchName: 'factory/auth-202',
+    baseBranch: 'main',
+    prReview: confirmedReview,
+    createdAt: '2026-11-22T11:50:00.000Z',
+    updatedAt: '2026-11-22T12:05:00.000Z',
+    transitions: [
+      {
+        from: 'queued',
+        to: 'running',
+        stage: 'triage',
+        at: '2026-11-22T11:50:00.000Z',
+        reason: 'Fluxo iniciado',
+      },
+      {
+        from: 'running',
+        to: 'waiting_action',
+        stage: 'pr',
+        at: '2026-11-22T12:05:00.000Z',
+        reason: 'Rascunho do PR preparado',
+      },
+    ],
+  });
+
+  const makeDetails = (): FactoryFlowDetails => ({
+    contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+    flow: currentFlow,
+    stages: [
+      {
+        contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+        id: 'cccccccc-4444-4444-8444-444444444406',
+        flowId,
+        name: 'pr',
+        state: currentFlow.state === 'completed' ? 'completed' : 'waiting_action',
+        sessionId: null,
+        reportPath: '/tmp/artifacts/pr-summary.md',
+        sessionPath: null,
+        createdAt: '2026-11-22T11:55:00.000Z',
+        updatedAt: currentFlow.updatedAt,
+        startedAt: '2026-11-22T11:55:00.000Z',
+        finishedAt: currentFlow.finishedAt,
+        error: null,
+      },
+    ],
+    artifacts: [
+      {
+        contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+        id: prArtifactId,
+        flowId,
+        stage: 'pr',
+        sessionId: null,
+        kind: 'pr_summary',
+        format: 'markdown',
+        path: '/tmp/artifacts/pr-summary.md',
+        status: 'ready',
+        iteration: 1,
+        createdAt: '2026-11-22T11:59:00.000Z',
+        updatedAt: '2026-11-22T11:59:00.000Z',
+        error: null,
+      },
+    ],
+    worktreePath: currentFlow.worktreePath,
+    branchName: currentFlow.branchName,
+    baseBranch: currentFlow.baseBranch,
+    checkpoints: [],
+    prGate: {
+      prArtifactId,
+      prReportPath: '/tmp/artifacts/pr-summary.md',
+      iteration: 1,
+      title: confirmedReview.title,
+      description: confirmedReview.description,
+      summary: 'Entrega validada.',
+      baseBranch: 'main',
+      headBranch: 'factory/auth-202',
+      draft: false,
+      reviewers: ['alice'],
+      updateJira: true,
+      confirmedForPublish: true,
+      confirmedAt: confirmedReview.confirmedAt,
+      updatedAt: confirmedReview.updatedAt,
+      draftTitle: confirmedReview.title,
+      draftDescription: confirmedReview.description,
+      draftBaseBranch: 'main',
+      satisfiedAcceptanceCriteriaIds: ['CA1'],
+      evidence: ['npm test (exitCode 0)'],
+      jiraContext: { key: 'AUTH-202', url: 'https://empresa.atlassian.net/browse/AUTH-202' },
+      prPublication: currentFlow.prPublication ?? null,
+    },
+  });
+
+  globalThis.fetch = (() => Promise.resolve(Response.json(makeDetails()))) as typeof fetch;
+
+  const container = document.getElementById('pr-publish-root');
+  assert(container);
+  const root = createRoot(container);
+
+  const visiblePanel = () => {
+    const panel = container.querySelector('[role="tabpanel"]:not([hidden])');
+    assert(panel);
+    return panel;
+  };
+
+  const clickButton = async (label: string, within: ParentNode = visiblePanel()) => {
+    const button = [...within.querySelectorAll<HTMLButtonElement>('button')].find(
+      item => item.textContent?.trim().startsWith(label),
+    );
+    assert(button, `Botão ausente: ${label}`);
+    await act(async () => {
+      button.click();
+    });
+  };
+
+  let publishCount = 0;
+  let retryCount = 0;
+
+  try {
+    const renderModal = async () => {
+      await act(async () => {
+        root.render(
+          createElement(FactoryFlowRoadmapModal, {
+            flow: currentFlow,
+            initialDetails: makeDetails(),
+            onClose: noop,
+            onOpenFlowTerminal: unavailableTerminal,
+            onAdvanceFlowStage: noopAsync,
+            onRerunFlowStage: noopAsync,
+            onSavePrReview: async () => {
+              throw new Error('não esperado');
+            },
+            onPublishPr: async () => {
+              publishCount += 1;
+              if (publishCount === 1) {
+                currentFlow = {
+                  ...currentFlow,
+                  prPublication: {
+                    prArtifactId,
+                    status: 'blocked_by_secrets',
+                    provider: null,
+                    prUrl: null,
+                    prNumber: null,
+                    commitSha: null,
+                    headBranch: 'factory/auth-202',
+                    baseBranch: 'main',
+                    draft: false,
+                    publishedAt: null,
+                    secretFindings: [
+                      {
+                        file: 'src/auth.ts',
+                        line: 14,
+                        rule: 'Token de provedor conhecido',
+                        snippet: 'const token = "[REDACTED]"',
+                      },
+                    ],
+                    jiraSync: {
+                      status: 'not_requested',
+                      issueKey: 'AUTH-202',
+                      updatedAt: null,
+                      error: null,
+                    },
+                    error: 'Publicação abortada pelo secret scanning: src/auth.ts:14',
+                    updatedAt: '2026-11-22T12:06:00.000Z',
+                  },
+                };
+                throw new Error('Publicação abortada pelo secret scanning: src/auth.ts:14');
+              }
+
+              const published = {
+                prArtifactId,
+                status: 'published' as const,
+                provider: 'github' as const,
+                prUrl: 'https://github.com/org/repo/pull/88',
+                prNumber: 88,
+                commitSha: 'a1b2c3d4e5f6789012345678901234567890abcd',
+                headBranch: 'factory/auth-202',
+                baseBranch: 'main',
+                draft: false,
+                publishedAt: '2026-11-22T12:08:00.000Z',
+                secretFindings: [],
+                jiraSync: {
+                  status: 'failed' as const,
+                  issueKey: 'AUTH-202',
+                  updatedAt: '2026-11-22T12:08:00.000Z',
+                  error: 'Jira retornou HTTP 503',
+                },
+                error: null,
+                updatedAt: '2026-11-22T12:08:00.000Z',
+              };
+              currentFlow = {
+                ...currentFlow,
+                state: 'completed',
+                worktreePath: null,
+                finishedAt: '2026-11-22T12:08:00.000Z',
+                updatedAt: '2026-11-22T12:08:00.000Z',
+                transitions: [
+                  ...currentFlow.transitions,
+                  {
+                    from: 'waiting_action',
+                    to: 'completed',
+                    stage: 'pr',
+                    at: '2026-11-22T12:08:00.000Z',
+                    reason: 'PR publicado',
+                  },
+                ],
+                prPublication: published,
+              };
+              const details = makeDetails();
+              assert(details.prGate);
+              return {
+                contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+                flow: currentFlow,
+                prGate: details.prGate,
+                publication: published,
+              };
+            },
+            onRetryPrJiraSync: async () => {
+              retryCount += 1;
+              assert(currentFlow.prPublication);
+              const synced = {
+                ...currentFlow.prPublication,
+                jiraSync: {
+                  status: 'updated' as const,
+                  issueKey: 'AUTH-202',
+                  updatedAt: '2026-11-22T12:09:00.000Z',
+                  error: null,
+                },
+                updatedAt: '2026-11-22T12:09:00.000Z',
+              };
+              currentFlow = {
+                ...currentFlow,
+                prPublication: synced,
+              };
+              const details = makeDetails();
+              assert(details.prGate);
+              return {
+                contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+                flow: currentFlow,
+                prGate: details.prGate,
+                publication: synced,
+              };
+            },
+            onViewMarkdown: noop,
+          }),
+        );
+      });
+    };
+
+    const flushDetailsFetch = async () => {
+      await act(async () => {
+        await new Promise(resolve => {
+          setTimeout(resolve, 0);
+        });
+      });
+    };
+
+    await renderModal();
+    await flushDetailsFetch();
+    await clickButton('Revisar e publicar PR');
+
+    // 1. Tentativa bloqueada pelo secret scanning exibe arquivo e linha suspeitos.
+    await clickButton('Publicar Pull Request');
+    await flushDetailsFetch();
+    const blockedPanel = visiblePanel();
+    assert.match(blockedPanel.textContent ?? '', /Publicação bloqueada pelo secret scanning/);
+    assert.match(blockedPanel.textContent ?? '', /src\/auth\.ts:14/);
+
+    // 2. Segunda tentativa publica PR, preserva URL e permite reenviar ao Jira após falha.
+    await clickButton('Publicar Pull Request');
+    await renderModal();
+    await flushDetailsFetch();
+    const publishedPanel = visiblePanel();
+    assert.match(publishedPanel.textContent ?? '', /Pull Request publicado #88/);
+    assert.match(publishedPanel.textContent ?? '', /PR preservado, mas falhou ao comentar no Jira/);
+    assert.equal(
+      publishedPanel.querySelector('a[href="https://github.com/org/repo/pull/88"]')?.textContent,
+      'Abrir Pull Request',
+    );
+
+    // 3. Reenvio ao Jira atualiza o status sem perder o PR.
+    await clickButton('Reenviar comentário ao Jira');
+    await renderModal();
+    await flushDetailsFetch();
+    const syncedPanel = visiblePanel();
+    assert.equal(publishCount, 2);
+    assert.equal(retryCount, 1);
+    assert.match(syncedPanel.textContent ?? '', /Comentário com link do PR e resumo das evidências publicado no card AUTH-202/);
+  } finally {
+    await act(() => root.unmount());
+  }
+});

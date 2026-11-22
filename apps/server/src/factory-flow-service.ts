@@ -18,8 +18,10 @@ import {
   FactoryPlanningApprovalSchema,
   FactoryStageNameSchema,
   ListFactoryFlowsFilterSchema,
+  PublishFactoryPrRequestSchema,
   RegisterFactoryFlowArtifactRequestSchema,
   RegisterFactoryFlowCheckpointRequestSchema,
+  RetryFactoryPrJiraSyncRequestSchema,
   ReturnFactoryStageRequestSchema,
   RollbackFactoryFlowCheckpointRequestSchema,
   SaveFactoryPrReviewRequestSchema,
@@ -53,6 +55,8 @@ import {
   type FactoryPlanningApprovalInput,
   type FactoryPlanningGate,
   type FactoryPrGate,
+  type FactoryPrJiraSync,
+  type FactoryPrPublication,
   type FactoryPrReview,
   type FactoryReviewGate,
   type FactoryReviewTriage,
@@ -61,6 +65,8 @@ import {
   type FactoryTaskInput,
   type FactoryTriageGate,
   type FactoryWorktreeRetentionPolicy,
+  type PublishFactoryPrResponse,
+  type RetryFactoryPrJiraSyncResponse,
   type RollbackFactoryFlowCheckpointResponse,
   type SaveFactoryPrReviewResponse,
   type SaveFactoryReviewTriageResponse,
@@ -69,6 +75,13 @@ import {
 import { getFactoryDevelopmentChecksError } from './factory-development-checks.js';
 import { readFactoryIterationComparison } from './factory-flow-iterations.js';
 import { buildFactoryPrGateForFlow } from './factory-pr.js';
+import {
+  commitAndPushFactoryWorktree,
+  createFactoryProviderPullRequest,
+  scanFactoryWorktreeSecrets,
+  syncFactoryPrWithJira,
+  type FactoryPrPublishDependencies,
+} from './factory-pr-publish.js';
 import { readFactoryTraceabilityMatrix } from './factory-traceability.js';
 import {
   FactoryStageArtifactError,
@@ -139,6 +152,7 @@ export interface FactoryFlowServiceOptions {
   readonly now?: () => string;
   readonly generateId?: () => string;
   readonly worktreeRetentionPolicy?: FactoryWorktreeRetentionPolicy;
+  readonly prPublishDependencies?: FactoryPrPublishDependencies;
 }
 
 export interface CreateFactoryFlowCommandOptions {
@@ -663,6 +677,7 @@ export class FactoryFlowService {
   private readonly now: () => string;
   private readonly generateId: () => string;
   private readonly worktreeRetentionPolicy: FactoryWorktreeRetentionPolicy;
+  private readonly prPublishDependencies: FactoryPrPublishDependencies;
 
   constructor(
     private readonly repository: SqliteFactoryFlowRepository,
@@ -671,6 +686,7 @@ export class FactoryFlowService {
     this.now = options.now ?? (() => new Date().toISOString());
     this.generateId = options.generateId ?? randomUUID;
     this.worktreeRetentionPolicy = resolveRetentionPolicy(options.worktreeRetentionPolicy);
+    this.prPublishDependencies = options.prPublishDependencies ?? {};
   }
 
   shouldCleanupWorktreeOnState(
@@ -753,6 +769,7 @@ export class FactoryFlowService {
       planningApproval: null,
       reviewTriage: null,
       prReview: null,
+      prPublication: null,
       createdAt,
       updatedAt: createdAt,
       finishedAt: null,
@@ -2088,6 +2105,472 @@ export class FactoryFlowService {
           };
         }),
       );
+    } catch (error) {
+      throw mapUnexpectedError(error);
+    }
+  }
+
+  /**
+   * Executa a publicação determinística do Pull Request (Etapa 3 do Bloco 06):
+   * 1. Secret scanning no diff completo do worktree (bloqueando antes de push se detectar segredos);
+   * 2. Commit de alterações pendentes e `git push` da branch dedicada;
+   * 3. Criação do PR/MR (`gh pr create` ou `glab mr create`) gravando URL e número no SQLite;
+   * 4. Comentário opcional no card do Jira vinculado (sem descartar o PR em caso de falha).
+   */
+  async publishPr(
+    flowIdInput: string,
+    requestInput: unknown = {},
+    signal: AbortSignal = new AbortController().signal,
+  ): Promise<PublishFactoryPrResponse> {
+    const flowId = this.parseFlowId(flowIdInput);
+    const parsed = PublishFactoryPrRequestSchema.safeParse(requestInput);
+    if (!parsed.success) {
+      throw new FactoryFlowServiceError(
+        'FACTORY_FLOW_INVALID_INPUT',
+        'Os parâmetros para publicar o Pull Request são inválidos.',
+        400,
+        formatZodIssues(parsed.error),
+      );
+    }
+
+    const scanSecrets = this.prPublishDependencies.scanSecrets ?? scanFactoryWorktreeSecrets;
+    const commitAndPush = this.prPublishDependencies.commitAndPush ?? commitAndPushFactoryWorktree;
+    const createPullRequest =
+      this.prPublishDependencies.createPullRequest ?? createFactoryProviderPullRequest;
+    const commentJira = this.prPublishDependencies.commentJira;
+
+    const initialDetails = await this.repository.withWriteLock(() => {
+      const details = this.getFlow(flowId);
+      const { flow } = details;
+
+      if (parsed.data.expectedUpdatedAt !== undefined && flow.updatedAt !== parsed.data.expectedUpdatedAt) {
+        throw new FactoryFlowServiceError(
+          'FACTORY_FLOW_CONFLICT',
+          `O fluxo ${flowId} foi alterado por outra operação concorrente.`,
+          409,
+        );
+      }
+
+      if (flow.prPublication?.status === 'published') {
+        throw new FactoryFlowServiceError(
+          'FACTORY_FLOW_CONFLICT',
+          'O Pull Request deste fluxo já foi publicado.',
+          409,
+        );
+      }
+
+      if (isFinalFactoryFlowState(flow.state)) {
+        throw new FactoryFlowServiceError(
+          'FACTORY_FLOW_INVALID_TRANSITION',
+          `Não é possível publicar o Pull Request de um fluxo no estado final ${flow.state}.`,
+          409,
+        );
+      }
+
+      if (
+        flow.currentStage !== 'pr' ||
+        flow.state !== 'waiting_action' ||
+        flow.currentSessionId !== null
+      ) {
+        throw new FactoryFlowServiceError(
+          'FACTORY_FLOW_CONFLICT',
+          'A publicação do Pull Request só pode ocorrer quando o fluxo está aguardando decisão na etapa PR.',
+          409,
+        );
+      }
+
+      assertStageContracts(
+        details,
+        FACTORY_STAGE_ORDER,
+        'Conclua todas as etapas com os artefatos salvos antes de publicar o Pull Request.',
+      );
+
+      const prArtifact =
+        getReadyFactoryStageArtifact(details, 'pr') ??
+        getLatestReadyFactoryStageArtifact(details, 'pr');
+      if (!prArtifact || !details.prGate) {
+        throw new FactoryFlowServiceError(
+          'FACTORY_FLOW_INVALID_STAGE_ADVANCE',
+          'Execute a Etapa 1 do Bloco 06 (preparação do PR) antes de publicar.',
+          409,
+        );
+      }
+
+      if (
+        !flow.prReview ||
+        flow.prReview.prArtifactId !== prArtifact.id ||
+        !flow.prReview.confirmedForPublish
+      ) {
+        throw new FactoryFlowServiceError(
+          'FACTORY_FLOW_INVALID_STAGE_ADVANCE',
+          'Confirme os parâmetros finais do Pull Request na Etapa 2 antes de publicar.',
+          409,
+        );
+      }
+
+      if (!flow.worktreePath || !flow.branchName) {
+        throw new FactoryFlowServiceError(
+          'FACTORY_FLOW_CONFLICT',
+          'O worktree isolado ou a branch dedicada deste fluxo estão indisponíveis para publicação.',
+          409,
+        );
+      }
+
+      return {
+        details,
+        prArtifactId: prArtifact.id,
+        prGate: details.prGate,
+        prReview: flow.prReview,
+        worktreePath: flow.worktreePath,
+        headBranch: flow.branchName,
+        baselineSha: details.checkpoints.find(checkpoint => checkpoint.iteration === 0)?.commitSha,
+      };
+    });
+
+    const { details, prArtifactId, prGate, prReview, worktreePath, headBranch, baselineSha } =
+      initialDetails;
+    const baseJiraSync: FactoryPrJiraSync = {
+      status: 'not_requested',
+      issueKey: prGate.jiraContext?.key ?? null,
+      updatedAt: null,
+      error: null,
+    };
+
+    try {
+      const secretFindings = await scanSecrets(
+        {
+          repoPath: details.flow.target.repoPath,
+          worktreePath,
+          flowId,
+          baseBranch: prReview.baseBranch,
+          baselineSha,
+        },
+        signal,
+      );
+
+      if (secretFindings.length > 0) {
+        const now = this.now();
+        const detailsList = secretFindings.map(
+          finding => `${finding.file}:${finding.line} — ${finding.rule}`,
+        );
+        const firstFinding = secretFindings[0];
+        const summaryMessage = firstFinding
+          ? `Publicação abortada pelo secret scanning antes de git push: ${secretFindings.length} possível(is) segredo(s) detectado(s) (ex.: ${firstFinding.file}:${firstFinding.line} — ${firstFinding.rule}).`
+          : 'Publicação abortada pelo secret scanning antes de git push.';
+
+        const blockedPublication: FactoryPrPublication = {
+          prArtifactId,
+          status: 'blocked_by_secrets',
+          provider: parsed.data.provider ?? null,
+          prUrl: null,
+          prNumber: null,
+          commitSha: null,
+          headBranch,
+          baseBranch: prReview.baseBranch,
+          draft: prReview.draft,
+          publishedAt: null,
+          secretFindings,
+          jiraSync: baseJiraSync,
+          error: summaryMessage,
+          updatedAt: now,
+        };
+
+        await this.repository.withWriteLock(() =>
+          this.repository.updateFlowPrPublication(flowId, blockedPublication, details.flow.updatedAt),
+        );
+
+        throw new FactoryFlowServiceError(
+          'FACTORY_FLOW_SECRET_DETECTED',
+          summaryMessage,
+          409,
+          detailsList,
+        );
+      }
+
+      let pushedCommitSha: string | null = null;
+      try {
+        const pushed = await commitAndPush(
+          {
+            repoPath: details.flow.target.repoPath,
+            worktreePath,
+            headBranch,
+            commitTitle: prReview.title,
+          },
+          signal,
+        );
+        pushedCommitSha = pushed.commitSha;
+
+        const createdPr = await createPullRequest(
+          {
+            worktreePath,
+            provider: parsed.data.provider,
+            title: prReview.title,
+            description: prReview.description,
+            baseBranch: prReview.baseBranch,
+            headBranch,
+            draft: prReview.draft,
+            reviewers: prReview.reviewers,
+          },
+          signal,
+        );
+
+        const publishedAt = this.now();
+        const jiraSync: FactoryPrJiraSync =
+          prReview.updateJira && prGate.jiraContext
+            ? await syncFactoryPrWithJira(
+                {
+                  jiraContext: prGate.jiraContext,
+                  prUrl: createdPr.prUrl,
+                  prNumber: createdPr.prNumber,
+                  provider: createdPr.provider,
+                  title: prReview.title,
+                  summary: prGate.summary,
+                  baseBranch: prReview.baseBranch,
+                  headBranch,
+                  draft: prReview.draft,
+                  satisfiedAcceptanceCriteriaIds: prGate.satisfiedAcceptanceCriteriaIds,
+                  evidence: prGate.evidence,
+                },
+                publishedAt,
+                commentJira,
+                signal,
+              )
+            : baseJiraSync;
+
+        const publication: FactoryPrPublication = {
+          prArtifactId,
+          status: 'published',
+          provider: createdPr.provider,
+          prUrl: createdPr.prUrl,
+          prNumber: createdPr.prNumber,
+          commitSha: pushed.commitSha,
+          headBranch,
+          baseBranch: prReview.baseBranch,
+          draft: prReview.draft,
+          publishedAt,
+          secretFindings: [],
+          jiraSync,
+          error: null,
+          updatedAt: publishedAt,
+        };
+
+        const completion = await this.repository.withWriteLock(async () => {
+          const current = this.getFlow(flowId);
+          const currentFlow = current.flow;
+          if (currentFlow.updatedAt !== details.flow.updatedAt) {
+            throw new FactoryFlowServiceError(
+              'FACTORY_FLOW_CONFLICT',
+              `O fluxo ${flowId} foi alterado durante a publicação do Pull Request.`,
+              409,
+            );
+          }
+
+          let effectiveWorktreePath: string | null | undefined;
+          if (
+            currentFlow.worktreePath !== null &&
+            this.shouldCleanupWorktreeOnState('completed')
+          ) {
+            try {
+              await cleanupFactoryWorktree({
+                repoPath: currentFlow.target.repoPath,
+                worktreePath: currentFlow.worktreePath,
+                branchName: currentFlow.branchName,
+                baseBranch: currentFlow.baseBranch,
+              });
+              effectiveWorktreePath = null;
+            } catch {
+              // Mantém o fluxo concluído mesmo se a remoção do worktree falhar.
+            }
+          }
+
+          const saved = this.repository.saveFlowTransition(
+            flowId,
+            {
+              to: 'completed',
+              stage: 'pr',
+              at: publishedAt,
+              reason: `Pull Request publicado em ${createdPr.prUrl}`,
+              currentSessionId: null,
+              ...(effectiveWorktreePath === null ? { worktreePath: null } : {}),
+              prPublication: publication,
+              error: null,
+            },
+            { expectedUpdatedAt: details.flow.updatedAt },
+          );
+
+          const nextPrGate = buildFactoryPrGateForFlow(
+            saved.flow,
+            saved.stages,
+            current.artifacts,
+          );
+          if (!nextPrGate) {
+            throw new FactoryFlowServiceError(
+              'FACTORY_FLOW_INVALID_CONTRACT',
+              'Não foi possível consolidar os dados publicados do Pull Request.',
+              409,
+            );
+          }
+
+          return {
+            contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+            flow: saved.flow,
+            prGate: nextPrGate,
+            publication,
+          };
+        });
+
+        return completion;
+      } catch (error) {
+        if (error instanceof FactoryFlowServiceError) {
+          throw error;
+        }
+        const message =
+          error instanceof Error
+            ? error.message
+            : 'Não foi possível concluir o envio do Pull Request.';
+        const now = this.now();
+        const failedPublication: FactoryPrPublication = {
+          prArtifactId,
+          status: 'failed',
+          provider: parsed.data.provider ?? null,
+          prUrl: null,
+          prNumber: null,
+          commitSha: pushedCommitSha,
+          headBranch,
+          baseBranch: prReview.baseBranch,
+          draft: prReview.draft,
+          publishedAt: null,
+          secretFindings: [],
+          jiraSync: baseJiraSync,
+          error: message.slice(0, 4000),
+          updatedAt: now,
+        };
+        await this.repository.withWriteLock(() =>
+          this.repository.updateFlowPrPublication(flowId, failedPublication, details.flow.updatedAt),
+        );
+        throw new FactoryFlowServiceError('FACTORY_FLOW_EXTERNAL_ERROR', message, 502);
+      }
+    } catch (error) {
+      throw mapUnexpectedError(error);
+    }
+  }
+
+  /**
+   * Reenvia o comentário de evidências e link do PR ao card do Jira vinculado
+   * quando a tentativa inicial na publicação tiver falhado, sem perder o PR criado.
+   */
+  async retryPrJiraSync(
+    flowIdInput: string,
+    requestInput: unknown = {},
+    signal: AbortSignal = new AbortController().signal,
+  ): Promise<RetryFactoryPrJiraSyncResponse> {
+    const flowId = this.parseFlowId(flowIdInput);
+    const parsed = RetryFactoryPrJiraSyncRequestSchema.safeParse(requestInput);
+    if (!parsed.success) {
+      throw new FactoryFlowServiceError(
+        'FACTORY_FLOW_INVALID_INPUT',
+        'Os parâmetros para reenviar o comentário ao Jira são inválidos.',
+        400,
+        formatZodIssues(parsed.error),
+      );
+    }
+
+    const commentJira = this.prPublishDependencies.commentJira;
+    const details = await this.repository.withWriteLock(() => {
+      const current = this.getFlow(flowId);
+      const { flow, prGate } = current;
+      if (
+        parsed.data.expectedUpdatedAt !== undefined &&
+        flow.updatedAt !== parsed.data.expectedUpdatedAt
+      ) {
+        throw new FactoryFlowServiceError(
+          'FACTORY_FLOW_CONFLICT',
+          `O fluxo ${flowId} foi alterado por outra operação concorrente.`,
+          409,
+        );
+      }
+      if (!flow.prPublication || flow.prPublication.status !== 'published' || !flow.prPublication.prUrl) {
+        throw new FactoryFlowServiceError(
+          'FACTORY_FLOW_CONFLICT',
+          'Publique o Pull Request antes de reenviar o comentário ao Jira.',
+          409,
+        );
+      }
+      if (!prGate?.jiraContext) {
+        throw new FactoryFlowServiceError(
+          'FACTORY_FLOW_INVALID_INPUT',
+          'Não há card do Jira vinculado a este fluxo para comentar.',
+          400,
+        );
+      }
+      return {
+        details: current,
+        prGate,
+        publication: flow.prPublication,
+        jiraContext: prGate.jiraContext,
+      };
+    });
+
+    const { prGate, publication, jiraContext } = details;
+    const now = this.now();
+    const jiraSync = await syncFactoryPrWithJira(
+      {
+        jiraContext,
+        prUrl: publication.prUrl ?? '',
+        prNumber: publication.prNumber,
+        provider: publication.provider ?? 'github',
+        title: prGate.title,
+        summary: prGate.summary,
+        baseBranch: publication.baseBranch,
+        headBranch: publication.headBranch,
+        draft: publication.draft,
+        satisfiedAcceptanceCriteriaIds: prGate.satisfiedAcceptanceCriteriaIds,
+        evidence: prGate.evidence,
+      },
+      now,
+      commentJira,
+      signal,
+    );
+
+    const updatedPublication: FactoryPrPublication = {
+      ...publication,
+      jiraSync,
+      updatedAt: now,
+    };
+
+    try {
+      const result = await this.repository.withWriteLock(() => {
+        const updatedFlow = this.repository.updateFlowPrPublication(flowId, updatedPublication);
+        const latestDetails = this.getFlow(flowId);
+        const nextPrGate = buildFactoryPrGateForFlow(
+          updatedFlow,
+          latestDetails.stages,
+          latestDetails.artifacts,
+        );
+        if (!nextPrGate) {
+          throw new FactoryFlowServiceError(
+            'FACTORY_FLOW_INVALID_CONTRACT',
+            'Não foi possível consolidar os dados atualizados do Pull Request.',
+            409,
+          );
+        }
+        return {
+          contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+          flow: updatedFlow,
+          prGate: nextPrGate,
+          publication: updatedPublication,
+        };
+      });
+
+      if (jiraSync.status === 'failed') {
+        throw new FactoryFlowServiceError(
+          'FACTORY_FLOW_EXTERNAL_ERROR',
+          jiraSync.error ?? `Não foi possível comentar no card ${jiraContext.key}.`,
+          502,
+        );
+      }
+
+      return result;
     } catch (error) {
       throw mapUnexpectedError(error);
     }

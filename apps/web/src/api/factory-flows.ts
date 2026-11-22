@@ -10,6 +10,8 @@ import {
   FactoryFlowStageSchema,
   FactoryFlowTraceabilityMatrixSchema,
   FactoryPreflightResponseSchema,
+  PublishFactoryPrResponseSchema,
+  RetryFactoryPrJiraSyncResponseSchema,
   RollbackFactoryFlowCheckpointResponseSchema,
   SaveFactoryPrReviewResponseSchema,
   SaveFactoryReviewTriageResponseSchema,
@@ -27,7 +29,11 @@ import type {
   FactoryPreflightRequest,
   FactoryPreflightResponse,
   ListFactoryFlowsFilterInput,
+  PublishFactoryPrRequest,
+  PublishFactoryPrResponse,
   RerunFactoryStageRequest,
+  RetryFactoryPrJiraSyncRequest,
+  RetryFactoryPrJiraSyncResponse,
   ReturnFactoryStageRequest,
   RollbackFactoryFlowCheckpointRequest,
   RollbackFactoryFlowCheckpointResponse,
@@ -724,6 +730,88 @@ export async function saveFactoryPrReview(
     if (!parsed.success) {
       throw new FactoryFlowApiError(
         'Formato inesperado ao salvar os parâmetros revisados do Pull Request.',
+        'FACTORY_FLOW_INVALID_RESPONSE',
+        response.status,
+      );
+    }
+
+    return parsed.data;
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw error;
+    }
+    throw toFactoryFlowRequestError(error, fallbackMessage);
+  }
+}
+
+/** Executa a publicação determinística do Pull Request (secret scanning, git, PR e Jira). */
+export async function publishFactoryPr(
+  flowId: string,
+  request: PublishFactoryPrRequest = {},
+  signal?: AbortSignal,
+): Promise<PublishFactoryPrResponse> {
+  const fallbackMessage = 'Não foi possível publicar o Pull Request.';
+  try {
+    const response = await fetch(
+      `${API_BASE_URL}/api/factory/flows/${encodeURIComponent(flowId)}/pr-publish`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(request),
+        cache: 'no-store',
+        signal,
+      },
+    );
+    const payload = await parseJsonResponse(response);
+    if (!response.ok) {
+      throw extractApiError(payload, response.status, fallbackMessage);
+    }
+
+    const parsed = PublishFactoryPrResponseSchema.safeParse(payload);
+    if (!parsed.success) {
+      throw new FactoryFlowApiError(
+        'Formato inesperado ao publicar o Pull Request.',
+        'FACTORY_FLOW_INVALID_RESPONSE',
+        response.status,
+      );
+    }
+
+    return parsed.data;
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw error;
+    }
+    throw toFactoryFlowRequestError(error, fallbackMessage);
+  }
+}
+
+/** Reenvia o comentário do Pull Request publicado ao card do Jira vinculado. */
+export async function retryFactoryPrJiraSync(
+  flowId: string,
+  request: RetryFactoryPrJiraSyncRequest = {},
+  signal?: AbortSignal,
+): Promise<RetryFactoryPrJiraSyncResponse> {
+  const fallbackMessage = 'Não foi possível reenviar o comentário ao Jira.';
+  try {
+    const response = await fetch(
+      `${API_BASE_URL}/api/factory/flows/${encodeURIComponent(flowId)}/pr-jira-retry`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(request),
+        cache: 'no-store',
+        signal,
+      },
+    );
+    const payload = await parseJsonResponse(response);
+    if (!response.ok) {
+      throw extractApiError(payload, response.status, fallbackMessage);
+    }
+
+    const parsed = RetryFactoryPrJiraSyncResponseSchema.safeParse(payload);
+    if (!parsed.success) {
+      throw new FactoryFlowApiError(
+        'Formato inesperado ao reenviar o comentário ao Jira.',
         'FACTORY_FLOW_INVALID_RESPONSE',
         response.status,
       );

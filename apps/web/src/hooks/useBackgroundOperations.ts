@@ -11,7 +11,11 @@ import type {
   FactoryFlow,
   FactoryRequest,
   FactoryStageName,
+  PublishFactoryPrRequest,
+  PublishFactoryPrResponse,
   RerunFactoryStageRequest,
+  RetryFactoryPrJiraSyncRequest,
+  RetryFactoryPrJiraSyncResponse,
   ReturnFactoryStageRequest,
   ReviewRequest,
   SaveFactoryPrReviewRequest,
@@ -24,7 +28,9 @@ import {
   cancelFactoryFlow,
   createFactoryFlow,
   fetchFactoryFlows,
+  publishFactoryPr,
   rerunFactoryFlowStage,
+  retryFactoryPrJiraSync,
   returnFactoryFlowStage,
   saveFactoryPrReview,
   saveFactoryReviewTriage,
@@ -109,6 +115,14 @@ export interface BackgroundOperationsState {
     flowId: string,
     request: SaveFactoryPrReviewRequest,
   ) => Promise<SaveFactoryPrReviewResponse>;
+  publishPr: (
+    flowId: string,
+    request?: PublishFactoryPrRequest,
+  ) => Promise<PublishFactoryPrResponse>;
+  retryPrJiraSync: (
+    flowId: string,
+    request?: RetryFactoryPrJiraSyncRequest,
+  ) => Promise<RetryFactoryPrJiraSyncResponse>;
   cancelFlow: (flowId: string, request?: CancelFactoryFlowRequest) => Promise<FactoryFlow>;
   openTerminal: (sessionId: string, options?: OpenTerminalOptions) => boolean;
   openFlowTerminal: (flowId: string, options?: OpenTerminalOptions) => boolean;
@@ -819,6 +833,30 @@ export function useBackgroundOperations(): BackgroundOperationsState {
     [upsertFactoryFlow],
   );
 
+  const publishPr = useCallback(
+    async (
+      flowId: string,
+      request: PublishFactoryPrRequest = {},
+    ): Promise<PublishFactoryPrResponse> => {
+      const published = await publishFactoryPr(flowId, request);
+      upsertFactoryFlow(published.flow);
+      return published;
+    },
+    [upsertFactoryFlow],
+  );
+
+  const retryPrJiraSync = useCallback(
+    async (
+      flowId: string,
+      request: RetryFactoryPrJiraSyncRequest = {},
+    ): Promise<RetryFactoryPrJiraSyncResponse> => {
+      const synced = await retryFactoryPrJiraSync(flowId, request);
+      upsertFactoryFlow(synced.flow);
+      return synced;
+    },
+    [upsertFactoryFlow],
+  );
+
   const openTerminal = useCallback((sessionId: string, options?: OpenTerminalOptions) => {
     const existing = sessionsMapRef.current.get(sessionId);
     if (!existing || (options?.liveOnly && existing.status !== 'running')) {
@@ -907,6 +945,8 @@ export function useBackgroundOperations(): BackgroundOperationsState {
     returnFlowStage,
     saveReviewTriage,
     savePrReview,
+    publishPr,
+    retryPrJiraSync,
     cancelFlow,
     openTerminal,
     openFlowTerminal,

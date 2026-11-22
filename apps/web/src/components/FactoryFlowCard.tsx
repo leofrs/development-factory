@@ -93,13 +93,15 @@ export function FactoryFlowCard({
       flow.currentStage === 'tests' ||
       flow.currentStage === 'review');
   const roadmapLabel = needsDecision ? 'Revisar pendência' : 'Ver roadmap';
-  const quickAction = readyForPr
-    ? { label: 'Executar etapa PR', Icon: GitPullRequest, run: onRerun }
-    : canResume
-      ? { label: 'Retomar etapa', Icon: RotateCcw, run: onRerun }
-      : flow.state === 'running'
-        ? { label: 'Parar', Icon: Square, run: onStop }
-        : null;
+  const quickAction =
+    readyForPr && !flow.prReview?.confirmedForPublish
+      ? { label: 'Executar etapa PR', Icon: GitPullRequest, run: onRerun }
+      : canResume
+        ? { label: 'Retomar etapa', Icon: RotateCcw, run: onRerun }
+        : flow.state === 'running'
+          ? { label: 'Parar', Icon: Square, run: onStop }
+          : null;
+  const publishedPr = flow.prPublication?.status === 'published' ? flow.prPublication : null;
 
   return (
     <article
@@ -147,6 +149,25 @@ export function FactoryFlowCard({
         <dd className="wrap-anywhere font-mono text-secondary">
           {flow.worktreePath ?? 'Indisponível'}
         </dd>
+        {publishedPr?.prUrl && (
+          <>
+            <dt className="text-muted">PR</dt>
+            <dd className="wrap-anywhere font-mono text-accent">
+              <a
+                href={publishedPr.prUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 hover:underline"
+              >
+                {publishedPr.prNumber ? `#${publishedPr.prNumber}` : 'Ver PR'}
+                <ArrowUpRight size={11} aria-hidden="true" />
+              </a>
+              {publishedPr.jiraSync.status === 'failed' && (
+                <span className="ml-2 text-warning">· Jira pendente</span>
+              )}
+            </dd>
+          </>
+        )}
       </dl>
 
       <div className="space-y-1 rounded-lg border border-line-subtle bg-page/50 px-2.5 py-2">

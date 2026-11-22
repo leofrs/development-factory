@@ -64,6 +64,8 @@ export default function App() {
     returnFlowStage,
     saveReviewTriage,
     savePrReview,
+    publishPr,
+    retryPrJiraSync,
     cancelFlow,
     openTerminal,
     openFlowTerminal,
@@ -359,6 +361,8 @@ export default function App() {
           }}
           onSaveReviewTriage={saveReviewTriage}
           onSavePrReview={savePrReview}
+          onPublishPr={publishPr}
+          onRetryPrJiraSync={retryPrJiraSync}
           onCancelFlow={async flowId => {
             await cancelFlow(flowId);
           }}

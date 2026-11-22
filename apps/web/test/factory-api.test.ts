@@ -21,6 +21,8 @@ import {
   fetchFactoryFlowDetails,
   fetchFactoryFlows,
   fetchFactoryPreflight,
+  publishFactoryPr,
+  retryFactoryPrJiraSync,
   returnFactoryFlowStage,
   rollbackFactoryFlowCheckpoint,
   saveFactoryPrReview,
@@ -667,6 +669,104 @@ test('validateFactoryPrReviewForm e saveFactoryPrReview validam campos e enviam 
     assert.equal(saved.prGate.confirmedForPublish, true);
     assert.equal(requests.length, 1);
     assert.match(requests[0]?.url ?? '', /\/pr-review$/);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('publishFactoryPr e retryFactoryPrJiraSync enviam requisições e validam publicação no contrato Zod', async () => {
+  const prArtifactId = '22222222-2222-4222-8222-222222222206';
+  const publication = {
+    prArtifactId,
+    status: 'published' as const,
+    provider: 'github' as const,
+    prUrl: 'https://github.com/org/repo/pull/42',
+    prNumber: 42,
+    commitSha: 'a1b2c3d4e5f6789012345678901234567890abcd',
+    headBranch: 'factory/fluxo-1',
+    baseBranch: 'main',
+    draft: false,
+    publishedAt: '2026-11-19T12:10:00.000Z',
+    secretFindings: [],
+    jiraSync: {
+      status: 'updated' as const,
+      issueKey: 'PROD-10',
+      updatedAt: '2026-11-19T12:10:00.000Z',
+      error: null,
+    },
+    error: null,
+    updatedAt: '2026-11-19T12:10:00.000Z',
+  };
+  const flow = makeFlow({
+    state: 'completed',
+    currentStage: 'pr',
+    finishedAt: '2026-11-19T12:10:00.000Z',
+    updatedAt: '2026-11-19T12:10:00.000Z',
+    transitions: [
+      {
+        from: 'queued',
+        to: 'running',
+        stage: 'pr',
+        at: '2026-11-19T12:00:00.000Z',
+        reason: 'Fluxo iniciado',
+      },
+      {
+        from: 'running',
+        to: 'completed',
+        stage: 'pr',
+        at: '2026-11-19T12:10:00.000Z',
+        reason: 'PR publicado',
+      },
+    ],
+    prPublication: publication,
+  });
+
+  const previousFetch = globalThis.fetch;
+  const urls: string[] = [];
+  globalThis.fetch = (async input => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+    urls.push(url);
+    return new Response(
+      JSON.stringify({
+        contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+        flow,
+        prGate: {
+          prArtifactId,
+          prReportPath: '/tmp/artifacts/pr-summary.md',
+          iteration: 1,
+          title: 'feat(pr): publicar entrega',
+          description: '## Resumo\nTudo ok.',
+          summary: 'Resumo.',
+          baseBranch: 'main',
+          headBranch: 'factory/fluxo-1',
+          draft: false,
+          reviewers: ['alice'],
+          updateJira: true,
+          confirmedForPublish: true,
+          confirmedAt: '2026-11-19T12:05:00.000Z',
+          updatedAt: '2026-11-19T12:05:00.000Z',
+          draftTitle: 'feat(pr): publicar entrega',
+          draftDescription: '## Resumo\nTudo ok.',
+          draftBaseBranch: 'main',
+          satisfiedAcceptanceCriteriaIds: ['CA1'],
+          evidence: ['npm test (exitCode 0)'],
+          jiraContext: { key: 'PROD-10', url: 'https://empresa.atlassian.net/browse/PROD-10' },
+          prPublication: publication,
+        },
+        publication,
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+  }) as typeof fetch;
+
+  try {
+    const published = await publishFactoryPr(flow.id, { provider: 'github' });
+    assert.equal(published.publication.prUrl, 'https://github.com/org/repo/pull/42');
+    assert.match(urls[0] ?? '', /\/pr-publish$/);
+
+    const retried = await retryFactoryPrJiraSync(flow.id);
+    assert.equal(retried.publication.jiraSync.status, 'updated');
+    assert.match(urls[1] ?? '', /\/pr-jira-retry$/);
   } finally {
     globalThis.fetch = previousFetch;
   }

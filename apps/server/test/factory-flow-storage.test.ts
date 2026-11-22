@@ -46,7 +46,7 @@ test('SqliteFactoryFlowRepository aplica migrations e persiste múltiplos fluxos
     const applied = repo1.getAppliedMigrations();
     assert.equal(applied.length, REVIEW_MIGRATIONS.length);
     assert.ok(applied.some(migration => migration.name === 'add_factory_flows'));
-    assert.equal(applied.at(-1)?.name, 'add_factory_pr_review');
+    assert.equal(applied.at(-1)?.name, 'add_factory_pr_publication');
 
     const service1 = new FactoryFlowService(repo1, { now: createClock() });
 
@@ -1197,5 +1197,58 @@ test('migration v10 persiste revisão humana do PR (Etapa 2 do Bloco 06) com val
   } finally {
     rmSync(dir, { recursive: true, force: true });
     rmSync(artifactsDir, { recursive: true, force: true });
+  }
+});
+
+test('migration v11 persiste prPublication no SQLite de forma idempotente', async () => {
+  const { dir, dbPath } = createTempDbPath();
+  try {
+    const repo1 = SqliteFactoryFlowRepository.open({ dbPath });
+    const service1 = new FactoryFlowService(repo1, { now: createClock() });
+    const created = await service1.createFlow({
+      task: { inputType: 'jira_key', value: 'PAY-200', repoPath: '/tmp/repo' },
+    });
+
+    const publication = {
+      prArtifactId: '00000000-0000-4000-8000-000000000999',
+      status: 'published' as const,
+      provider: 'github' as const,
+      prUrl: 'https://github.com/org/repo/pull/123',
+      prNumber: 123,
+      commitSha: 'a1b2c3d4e5f6789012345678901234567890abcd',
+      headBranch: 'factory/pay-200',
+      baseBranch: 'main',
+      draft: false,
+      publishedAt: '2026-11-22T12:10:00.000Z',
+      secretFindings: [],
+      jiraSync: {
+        status: 'failed' as const,
+        issueKey: 'PAY-200',
+        updatedAt: '2026-11-22T12:10:00.000Z',
+        error: 'Jira HTTP 503',
+      },
+      error: null,
+      updatedAt: '2026-11-22T12:10:00.000Z',
+    };
+
+    const updated = repo1.updateFlowPrPublication(created.flow.id, publication);
+    assert.deepEqual(updated.prPublication, publication);
+    repo1.close();
+
+    const rawDb = new DatabaseSync(dbPath);
+    try {
+      const v11Migration = REVIEW_MIGRATIONS.find(migration => migration.version === 11);
+      assert.ok(v11Migration);
+      v11Migration.up(rawDb);
+    } finally {
+      rawDb.close();
+    }
+
+    const repo2 = SqliteFactoryFlowRepository.open({ dbPath });
+    const reloaded = repo2.getFlowById(created.flow.id);
+    assert.deepEqual(reloaded?.prPublication, publication);
+    repo2.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

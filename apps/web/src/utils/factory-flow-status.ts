@@ -103,7 +103,9 @@ export function isFactoryFlowReadyForPr(flow: FactoryFlow): boolean {
     flow.currentStage === 'pr' &&
     flow.currentSessionId === null &&
     flow.loopPausedReason === null &&
-    flow.error === null
+    flow.error === null &&
+    flow.prPublication?.status !== 'blocked_by_secrets' &&
+    flow.prPublication?.status !== 'failed'
   );
 }
 

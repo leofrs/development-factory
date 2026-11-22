@@ -34,6 +34,10 @@ import {
   type FactoryReviewFindingDecision,
   type FactoryStageName,
   type FactoryStageState,
+  type PublishFactoryPrRequest,
+  type PublishFactoryPrResponse,
+  type RetryFactoryPrJiraSyncRequest,
+  type RetryFactoryPrJiraSyncResponse,
   type ReturnFactoryTargetStage,
   type SaveFactoryPrReviewRequest,
   type SaveFactoryPrReviewResponse,
@@ -43,6 +47,8 @@ import {
 import type { BackgroundSessionSummary } from '@development-factory/shared';
 import {
   fetchFactoryFlowDetails,
+  publishFactoryPr,
+  retryFactoryPrJiraSync,
   saveFactoryPrReview,
   saveFactoryReviewTriage,
 } from '../api/factory-flows';
@@ -101,6 +107,14 @@ interface FactoryFlowRoadmapModalProps {
     flowId: string,
     request: SaveFactoryPrReviewRequest,
   ) => Promise<SaveFactoryPrReviewResponse>;
+  onPublishPr?: (
+    flowId: string,
+    request?: PublishFactoryPrRequest,
+  ) => Promise<PublishFactoryPrResponse>;
+  onRetryPrJiraSync?: (
+    flowId: string,
+    request?: RetryFactoryPrJiraSyncRequest,
+  ) => Promise<RetryFactoryPrJiraSyncResponse>;
   onCancelFlow?: (flowId: string) => Promise<void>;
   onViewMarkdown: (filePath: string) => void;
 }
@@ -267,6 +281,8 @@ export function FactoryFlowRoadmapModal({
   onReturnFlowStage,
   onSaveReviewTriage,
   onSavePrReview,
+  onPublishPr,
+  onRetryPrJiraSync,
   onCancelFlow,
   onViewMarkdown,
 }: FactoryFlowRoadmapModalProps) {
@@ -280,7 +296,7 @@ export function FactoryFlowRoadmapModal({
   const [detailsError, setDetailsError] = useState<string | null>(null);
   const [detailsRefreshTick, setDetailsRefreshTick] = useState(0);
   const [busyAction, setBusyAction] = useState<
-    'advance' | 'rerun' | 'return' | 'cancel' | 'triage' | 'pr' | null
+    'advance' | 'rerun' | 'return' | 'cancel' | 'triage' | 'pr' | 'publish' | 'jira' | null
   >(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [approvedNotes, setApprovedNotes] = useState('');
@@ -344,11 +360,18 @@ export function FactoryFlowRoadmapModal({
     return () => {
       controller.abort();
     };
-  }, [flow.id, flow.updatedAt, flow.reviewTriage?.updatedAt, flow.prReview?.updatedAt, detailsRefreshTick]);
+  }, [
+    flow.id,
+    flow.updatedAt,
+    flow.reviewTriage?.updatedAt,
+    flow.prReview?.updatedAt,
+    flow.prPublication?.updatedAt,
+    detailsRefreshTick,
+  ]);
 
   const runAction = useCallback(
     async (
-      action: 'advance' | 'rerun' | 'return' | 'cancel' | 'triage' | 'pr',
+      action: 'advance' | 'rerun' | 'return' | 'cancel' | 'triage' | 'pr' | 'publish' | 'jira',
       operation: () => Promise<void>,
       fallbackError: string,
       clearNotes = false,
@@ -612,6 +635,59 @@ export function FactoryFlowRoadmapModal({
     },
     [currentDetails?.flow.updatedAt, flow.id, flow.updatedAt, onSavePrReview],
   );
+
+  const handlePublishPr = useCallback(
+    async (request: PublishFactoryPrRequest = {}) => {
+      const publishHandler = onPublishPr ?? publishFactoryPr;
+      setActionError(null);
+      setBusyAction('publish');
+      try {
+        const published = await publishHandler(flow.id, {
+          ...request,
+          expectedUpdatedAt:
+            request.expectedUpdatedAt ?? currentDetails?.flow.updatedAt ?? flow.updatedAt,
+        });
+        setDetails(previous =>
+          previous && previous.flow.id === published.flow.id
+            ? { ...previous, flow: published.flow, prGate: published.prGate }
+            : previous,
+        );
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : 'Não foi possível publicar o Pull Request.';
+        setActionError(message);
+        throw error;
+      } finally {
+        setDetailsRefreshTick(tick => tick + 1);
+        setBusyAction(null);
+      }
+    },
+    [currentDetails?.flow.updatedAt, flow.id, flow.updatedAt, onPublishPr],
+  );
+
+  const handleRetryPrJiraSync = useCallback(async () => {
+    const retryHandler = onRetryPrJiraSync ?? retryFactoryPrJiraSync;
+    setActionError(null);
+    setBusyAction('jira');
+    try {
+      const synced = await retryHandler(flow.id, {
+        expectedUpdatedAt: currentDetails?.flow.updatedAt ?? flow.updatedAt,
+      });
+      setDetails(previous =>
+        previous && previous.flow.id === synced.flow.id
+          ? { ...previous, flow: synced.flow, prGate: synced.prGate }
+          : previous,
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Não foi possível reenviar o comentário ao Jira.';
+      setActionError(message);
+      throw error;
+    } finally {
+      setDetailsRefreshTick(tick => tick + 1);
+      setBusyAction(null);
+    }
+  }, [currentDetails?.flow.updatedAt, flow.id, flow.updatedAt, onRetryPrJiraSync]);
 
   const handleOpenDiffLocation = useCallback((path: string, line: number) => {
     diffFocusCounterRef.current += 1;
@@ -1018,9 +1094,13 @@ export function FactoryFlowRoadmapModal({
                                       {prGate.confirmedForPublish && (
                                         <ShieldCheck size={12} className="text-accent" />
                                       )}
-                                      {prGate.confirmedForPublish
-                                        ? 'Publicação confirmada'
-                                        : 'Rascunho do PR preparado'}
+                                      {prGate.prPublication?.status === 'published'
+                                        ? `PR publicado${prGate.prPublication.prNumber ? ` #${prGate.prPublication.prNumber}` : ''}`
+                                        : prGate.prPublication?.status === 'blocked_by_secrets'
+                                          ? 'Bloqueado por segredos'
+                                          : prGate.confirmedForPublish
+                                            ? 'Publicação confirmada'
+                                            : 'Rascunho do PR preparado'}
                                     </span>
                                     <span className="font-mono text-[10px] text-accent">
                                       {prGate.headBranch} → {prGate.baseBranch}
@@ -1039,14 +1119,23 @@ export function FactoryFlowRoadmapModal({
                                         : ` · Sem comentário em ${prGate.jiraContext.key}`
                                       : ''}
                                   </p>
+                                  {prGate.prPublication?.status === 'published' &&
+                                    prGate.prPublication.jiraSync.status === 'failed' && (
+                                      <p className="text-[10px] text-warning">
+                                        Falha ao comentar no Jira ({prGate.prPublication.jiraSync.issueKey}).
+                                      </p>
+                                    )}
                                   <button
                                     type="button"
                                     onClick={() => setActiveTab('pr')}
                                     className="modal-button border-accent/35 px-2 py-1 text-[10px] text-accent hover:bg-selected"
                                   >
-                                    {isCurrentStage && flow.state === 'waiting_action'
-                                      ? 'Revisar e publicar PR'
-                                      : 'Ver revisão do PR'}
+                                    {prGate.prPublication?.status === 'published' &&
+                                    prGate.prPublication.jiraSync.status === 'failed'
+                                      ? 'Ver PR / Reenviar Jira'
+                                      : isCurrentStage && flow.state === 'waiting_action'
+                                        ? 'Revisar e publicar PR'
+                                        : 'Ver revisão do PR'}
                                   </button>
                                 </div>
                               )}
@@ -1486,7 +1575,7 @@ export function FactoryFlowRoadmapModal({
                   currentDetails.flow.state === 'waiting_action'
                 }
                 canReturnToTests={canStartTests}
-                busyAction={busyAction}
+                busyAction={busyAction === 'publish' || busyAction === 'jira' ? 'pr' : busyAction}
                 onSaveTriage={handleSaveReviewTriage}
                 onReturnToStage={async (targetStage, notes) => {
                   if (!onReturnFlowStage) {
@@ -1547,6 +1636,8 @@ export function FactoryFlowRoadmapModal({
                 }
                 busyAction={busyAction}
                 onSavePrReview={handleSavePrReview}
+                onPublishPr={handlePublishPr}
+                onRetryPrJiraSync={handleRetryPrJiraSync}
                 onRunPrPreparation={async () => {
                   await runAction(
                     'rerun',

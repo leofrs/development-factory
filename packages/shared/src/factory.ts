@@ -940,6 +940,58 @@ export const FactoryPrReviewSchema = z.strictObject({
 });
 export type FactoryPrReview = z.infer<typeof FactoryPrReviewSchema>;
 
+export const FactoryPrProviderSchema = z.enum(['github', 'gitlab']);
+export type FactoryPrProvider = z.infer<typeof FactoryPrProviderSchema>;
+
+export const FactoryPrSecretFindingSchema = z.strictObject({
+  file: sidecarFilePathSchema,
+  line: z.number().int().positive(),
+  rule: text.max(120),
+  snippet: text.max(300),
+});
+export type FactoryPrSecretFinding = z.infer<typeof FactoryPrSecretFindingSchema>;
+
+export const FactoryPrJiraSyncStatusSchema = z.enum(['not_requested', 'updated', 'failed']);
+export type FactoryPrJiraSyncStatus = z.infer<typeof FactoryPrJiraSyncStatusSchema>;
+
+export const FactoryPrJiraSyncSchema = z.strictObject({
+  status: FactoryPrJiraSyncStatusSchema,
+  issueKey: text.regex(jiraKeyPattern, 'Informe uma chave JIRA válida, como PROD-1234').nullable(),
+  updatedAt: timestamp.nullable(),
+  error: text.max(2000).nullable(),
+});
+export type FactoryPrJiraSync = z.infer<typeof FactoryPrJiraSyncSchema>;
+
+export const FactoryPrPublicationStatusSchema = z.enum([
+  'blocked_by_secrets',
+  'failed',
+  'published',
+]);
+export type FactoryPrPublicationStatus = z.infer<typeof FactoryPrPublicationStatusSchema>;
+
+export const FactoryPrPublicationSchema = z.strictObject({
+  prArtifactId: id,
+  status: FactoryPrPublicationStatusSchema,
+  provider: FactoryPrProviderSchema.nullable(),
+  prUrl: z
+    .url({
+      protocol: /^https?$/,
+      error: 'Informe uma URL HTTP ou HTTPS válida do Pull Request',
+    })
+    .nullable(),
+  prNumber: z.number().int().positive().nullable(),
+  commitSha: gitCommitShaSchema.nullable(),
+  headBranch: gitBranchNameSchema,
+  baseBranch: FactoryPrTargetBranchSchema,
+  draft: z.boolean(),
+  publishedAt: timestamp.nullable(),
+  secretFindings: z.array(FactoryPrSecretFindingSchema),
+  jiraSync: FactoryPrJiraSyncSchema,
+  error: text.max(4000).nullable(),
+  updatedAt: timestamp,
+});
+export type FactoryPrPublication = z.infer<typeof FactoryPrPublicationSchema>;
+
 export const FactoryPrGateSchema = z.strictObject({
   prArtifactId: id,
   prReportPath: artifactPathSchema,
@@ -961,6 +1013,7 @@ export const FactoryPrGateSchema = z.strictObject({
   satisfiedAcceptanceCriteriaIds: z.array(text),
   evidence: z.array(text),
   jiraContext: FactoryJiraContextSchema.nullable(),
+  prPublication: FactoryPrPublicationSchema.nullable().optional(),
 });
 export type FactoryPrGate = z.infer<typeof FactoryPrGateSchema>;
 
@@ -1037,6 +1090,7 @@ export const FactoryFlowSchema = z
     planningApproval: FactoryPlanningApprovalSchema.nullable().optional(),
     reviewTriage: FactoryReviewTriageSchema.nullable().optional(),
     prReview: FactoryPrReviewSchema.nullable().optional(),
+    prPublication: FactoryPrPublicationSchema.nullable().optional(),
     createdAt: timestamp,
     updatedAt: timestamp,
     finishedAt: timestamp.nullable(),
@@ -1118,6 +1172,7 @@ export const FactoryFlowTransitionCommandSchema = z.strictObject({
   planningApproval: FactoryPlanningApprovalSchema.nullable().optional(),
   reviewTriage: FactoryReviewTriageSchema.nullable().optional(),
   prReview: FactoryPrReviewSchema.nullable().optional(),
+  prPublication: FactoryPrPublicationSchema.nullable().optional(),
   error: FactoryFlowErrorSchema.nullable().optional(),
 });
 export type FactoryFlowTransitionCommand = z.infer<typeof FactoryFlowTransitionCommandSchema>;
@@ -1211,6 +1266,8 @@ function applyFactoryFlowTransition(
         : current.data.reviewTriage,
     prReview:
       next.data.prReview !== undefined ? next.data.prReview : current.data.prReview,
+    prPublication:
+      next.data.prPublication !== undefined ? next.data.prPublication : current.data.prPublication,
     updatedAt: next.data.at,
     finishedAt: isFinalFactoryFlowState(next.data.to) ? next.data.at : null,
     error: next.data.error !== undefined ? next.data.error : current.data.error,
@@ -1402,6 +1459,7 @@ export const TransitionFactoryFlowRequestSchema = z.strictObject({
   lastReviewVerdict: FactoryReviewVerdictSchema.nullable().optional(),
   loopPausedReason: text.nullable().optional(),
   prReview: FactoryPrReviewSchema.nullable().optional(),
+  prPublication: FactoryPrPublicationSchema.nullable().optional(),
   error: FactoryFlowErrorSchema.nullable().optional(),
   expectedUpdatedAt: timestamp.optional(),
 });
@@ -1514,6 +1572,33 @@ export const SaveFactoryPrReviewResponseSchema = z.strictObject({
 });
 export type SaveFactoryPrReviewResponse = z.infer<typeof SaveFactoryPrReviewResponseSchema>;
 
+export const PublishFactoryPrRequestSchema = z.strictObject({
+  provider: FactoryPrProviderSchema.optional(),
+  expectedUpdatedAt: timestamp.optional(),
+});
+export type PublishFactoryPrRequest = z.infer<typeof PublishFactoryPrRequestSchema>;
+
+export const PublishFactoryPrResponseSchema = z.strictObject({
+  contractVersion: version,
+  flow: FactoryFlowSchema,
+  prGate: FactoryPrGateSchema,
+  publication: FactoryPrPublicationSchema,
+});
+export type PublishFactoryPrResponse = z.infer<typeof PublishFactoryPrResponseSchema>;
+
+export const RetryFactoryPrJiraSyncRequestSchema = z.strictObject({
+  expectedUpdatedAt: timestamp.optional(),
+});
+export type RetryFactoryPrJiraSyncRequest = z.infer<typeof RetryFactoryPrJiraSyncRequestSchema>;
+
+export const RetryFactoryPrJiraSyncResponseSchema = z.strictObject({
+  contractVersion: version,
+  flow: FactoryFlowSchema,
+  prGate: FactoryPrGateSchema,
+  publication: FactoryPrPublicationSchema,
+});
+export type RetryFactoryPrJiraSyncResponse = z.infer<typeof RetryFactoryPrJiraSyncResponseSchema>;
+
 export const FactoryFlowApiErrorCodeSchema = z.enum([
   'ORIGIN_FORBIDDEN',
   'FACTORY_FLOW_INVALID_INPUT',
@@ -1523,6 +1608,8 @@ export const FactoryFlowApiErrorCodeSchema = z.enum([
   'FACTORY_FLOW_NOT_FOUND',
   'FACTORY_FLOW_IDEMPOTENCY_CONFLICT',
   'FACTORY_FLOW_CONFLICT',
+  'FACTORY_FLOW_SECRET_DETECTED',
+  'FACTORY_FLOW_EXTERNAL_ERROR',
   'FACTORY_FLOW_INTERNAL_ERROR',
 ]);
 export type FactoryFlowApiErrorCode = z.infer<typeof FactoryFlowApiErrorCodeSchema>;

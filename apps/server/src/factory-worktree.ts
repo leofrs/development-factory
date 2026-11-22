@@ -558,7 +558,7 @@ export async function verifyExistingFactoryWorktree(
   return resolvedWorktree;
 }
 
-async function resolveGitCommitAuthorArgs(worktreePath: string): Promise<string[]> {
+export async function resolveGitCommitAuthorArgs(worktreePath: string): Promise<string[]> {
   const configuredName = await tryRunGit(worktreePath, ['config', 'user.name']);
   const configuredEmail = await tryRunGit(worktreePath, ['config', 'user.email']);
   const args: string[] = [];

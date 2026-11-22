@@ -2241,6 +2241,7 @@ export class SessionManager {
             reason: 'Rascunho do Pull Request preparado; aguardando revisão humana pré-publicação',
             currentSessionId: null,
             prReview: null,
+            prPublication: null,
             error: null,
           });
         } catch (error) {
