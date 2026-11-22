@@ -1,19 +1,28 @@
+import { posix } from 'node:path';
 import {
   FactoryReviewVerdictSchema,
   ReturnFactoryTargetStageSchema,
-  type FactoryFlowDetails,
-  type FactoryReviewVerdict,
-  type ReturnFactoryTargetStage,
+  getLatestReadyFactoryStageArtifact,
+  resolveFactoryReviewDecision,
+} from '@development-factory/shared';
+import type {
+  FactoryFlowDetails,
+  FactoryReviewDecision,
+  FactoryReviewSidecar,
+  FactoryReviewVerdict,
+  ReturnFactoryTargetStage,
 } from '@development-factory/shared';
 import {
   GIT_WRITE_DENIED_BASH_TOOLS,
   buildReportFileToolPermissions,
   buildRestrictedRunnerArgs,
+  readFactoryArtifactFile,
   readFactoryStageSidecar,
   readOptionalLatestStageDocument,
   readReadyStageDocuments,
   validateStructuredMarkdownReport,
 } from './factory-stage-runners.js';
+import { FactoryWorktreeError, hasEmptyFactoryWorktreeCheckpointDiff } from './factory-worktree.js';
 import {
   REVIEW_REPORT_SECTIONS,
   REVIEW_REPORT_TITLE,
@@ -148,6 +157,119 @@ export function parseReviewReturnTarget(content: string): ReturnFactoryTargetSta
   }
 
   return null;
+}
+
+type ReviewResult = FactoryReviewDecision & Pick<FactoryReviewSidecar, 'findings'>;
+
+export function readFactoryReviewResult(reportPath: string | null): ReviewResult | null {
+  if (!reportPath) {
+    return null;
+  }
+
+  try {
+    const content = readFactoryArtifactFile(reportPath).toString('utf8');
+    const sidecar = readFactoryStageSidecar('review', reportPath);
+    const decision = resolveFactoryReviewDecision(sidecar);
+    const markdownReturnTarget = parseReviewReturnTarget(content);
+    if (
+      parseReviewVerdict(content) !== decision.verdict ||
+      (markdownReturnTarget !== null && markdownReturnTarget !== decision.returnTarget)
+    ) {
+      return null;
+    }
+    return { ...decision, findings: sidecar.findings };
+  } catch {
+    return null;
+  }
+}
+
+function normalizeFindingText(value: string): string {
+  return value.normalize().trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function getBlockingFindingIdentities(findings: FactoryReviewSidecar['findings']) {
+  return findings
+    .filter(finding => finding.severity === 'BLOQUEANTE')
+    .map(finding => ({
+      file: posix.normalize(finding.file),
+      category: finding.category && normalizeFindingText(finding.category),
+      signature: finding.signature && normalizeFindingText(finding.signature),
+      explanation: normalizeFindingText(finding.explanation),
+    }));
+}
+
+function allPreviousBlockersPersist(
+  previousFindings: FactoryReviewSidecar['findings'],
+  currentFindings: FactoryReviewSidecar['findings'],
+): boolean {
+  const previousBlockers = getBlockingFindingIdentities(previousFindings);
+  const currentBlockers = getBlockingFindingIdentities(currentFindings);
+
+  return (
+    previousBlockers.length > 0 &&
+    previousBlockers.every(previous =>
+      currentBlockers.some(
+        current =>
+          previous.file === current.file &&
+          (!previous.category || !current.category || previous.category === current.category) &&
+          (previous.signature && current.signature
+            ? previous.signature === current.signature
+            : previous.explanation === current.explanation),
+      ),
+    )
+  );
+}
+
+export async function getFactoryReviewStagnationReason(
+  { flow, artifacts, checkpoints }: FactoryFlowDetails,
+  currentFindings: FactoryReviewSidecar['findings'],
+): Promise<string | null> {
+  const { iteration, worktreePath } = flow;
+  if (iteration < 2) {
+    return null;
+  }
+
+  const previousIteration = iteration - 1;
+  const previousArtifact = getLatestReadyFactoryStageArtifact(
+    { artifacts: artifacts.filter(artifact => artifact.iteration === previousIteration) },
+    'review',
+  );
+  const previousReview = previousArtifact && readFactoryReviewResult(previousArtifact.path);
+  const reason = `Loop pausado por estagnação na iteração ${iteration}.`;
+
+  if (
+    previousReview?.verdict === 'changes_requested' &&
+    allPreviousBlockersPersist(previousReview.findings, currentFindings)
+  ) {
+    return `${reason} Os apontamentos bloqueantes da iteração ${previousIteration} continuam sem resolução. Revise o relatório antes de retomar.`;
+  }
+
+  const testsCheckpoints = checkpoints.filter(
+    checkpoint => checkpoint.stage === 'tests' && checkpoint.sessionId !== null,
+  );
+  const previousCheckpoint = testsCheckpoints
+    .filter(checkpoint => checkpoint.iteration === previousIteration)
+    .at(-1);
+  const currentCheckpoint = testsCheckpoints
+    .filter(checkpoint => checkpoint.iteration === iteration)
+    .at(-1);
+  if (!worktreePath || !previousCheckpoint || !currentCheckpoint) {
+    return null;
+  }
+
+  const emptyDiff = await hasEmptyFactoryWorktreeCheckpointDiff(
+    { repoPath: flow.target.repoPath, worktreePath },
+    previousCheckpoint.commitSha,
+    currentCheckpoint.commitSha,
+  ).catch((error: unknown) => {
+    if (error instanceof FactoryWorktreeError) {
+      return false;
+    }
+    throw error;
+  });
+  return emptyDiff
+    ? `${reason} O diff entre os checkpoints das iterações ${previousIteration} e ${iteration} está vazio. Revise o worktree antes de retomar.`
+    : null;
 }
 
 /** Argumentos restritos do runner da Etapa 05 (somente leitura no código + comandos git de inspeção). */

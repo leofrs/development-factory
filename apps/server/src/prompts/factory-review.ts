@@ -1,4 +1,5 @@
 import type { FactoryTestsSidecar } from '@development-factory/shared';
+import { getFactoryStageSidecarPath } from '../factory-stage-runners.js';
 import { formatFactoryStageOutput } from './factory-stage-output.js';
 
 export type FactoryReviewTestResults = Pick<
@@ -33,7 +34,11 @@ const REVIEW_SIDECAR_FIELDS = `- Use em \`verdict\` o valor correspondente ao Pa
 - Use em \`findings\` uma lista com um objeto por apontamento registrado no Markdown.
   Use \`severity\` igual a \`BLOQUEANTE\`, \`SUGESTÃO\` ou \`NIT\`, \`file\` como caminho relativo ao
   repositório com separador \`/\` e sem segmentos \`..\`, \`line\` como número inteiro positivo e
-  \`explanation\` como texto com a explicação do apontamento.`;
+  \`explanation\` como texto com a explicação do apontamento.
+  Para cada bloqueador, preencha \`category\` com a categoria da causa (por exemplo, "regressao"
+  ou "cobertura") e \`signature\` com um identificador curto da causa no arquivo. Reutilize os
+  valores do sidecar anterior se a causa persistir, mesmo se a linha ou a explicação mudar.
+  Omita esses dois campos nos apontamentos não bloqueantes.`;
 
 /**
  * Placeholder do System Prompt operacional da Etapa 05 (Code Review).
@@ -100,7 +105,8 @@ ${JSON.stringify(input.testResults, null, 2)}
     input.iteration && input.iteration >= 2
       ? `\n- Ciclo atual do loop autônomo: Iteração ${input.iteration}/${input.maxIterations ?? 3}${
           input.previousReviewReportPath
-            ? `\n- Relatório de Code Review da iteração anterior (confira se os bloqueadores foram corrigidos): ${JSON.stringify(input.previousReviewReportPath)}`
+            ? `\n- Relatório de Code Review da iteração anterior (confira se os bloqueadores foram corrigidos): ${JSON.stringify(input.previousReviewReportPath)}
+- Sidecar da revisão anterior: ${JSON.stringify(getFactoryStageSidecarPath(input.previousReviewReportPath))}`
             : ''
         }`
       : '';

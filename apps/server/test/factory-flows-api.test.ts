@@ -34,6 +34,8 @@ import {
   TransitionFactoryFlowResponseSchema,
   type AppEvent,
   type BackgroundSessionSummary,
+  type FactoryReviewSidecar,
+  type ReturnFactoryTargetStage,
   type ServerMessage,
 } from '@development-factory/shared';
 import { createReviewServer } from '../src/server.js';
@@ -1500,10 +1502,76 @@ if (check === 'typecheck' || check === 'lint') {
   },
 );
 
-test(
-  'circuit breaker pausa o loop autônomo em waiting_action ao atingir MAX_AUTO_ITERATIONS (3/3) sem aprovação',
-  { timeout: 30000 },
-  async context => {
+const signedBlocker = {
+  severity: 'BLOQUEANTE',
+  file: 'src/feature.ts',
+  line: 10,
+  explanation: 'O fluxo aceita um estado inválido.',
+  signature: 'estado-invalido',
+  category: 'regressao',
+} satisfies FactoryReviewSidecar['findings'][number];
+
+const legacyBlocker = {
+  severity: 'BLOQUEANTE',
+  file: 'test/feature.test.ts',
+  line: 12,
+  explanation: 'Cobrir a entrada vazia.',
+} satisfies FactoryReviewSidecar['findings'][number];
+
+const loopScenarios = [
+  {
+    name: 'loop mantém o limite de três iterações quando há mudanças e resolução parcial',
+    returnTarget: 'development',
+    emptyDiff: false,
+    findings: [
+      [signedBlocker, legacyBlocker],
+      [{ ...signedBlocker, category: 'requisito' }, { ...legacyBlocker, line: 19 }],
+      [{ ...signedBlocker, file: 'src/other.ts', category: 'requisito' }],
+    ],
+    pausedReason: /Limite máximo de 3 iterações automáticas/,
+  },
+  {
+    name: 'loop pausa no segundo ciclo quando os mesmos bloqueadores persistem apesar de mudanças',
+    returnTarget: 'development',
+    emptyDiff: false,
+    findings: [
+      [signedBlocker, legacyBlocker, { ...legacyBlocker, severity: 'SUGESTÃO' }],
+      [
+        {
+          ...legacyBlocker,
+          line: 29,
+          explanation: 'COBRIR A  ENTRADA VAZIA.',
+          signature: 'entrada-vazia',
+          category: 'cobertura',
+        },
+        {
+          ...signedBlocker,
+          file: './src/feature.ts',
+          line: 47,
+          explanation: 'A validação ainda permite a transição inválida.',
+          category: 'REGRESSAO',
+        },
+      ],
+    ],
+    pausedReason: /estagnação na iteração 2.*bloqueantes da iteração 1 continuam sem resolução/i,
+  },
+  {
+    name: 'loop de testes pausa no segundo ciclo quando commits distintos têm diff vazio',
+    returnTarget: 'tests',
+    emptyDiff: true,
+    findings: [[legacyBlocker], [{ ...legacyBlocker, explanation: 'Corrigir o mock de relógio.' }]],
+    pausedReason: /estagnação na iteração 2.*diff entre os checkpoints das iterações 1 e 2 está vazio/i,
+  },
+] satisfies ReadonlyArray<{
+  name: string;
+  returnTarget: ReturnFactoryTargetStage;
+  emptyDiff: boolean;
+  findings: FactoryReviewSidecar['findings'][];
+  pausedReason: RegExp;
+}>;
+
+for (const scenario of loopScenarios) {
+  test(scenario.name, { timeout: 30000 }, async context => {
     const rootDir = mkdtempSync(join(tmpdir(), 'df-factory-circuit-breaker-'));
     const binDir = join(rootDir, 'bin');
     const repoDir = join(rootDir, 'repo');
@@ -1553,10 +1621,9 @@ test(
       }),
     });
     assert.equal(createRes.status, 201);
-    const created = (await createRes.json()) as {
-      flow: { id: string };
-      session: BackgroundSessionSummary;
-    };
+    const created = z
+      .object({ flow: FactoryFlowSchema, session: BackgroundSessionSummarySchema })
+      .parse(await createRes.json());
     const flowId = created.flow.id;
 
     const getDetails = async () => {
@@ -1582,9 +1649,10 @@ test(
         return Boolean(match);
       });
       assert.ok(match);
-      seenSessionIds.add(match.sessionId);
+      const { sessionId } = match;
+      seenSessionIds.add(sessionId);
       await waitFor(() =>
-        /READY:[^\n]*\n/.test(sessionManager.getSession(match!.sessionId)?.buffer.replay() ?? ''),
+        /READY:[^\n]*\n/.test(sessionManager.getSession(sessionId)?.buffer.replay() ?? ''),
       );
       return match;
     };
@@ -1603,7 +1671,10 @@ test(
     writeFileSync(planningSession.reportPath, planningMarkdown('Implementar a alteração.'));
     writeFactoryStageSidecar(planningSession.reportPath, 'planning');
     sessionManager.writeInput(planningSession.sessionId, 'EXIT0');
-    await waitFor(() => sessionManager.getSession(planningSession.sessionId)?.status === 'exited');
+    await waitForFlowDetails(
+      getDetails,
+      details => details.flow.currentStage === 'planning' && details.flow.state === 'waiting_action',
+    );
 
     const approveRes = await fetch(`${baseUrl}/api/factory/flows/${flowId}/advance`, {
       method: 'POST',
@@ -1612,28 +1683,45 @@ test(
     });
     assert.equal(approveRes.status, 200);
 
-    for (let iteration = 1; iteration <= 3; iteration += 1) {
-      const devSession = await waitForStageSession('development', seen);
-      assert.ok(devSession.reportPath);
-      writeFileSync(
-        devSession.reportPath,
-        [
-          '# Relatório de Implementação',
-          '## Arquivos alterados',
-          '- src/feature.ts',
-          '## Resumo das mudanças',
-          `Tentativa ${iteration}`,
-          '## Status dos passos do plano',
-          '| Passo do Plano | Status | Observações |',
-          '| --- | --- | --- |',
-          `| Passo 1 | Concluído | Iteração ${iteration} |`,
-        ].join('\n'),
-      );
-      writeFactoryStageSidecar(devSession.reportPath, 'development');
-      sessionManager.writeInput(devSession.sessionId, 'EXIT0');
+    for (const [index, findings] of scenario.findings.entries()) {
+      const iteration = index + 1;
+      if (iteration === 1 || scenario.returnTarget === 'development') {
+        const devSession = await waitForStageSession('development', seen);
+        assert.ok(devSession.reportPath);
+        writeFileSync(
+          devSession.reportPath,
+          [
+            '# Relatório de Implementação',
+            '## Arquivos alterados',
+            '- src/feature.ts',
+            '## Resumo das mudanças',
+            `Tentativa ${iteration}`,
+            '## Status dos passos do plano',
+            '| Passo do Plano | Status | Observações |',
+            '| --- | --- | --- |',
+            `| Passo 1 | Concluído | Iteração ${iteration} |`,
+          ].join('\n'),
+        );
+        writeFactoryStageSidecar(devSession.reportPath, 'development');
+        sessionManager.writeInput(devSession.sessionId, 'EXIT0');
+      }
 
       const testsSession = await waitForStageSession('tests', seen);
       assert.ok(testsSession.reportPath);
+      const { worktreePath } = await getDetails();
+      assert.ok(worktreePath);
+      if (scenario.emptyDiff && iteration === 2) {
+        execFileSync('git', ['commit', '--allow-empty', '-m', 'Tentativa sem mudanças'], {
+          cwd: worktreePath,
+        });
+      } else {
+        mkdirSync(join(worktreePath, 'test'), { recursive: true });
+        writeFileSync(
+          join(worktreePath, 'test/feature.test.ts'),
+          `export const attempt = ${iteration};\n`,
+        );
+      }
+
       writeFileSync(
         testsSession.reportPath,
         [
@@ -1659,17 +1747,21 @@ test(
         [
           '# Relatório de Code Review',
           '## Resumo Executivo',
-          `Bloqueador persistente na iteração ${iteration}.`,
+          `Revisão da iteração ${iteration} requer ajustes.`,
           '## Pontos Encontrados',
-          '- [BLOQUEANTE] src/feature.ts:10 ainda falha.',
+          ...findings.map(
+            finding =>
+              `- [${finding.severity}] ${finding.file}:${finding.line} ${finding.explanation}`,
+          ),
           '## Parecer Final',
           'Veredito: REPROVADO / REQUER AJUSTES',
-          'Ajuste necessário.',
+          `Alvo de retorno: ${scenario.returnTarget}`,
         ].join('\n'),
       );
       writeFactoryStageSidecar(reviewSession.reportPath, 'review', {
         verdict: 'changes_requested',
-        returnTarget: 'development',
+        returnTarget: scenario.returnTarget,
+        findings,
       });
       sessionManager.writeInput(reviewSession.sessionId, 'EXIT0');
       await waitFor(() => sessionManager.getSession(reviewSession.sessionId)?.status === 'exited');
@@ -1681,17 +1773,31 @@ test(
         details.flow.state === 'waiting_action' && details.flow.loopPausedReason !== null,
     );
     assert.equal(pausedDetails.flow.currentStage, 'review');
-    assert.equal(pausedDetails.flow.state, 'waiting_action');
-    assert.equal(pausedDetails.flow.iteration, 3);
+    assert.equal(pausedDetails.flow.currentSessionId, null);
+    assert.equal(pausedDetails.flow.iteration, scenario.findings.length);
     assert.equal(pausedDetails.flow.maxIterations, 3);
     assert.equal(pausedDetails.flow.lastReviewVerdict, 'changes_requested');
-    assert.match(pausedDetails.flow.loopPausedReason ?? '', /Limite máximo de 3 iterações automáticas/);
+    assert.match(pausedDetails.flow.loopPausedReason ?? '', scenario.pausedReason);
+    const flowSessions = sessionManager.listSessions().filter(session => session.flowId === flowId);
     assert.equal(
-      sessionManager.listSessions().filter(s => s.flowId === flowId && s.stage === 'development').length,
-      3,
+      flowSessions.filter(session => session.stage === 'development').length,
+      scenario.returnTarget === 'development' ? scenario.findings.length : 1,
     );
-  },
-);
+    assert.equal(
+      flowSessions.filter(session => session.stage === 'tests').length,
+      scenario.findings.length,
+    );
+    assert.equal(
+      flowSessions.filter(session => session.stage === 'review').length,
+      scenario.findings.length,
+    );
+    if (scenario.emptyDiff) {
+      const [first, second] = pausedDetails.checkpoints.filter(item => item.stage === 'tests');
+      assert.ok(first && second);
+      assert.notEqual(first.commitSha, second.commitSha);
+    }
+  });
+}
 
 test(
   'dois fluxos simultâneos no mesmo repoPath executam Desenvolvimento em paralelo em worktrees isolados sem tocar o working tree original',

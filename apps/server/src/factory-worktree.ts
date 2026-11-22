@@ -640,6 +640,23 @@ export async function getFactoryWorktreeHeadSha(
   });
 }
 
+/** Compara o conteúdo dos checkpoints Git, incluindo quando os commits têm SHAs diferentes. */
+export async function hasEmptyFactoryWorktreeCheckpointDiff(
+  options: VerifyFactoryWorktreeOptions,
+  previousCommit: string,
+  currentCommit: string,
+): Promise<boolean> {
+  const worktreePath = await verifyExistingFactoryWorktree(options);
+  return withWorktreeLock(worktreePath, async () => {
+    const [previousTree, currentTree] = await Promise.all(
+      [previousCommit, currentCommit].map(commit =>
+        tryRunGit(worktreePath, ['rev-parse', '--verify', '--end-of-options', `${commit}^{tree}`]),
+      ),
+    );
+    return Boolean(previousTree) && previousTree === currentTree;
+  });
+}
+
 /**
  * Cria um commit de checkpoint no worktree caso haja alterações pendentes (ou captura o `HEAD` atual
  * quando limpo) e retorna o SHA resultante para persistência no SQLite.

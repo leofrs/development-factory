@@ -697,6 +697,8 @@ function validateReviewReturnTargetConsistency(
   }
 }
 
+const reviewFindingLabelSchema = manifestSingleLineSchema.trim().min(1);
+
 export const FactoryReviewSidecarSchema = z
   .strictObject({
     contractVersion: sidecarVersion,
@@ -709,6 +711,8 @@ export const FactoryReviewSidecarSchema = z
         file: sidecarFilePathSchema,
         line: z.number().int().positive(),
         explanation: text,
+        signature: reviewFindingLabelSchema.optional(),
+        category: reviewFindingLabelSchema.optional(),
       }),
     ),
   })

@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { existsSync, realpathSync, statSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
 import * as pty from 'node-pty';
 import { WebSocket } from 'ws';
 import {
@@ -13,7 +12,6 @@ import {
   getReadyFactoryStageArtifact,
   isFactoryReviewApprovedVerdict,
   isFinalFactoryFlowState,
-  resolveFactoryReviewDecision,
   type AppEvent,
   type BackgroundSessionSummary,
   type FactoryFlow,
@@ -21,7 +19,6 @@ import {
   type FactoryFlowDetails,
   type FactoryFlowError,
   type FactoryRequest,
-  type FactoryReviewDecision,
   type FactoryReviewVerdict,
   type FactoryStageName,
   type FactoryTriageGate,
@@ -48,9 +45,9 @@ import {
 import type { FactoryRepositoryProfileErrorCode } from './factory-repository-profile.js';
 import {
   buildReviewRunnerArgs,
-  parseReviewReturnTarget,
-  parseReviewVerdict,
+  getFactoryReviewStagnationReason,
   readFactoryReviewInputs,
+  readFactoryReviewResult,
 } from './factory-review.js';
 import {
   FactoryStageArtifactError,
@@ -1549,33 +1546,6 @@ export class SessionManager {
     }
   }
 
-  async #readReviewDecisionFromReport(
-    reportPath: string | null,
-  ): Promise<FactoryReviewDecision | null> {
-    if (!reportPath) {
-      return null;
-    }
-    try {
-      const content = await readFile(reportPath, 'utf8');
-      const markdownVerdict = parseReviewVerdict(content);
-      if (markdownVerdict === null) {
-        return null;
-      }
-      const sidecar = readFactoryStageSidecar('review', reportPath);
-      const decision = resolveFactoryReviewDecision(sidecar);
-      if (markdownVerdict !== decision.verdict) {
-        return null;
-      }
-      const markdownReturnTarget = parseReviewReturnTarget(content);
-      if (markdownReturnTarget !== null && markdownReturnTarget !== decision.returnTarget) {
-        return null;
-      }
-      return decision;
-    } catch {
-      return null;
-    }
-  }
-
   async #handleAutoTransitionFailure(
     session: ManagedSession,
     flowId: string,
@@ -1715,14 +1685,18 @@ export class SessionManager {
     if (!this.#factoryFlowService) {
       return;
     }
-    const paused = await this.#factoryFlowService.transitionFlow(flowId, {
-      to: 'waiting_action',
-      stage: 'review',
-      reason,
-      currentSessionId: null,
-      lastReviewVerdict,
-      loopPausedReason,
-    });
+    const paused = await this.#factoryFlowService.transitionFlow(
+      flowId,
+      {
+        to: 'waiting_action',
+        stage: 'review',
+        reason,
+        currentSessionId: null,
+        lastReviewVerdict,
+        loopPausedReason,
+      },
+      { expectedSessionId: session.sessionId },
+    );
     this.#emitEvent({
       type: 'factory_flow.updated',
       flow: paused.flow,
@@ -1985,7 +1959,8 @@ export class SessionManager {
     }
 
     if (!failureError) {
-      const currentFlow = this.#factoryFlowService.getFlow(flowId).flow;
+      const flowDetails = this.#factoryFlowService.getFlow(flowId);
+      const currentFlow = flowDetails.flow;
       if (isFinalFactoryFlowState(currentFlow.state)) {
         return;
       }
@@ -2081,7 +2056,10 @@ export class SessionManager {
         }
 
         if (stage === 'review') {
-          const decision = await this.#readReviewDecisionFromReport(session.reportPath);
+          if (currentFlow.currentSessionId !== session.sessionId) {
+            return;
+          }
+          const decision = readFactoryReviewResult(session.reportPath);
           if (decision === null) {
             await this.#pauseReviewSession(
               session,
@@ -2094,14 +2072,18 @@ export class SessionManager {
           }
 
           if (isFactoryReviewApprovedVerdict(decision.verdict)) {
-            const paused = await this.#factoryFlowService.transitionFlow(flowId, {
-              to: 'waiting_action',
-              stage,
-              reason: 'Code Review aprovado no loop autônomo',
-              currentSessionId: null,
-              lastReviewVerdict: decision.verdict,
-              loopPausedReason: null,
-            });
+            const paused = await this.#factoryFlowService.transitionFlow(
+              flowId,
+              {
+                to: 'waiting_action',
+                stage,
+                reason: 'Code Review aprovado no loop autônomo',
+                currentSessionId: null,
+                lastReviewVerdict: decision.verdict,
+                loopPausedReason: null,
+              },
+              { expectedSessionId: session.sessionId },
+            );
             try {
               const advancedToPr = await this.#factoryFlowService.advanceStage(flowId, {
                 reason: 'Code Review aprovado; aguardando disparo manual da etapa PR',
@@ -2125,6 +2107,21 @@ export class SessionManager {
 
           const iteration = currentFlow.iteration > 0 ? currentFlow.iteration : 1;
           const maxIterations = currentFlow.maxIterations;
+          const stagnationReason = await getFactoryReviewStagnationReason(
+            flowDetails,
+            decision.findings,
+          );
+          if (stagnationReason !== null) {
+            await this.#pauseReviewSession(
+              session,
+              flowId,
+              stagnationReason,
+              stagnationReason,
+              decision.verdict,
+            );
+            return;
+          }
+
           if (iteration >= maxIterations) {
             const circuitBreakerMessage = `Limite máximo de ${maxIterations} iterações automáticas atingido sem aprovação no Code Review. Intervenção humana necessária.`;
             await this.#pauseReviewSession(
@@ -2149,14 +2146,18 @@ export class SessionManager {
             return;
           }
 
-          const paused = await this.#factoryFlowService.transitionFlow(flowId, {
-            to: 'waiting_action',
-            stage,
-            reason: `Code Review solicitou ajustes na iteração ${iteration}/${maxIterations}`,
-            currentSessionId: null,
-            lastReviewVerdict: decision.verdict,
-            loopPausedReason: null,
-          });
+          const paused = await this.#factoryFlowService.transitionFlow(
+            flowId,
+            {
+              to: 'waiting_action',
+              stage,
+              reason: `Code Review solicitou ajustes na iteração ${iteration}/${maxIterations}`,
+              currentSessionId: null,
+              lastReviewVerdict: decision.verdict,
+              loopPausedReason: null,
+            },
+            { expectedSessionId: session.sessionId },
+          );
           await this.#autoReturnToStage(
             session,
             flowId,

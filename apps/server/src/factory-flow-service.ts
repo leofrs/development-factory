@@ -139,6 +139,7 @@ export interface CancelFactoryFlowOptions {
 
 export interface TransitionFactoryFlowOptions extends SaveFactoryFlowTransitionOptions {
   readonly keepWorktree?: boolean;
+  readonly expectedSessionId?: string;
 }
 
 export interface CreateWorktreeCheckpointOptions {
@@ -789,8 +790,10 @@ export class FactoryFlowService {
         }
 
         if (
-          saveOptions.expectedUpdatedAt !== undefined &&
-          currentFlow.updatedAt !== saveOptions.expectedUpdatedAt
+          (saveOptions.expectedUpdatedAt !== undefined &&
+            currentFlow.updatedAt !== saveOptions.expectedUpdatedAt) ||
+          (options.expectedSessionId !== undefined &&
+            currentFlow.currentSessionId !== options.expectedSessionId)
         ) {
           throw new FactoryFlowServiceError(
             'FACTORY_FLOW_CONFLICT',
