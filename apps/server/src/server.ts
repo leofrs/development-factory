@@ -451,7 +451,7 @@ async function handleFactoryFlowApiRequest(
       return;
     }
 
-    const flowIdMatch = /^\/api\/factory\/flows\/([^/]+)$/.exec(url.pathname);
+    const flowIdMatch = /^\/api\/factory\/flows\/([^/]+)(?:\/(diff|iterations))?$/.exec(url.pathname);
     if (req.method === 'GET' && flowIdMatch?.[1] !== undefined) {
       const flowId = decodeRouteParam(flowIdMatch[1]);
       if (flowId === null) {
@@ -461,8 +461,23 @@ async function handleFactoryFlowApiRequest(
         });
         return;
       }
-      const details = factoryFlowService.getFlow(flowId);
-      res.writeHead(200).end(JSON.stringify(details));
+      if (flowIdMatch[2] === 'diff') {
+        const abort = new AbortController();
+        res.once('close', () => abort.abort());
+        const diff = await factoryFlowService.getFlowDiff(
+          flowId,
+          Object.fromEntries(url.searchParams),
+          abort.signal,
+        );
+        if (!abort.signal.aborted) {
+          res.writeHead(200).end(JSON.stringify(diff));
+        }
+        return;
+      }
+      const result = flowIdMatch[2] === 'iterations'
+        ? factoryFlowService.getFlowIterationComparison(flowId, Object.fromEntries(url.searchParams))
+        : factoryFlowService.getFlow(flowId);
+      res.writeHead(200).end(JSON.stringify(result));
       return;
     }
 
@@ -797,6 +812,9 @@ async function handleFactoryFlowApiRequest(
       message: 'Rota de fluxo da Factory não encontrada.',
     });
   } catch (error) {
+    if (res.destroyed) {
+      return;
+    }
     if (error instanceof FactoryFlowServiceError) {
       sendFactoryFlowApiError(res, error.statusCode, {
         code: error.code,

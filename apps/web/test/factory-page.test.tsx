@@ -120,6 +120,220 @@ function renderFactoryPage(props: Partial<ComponentProps<typeof FactoryPage>> = 
   return renderToStaticMarkup(factoryPageElement(props));
 }
 
+test('Roadmap navega pelo diff paginado e compara evidências e checkpoints de ciclos consecutivos', async context => {
+  const flow = createFlow({
+    state: 'queued',
+    currentSessionId: null,
+    updatedAt: '2026-11-19T12:00:00.000Z',
+    worktreePath: '/home/dev/.local/share/development-factory/worktrees/flow',
+    branchName: 'factory/auth-101',
+    baseBranch: 'main',
+    iteration: 3,
+  });
+  const checkpoints: FactoryFlowDetails['checkpoints'] = [1, 2, 3].map(iteration => ({
+    contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+    id: `00000000-0000-4000-8000-00000000000${iteration}`,
+    flowId: flow.id,
+    stage: 'tests',
+    iteration,
+    commitSha: String(iteration).repeat(40),
+    branchName: flow.branchName,
+    sessionId: null,
+    message: null,
+    createdAt: flow.createdAt,
+  }));
+  const details: FactoryFlowDetails = {
+    contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+    flow,
+    stages: [],
+    artifacts: [],
+    worktreePath: flow.worktreePath,
+    branchName: flow.branchName,
+    baseBranch: flow.baseBranch,
+    checkpoints,
+  };
+
+  const window = parseHTML('<html><body><div id="inspection-root"></div></body></html>');
+  const { document } = window;
+  const overrides: Array<[object, string, unknown]> = [
+    [globalThis, 'window', window],
+    [globalThis, 'document', document],
+    [globalThis, 'IS_REACT_ACT_ENVIRONMENT', true],
+    [window.HTMLElement.prototype, 'showModal', function (this: HTMLElement) {
+      this.setAttribute('open', '');
+    }],
+    [window.HTMLElement.prototype, 'close', function (this: HTMLElement) {
+      this.removeAttribute('open');
+    }],
+  ];
+  for (const [target, name, value] of overrides) {
+    const original = Object.getOwnPropertyDescriptor(target, name);
+    Object.defineProperty(target, name, { configurable: true, value, writable: true });
+    context.after(() => {
+      if (original) {
+        Object.defineProperty(target, name, original);
+      } else {
+        Reflect.deleteProperty(target, name);
+      }
+    });
+  }
+  context.mock.method(window.HTMLElement.prototype, 'focus', () => undefined);
+
+  const version = FACTORY_FLOW_CONTRACT_VERSION;
+  const seen: URL[] = [];
+  let oldPatchSignal: AbortSignal | null | undefined;
+  let resolveOldPatch: ((response: Response) => void) | undefined;
+  const oldPatch = new Promise<Response>(resolve => { resolveOldPatch = resolve; });
+  const file = (path: string, change = 'modified') => ({
+    path, change, untracked: false, additions: 1, deletions: 1, binary: false,
+  });
+  function evidence(iteration: number) {
+    const checkpoint = checkpoints.find(item => item.iteration === iteration);
+    assert(checkpoint);
+    const before = iteration === 1;
+    return {
+      iteration,
+      checkpoint: { id: checkpoint.id, commitSha: checkpoint.commitSha, stage: checkpoint.stage },
+      tests: {
+        status: before ? 'failed' : 'passed',
+        passed: before ? 0 : 1,
+        failed: before ? 1 : 0,
+        skipped: 0,
+        cases: [{ id: 'T1', description: 'Validar a sessão.', status: before ? 'failed' : 'passed' }],
+        coverage: { linesPercent: before ? 45 : 80, branchesPercent: null },
+        commandCount: 1,
+        commands: [{ command: 'npm test', exitCode: before ? 1 : 0 }],
+      },
+      review: {
+        verdict: before ? 'changes_requested' : 'approved',
+        findingCount: before ? 1 : 0,
+        findings: before
+          ? [{ severity: 'BLOQUEANTE', file: 'src/auth.ts', line: 4, explanation: 'Falta validar a sessão.' }]
+          : [],
+      },
+    };
+  }
+  context.mock.method(globalThis, 'fetch', (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(input instanceof Request ? input.url : input);
+    seen.push(url);
+    if (url.pathname.endsWith('/iterations')) {
+      const from = Number(url.searchParams.get('fromIteration'));
+      return Promise.resolve(Response.json({
+        contractVersion: version, before: evidence(from), after: evidence(from + 1),
+      }));
+    }
+    if (url.pathname.endsWith('/diff')) {
+      const path = url.searchParams.get('file');
+      if (path === 'src/antigo.ts') {
+        oldPatchSignal = init?.signal;
+        return oldPatch;
+      }
+      if (path) {
+        return Promise.resolve(Response.json({
+          contractVersion: version,
+          kind: 'patch',
+          patch: '@@ -1 +1 @@\n-linha antiga\n+<tag>texto</tag>',
+          truncated: true,
+        }));
+      }
+      const historical = url.searchParams.has('fromCheckpointId');
+      const nextPage = url.searchParams.get('offset') === '20';
+      const files = historical ? [file('src/auth.ts')]
+        : nextPage ? [file('src/último.ts')]
+          : [file('src/antigo.ts', 'deleted'), file('src/novo.ts', 'added')];
+      return Promise.resolve(Response.json({
+        contractVersion: version,
+        kind: 'page',
+        files,
+        totalFiles: historical ? 1 : 21,
+        nextOffset: historical || nextPage ? null : 20,
+        truncated: false,
+      }));
+    }
+    return Promise.resolve(Response.json(details));
+  });
+
+  const container = document.getElementById('inspection-root');
+  assert(container);
+  const root = createRoot(container);
+  const visiblePanel = () => {
+    const panel = container.querySelector('[role="tabpanel"]:not([hidden])');
+    assert(panel);
+    return panel;
+  };
+  const clickButton = async (label: string, within: ParentNode = visiblePanel()) => {
+    const button = [...within.querySelectorAll<HTMLButtonElement>('button')].find(
+      item => item.textContent?.trim().startsWith(label),
+    );
+    assert(button, `Botão ausente: ${label}`);
+    await act(() => button.click());
+  };
+
+  try {
+    await act(() => root.render(
+      <FactoryFlowRoadmapModal
+        flow={flow}
+        initialDetails={details}
+        onClose={noop}
+        onOpenFlowTerminal={unavailableTerminal}
+        onAdvanceFlowStage={noopAsync}
+        onRerunFlowStage={noopAsync}
+        onViewMarkdown={noop}
+      />,
+    ));
+    const tabs = container.querySelector('[role="tablist"]');
+    assert(tabs);
+    const activeTab = tabs.querySelector('[aria-selected="true"]');
+    assert.equal(activeTab?.textContent, 'Roadmap');
+    assert(!seen.some(url => url.pathname.endsWith('/diff')));
+    const arrow = new window.Event('keydown', { bubbles: true, cancelable: true });
+    Object.defineProperty(arrow, 'key', { value: 'ArrowRight' });
+    await act(() => { activeTab?.dispatchEvent(arrow); });
+
+    assert.equal(tabs.querySelector('[aria-selected="true"]')?.textContent, 'Diff Real');
+    assert.match(visiblePanel().textContent ?? '', /src\/novo\.tsCriado\+1−1/);
+    assert.match(visiblePanel().textContent ?? '', /src\/antigo\.tsRemovido/);
+    await clickButton('src/antigo.ts');
+    await clickButton('src/novo.ts');
+    assert(oldPatchSignal?.aborted);
+    await act(() => resolveOldPatch?.(Response.json({
+      contractVersion: version, kind: 'patch', patch: 'Resposta obsoleta', truncated: false,
+    })));
+    assert.match(visiblePanel().querySelector('pre')?.textContent ?? '', /\+<tag>texto<\/tag>/);
+    assert.equal(visiblePanel().querySelector('tag'), null);
+    assert.doesNotMatch(visiblePanel().textContent ?? '', /Resposta obsoleta/);
+    assert.match(visiblePanel().textContent ?? '', /limite de exibição/);
+
+    await clickButton('Próxima página');
+    assert.match(visiblePanel().textContent ?? '', /src\/último\.ts/);
+    await clickButton('Página anterior');
+    assert.match(visiblePanel().textContent ?? '', /src\/novo\.ts/);
+
+    await clickButton('Histórico Comparativo de Iterações', tabs);
+    assert.equal(tabs.querySelector('[aria-selected="true"]')?.textContent, 'Histórico Comparativo de Iterações');
+    assert.match(visiblePanel().textContent ?? '', /Ciclo 2 → Ciclo 3/);
+    const select = visiblePanel().querySelector('select');
+    assert(select);
+    await act(() => {
+      Object.defineProperty(select, 'value', { configurable: true, value: '1' });
+      select.dispatchEvent(new window.Event('change', { bubbles: true }));
+    });
+    const [before, after] = visiblePanel().querySelectorAll('article');
+    assert.match(before?.textContent ?? '', /Com falhas.*45%.*Falta validar a sessão\./);
+    assert.match(after?.textContent ?? '', /Aprovados.*80%.*Nenhum finding registrado\./);
+    assert.match(before?.textContent ?? '', /T1 · Falhou/);
+    assert.match(after?.textContent ?? '', /T1 · Passou/);
+    assert(seen.some(url =>
+      url.searchParams.get('fromCheckpointId') === checkpoints[0]?.id &&
+      url.searchParams.get('toCheckpointId') === checkpoints[1]?.id,
+    ));
+    await clickButton('src/auth.ts');
+    assert.match(visiblePanel().querySelector('pre')?.textContent ?? '', /linha antiga/);
+  } finally {
+    await act(() => root.unmount());
+  }
+});
+
 test('Factory abre o terminal da etapa atual pelas três telas e atualiza a atividade em tempo real', async context => {
   const runningFlow = createFlow({
     transitions: [

@@ -2,6 +2,9 @@ import {
   BackgroundSessionSummarySchema,
   FACTORY_FLOW_CONTRACT_VERSION,
   FactoryFlowDetailsSchema,
+  FactoryFlowDiffPageSchema,
+  FactoryFlowDiffPatchSchema,
+  FactoryFlowIterationComparisonSchema,
   FactoryFlowListResponseSchema,
   FactoryFlowSchema,
   FactoryFlowStageSchema,
@@ -14,6 +17,7 @@ import type {
   BackgroundSessionSummary,
   CancelFactoryFlowRequest,
   CreateFactoryFlowRequest,
+  FactoryDiffFile,
   FactoryFlow,
   FactoryFlowDetails,
   FactoryFlowStage,
@@ -250,6 +254,88 @@ export async function fetchFactoryFlowDetails(
     }
     throw toFactoryFlowRequestError(error, 'Não foi possível consultar o fluxo da Factory.');
   }
+}
+
+export interface FactoryDiffComparison {
+  fromCheckpointId: string;
+  toCheckpointId: string;
+}
+
+async function fetchFactoryFlowInspection<T>(
+  flowId: string,
+  resource: 'diff' | 'iterations',
+  query: Record<string, string>,
+  schema: { safeParse: (input: unknown) => { success: true; data: T } | { success: false } },
+  signal: AbortSignal,
+): Promise<T> {
+  const params = new URLSearchParams(query);
+  const fallback = 'Não foi possível consultar a comparação do fluxo da Factory.';
+  try {
+    const response = await fetch(
+      `${API_BASE_URL}/api/factory/flows/${encodeURIComponent(flowId)}/${resource}?${params}`,
+      { method: 'GET', cache: 'no-store', signal },
+    );
+    const payload = await parseJsonResponse(response);
+    if (!response.ok) {
+      throw extractApiError(payload, response.status, fallback);
+    }
+    const parsed = schema.safeParse(payload);
+    if (!parsed.success) {
+      throw new FactoryFlowApiError(
+        'Formato inesperado ao consultar a comparação do fluxo da Factory.',
+        'FACTORY_FLOW_INVALID_RESPONSE',
+        response.status,
+      );
+    }
+    return parsed.data;
+  } catch (error) {
+    signal.throwIfAborted();
+    throw toFactoryFlowRequestError(error, fallback);
+  }
+}
+
+export function fetchFactoryFlowDiffPage(
+  flowId: string,
+  offset: number,
+  comparison: FactoryDiffComparison | undefined,
+  signal: AbortSignal,
+) {
+  return fetchFactoryFlowInspection(
+    flowId,
+    'diff',
+    { ...comparison, offset: String(offset) },
+    FactoryFlowDiffPageSchema,
+    signal,
+  );
+}
+
+export function fetchFactoryFlowDiffPatch(
+  flowId: string,
+  file: Pick<FactoryDiffFile, 'path' | 'untracked'>,
+  comparison: FactoryDiffComparison | undefined,
+  signal: AbortSignal,
+) {
+  return fetchFactoryFlowInspection(
+    flowId,
+    'diff',
+    { ...comparison, file: file.path, untracked: String(file.untracked) },
+    FactoryFlowDiffPatchSchema,
+    signal,
+  );
+}
+
+export function fetchFactoryFlowIterationComparison(
+  flowId: string,
+  fromIteration: number,
+  signal: AbortSignal,
+) {
+  return fetchFactoryFlowInspection(
+    flowId,
+    'iterations',
+    { fromIteration: String(fromIteration) },
+    FactoryFlowIterationComparisonSchema,
+    signal,
+  );
 }
 
 /** Cria um novo fluxo da Factory e opcionalmente inicia a sessão da etapa inicial. */

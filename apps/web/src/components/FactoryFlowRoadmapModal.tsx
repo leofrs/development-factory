@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   AlertTriangle,
@@ -43,6 +43,10 @@ import {
   getFactoryStageStatePresentation,
   getFactoryStageStep,
 } from '../utils/factory-flow-status';
+import { FactoryFlowDetailTabs } from './FactoryFlowDetailTabs.js';
+import type { FactoryFlowDetailTab } from './FactoryFlowDetailTabs.js';
+import { FactoryFlowDiffPanel } from './FactoryFlowDiffPanel.js';
+import { FactoryFlowIterationsPanel } from './FactoryFlowIterationsPanel.js';
 import { FactoryLiveTerminalButton } from './FactoryLiveTerminalButton.js';
 import {
   FactoryPlanningGatePanel,
@@ -244,6 +248,8 @@ export function FactoryFlowRoadmapModal({
   onViewMarkdown,
 }: FactoryFlowRoadmapModalProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
+  const tabId = useId();
+  const [activeTab, setActiveTab] = useState<FactoryFlowDetailTab>('roadmap');
   const [details, setDetails] = useState<FactoryFlowDetails | null>(initialDetails ?? null);
   const [loadingDetails, setLoadingDetails] = useState(initialDetails === undefined);
   const [detailsError, setDetailsError] = useState<string | null>(null);
@@ -609,7 +615,16 @@ export function FactoryFlowRoadmapModal({
           </button>
         </header>
 
-        <div className="min-h-0 flex-1 overflow-y-auto bg-page p-5 sm:p-6">
+        <FactoryFlowDetailTabs id={tabId} selected={activeTab} onSelect={setActiveTab} />
+
+        <div
+          id={`${tabId}-roadmap-panel`}
+          role="tabpanel"
+          aria-labelledby={`${tabId}-roadmap-tab`}
+          tabIndex={0}
+          hidden={activeTab !== 'roadmap'}
+          className="min-h-0 flex-1 overflow-y-auto bg-page p-5 sm:p-6"
+        >
           {flow.loopPausedReason && (
             <div
               role="alert"
@@ -1189,6 +1204,54 @@ export function FactoryFlowRoadmapModal({
               </Fragment>
             ))}
           </ol>
+        </div>
+
+        <div
+          id={`${tabId}-diff-panel`}
+          role="tabpanel"
+          aria-labelledby={`${tabId}-diff-tab`}
+          tabIndex={0}
+          hidden={activeTab !== 'diff'}
+          className="min-h-0 flex-1 overflow-y-auto bg-page p-5 sm:p-6"
+        >
+          {activeTab === 'diff' && (flow.worktreePath ? (
+            <FactoryFlowDiffPanel
+              key={flow.id}
+              flowId={flow.id}
+              baseBranch={flow.baseBranch}
+              updatedAt={flow.updatedAt}
+            />
+          ) : (
+            <p className="text-sm text-muted">O worktree isolado deste fluxo está indisponível.</p>
+          ))}
+        </div>
+
+        <div
+          id={`${tabId}-iterations-panel`}
+          role="tabpanel"
+          aria-labelledby={`${tabId}-iterations-tab`}
+          tabIndex={0}
+          hidden={activeTab !== 'iterations'}
+          className="min-h-0 flex-1 overflow-y-auto bg-page p-5 sm:p-6"
+        >
+          {activeTab === 'iterations' && currentDetails && (
+            <FactoryFlowIterationsPanel key={flow.id} flow={flow} details={currentDetails} />
+          )}
+          {activeTab === 'iterations' && !currentDetails && loadingDetails && (
+            <p role="status" className="text-xs text-muted">Carregando histórico do fluxo…</p>
+          )}
+          {activeTab === 'iterations' && !currentDetails && detailsError && (
+            <div className="space-y-2">
+              <p role="alert" className="text-xs text-danger">{detailsError}</p>
+              <button
+                type="button"
+                className="modal-button"
+                onClick={() => setDetailsRefreshTick(tick => tick + 1)}
+              >
+                Tentar novamente
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </dialog>

@@ -9,7 +9,9 @@ import {
   FactoryApprovedNotesSchema,
   FactoryFlowArtifactSchema,
   FactoryFlowCheckpointSchema,
+  FactoryFlowDiffQuerySchema,
   FactoryFlowDomainError,
+  FactoryFlowIterationsQuerySchema,
   FactoryFlowSchema,
   FactoryFlowStageSchema,
   FactoryIdempotencyKeySchema,
@@ -25,6 +27,7 @@ import {
   FactoryWorktreeRetentionPolicySchema,
   canReturnFactoryStage,
   evaluateFactoryTriageGate,
+  getFactoryComparableIterations,
   getNextFactoryStage,
   getReadyFactoryStageArtifact,
   isFinalFactoryFlowState,
@@ -50,6 +53,7 @@ import {
   type TransitionFactoryFlowResponse,
 } from '@development-factory/shared';
 import { getFactoryDevelopmentChecksError } from './factory-development-checks.js';
+import { readFactoryIterationComparison } from './factory-flow-iterations.js';
 import {
   FactoryStageArtifactError,
   formatArtifactIssue,
@@ -62,6 +66,7 @@ import {
   getFactoryWorktreeHeadSha,
   rollbackFactoryWorktreeToCheckpoint,
 } from './factory-worktree.js';
+import { readFactoryWorktreeDiff } from './factory-worktree-diff.js';
 import { validateFactoryStageArtifacts } from './history.js';
 import {
   ReviewStorageError,
@@ -398,7 +403,9 @@ function mapUnexpectedError(error: unknown, conflictCode: FactoryFlowApiErrorCod
     const statusCode =
       error.code === 'WORKTREE_CHECKPOINT_FAILED' || error.code === 'WORKTREE_CLEANUP_FAILED'
         ? 500
-        : error.code === 'WORKTREE_ROLLBACK_FAILED' || error.code === 'WORKTREE_INVALID'
+        : error.code === 'WORKTREE_ROLLBACK_FAILED' ||
+            error.code === 'WORKTREE_INVALID' ||
+            error.code === 'WORKTREE_DIFF_FAILED'
           ? 409
           : 400;
     const code: FactoryFlowApiErrorCode =
@@ -716,6 +723,88 @@ export class FactoryFlowService {
     } catch (error) {
       throw mapUnexpectedError(error);
     }
+  }
+
+  async getFlowDiff(flowId: string, query: unknown, signal: AbortSignal) {
+    const parsed = FactoryFlowDiffQuerySchema.safeParse(query);
+    if (!parsed.success) {
+      throw new FactoryFlowServiceError(
+        'FACTORY_FLOW_INVALID_INPUT',
+        'Os parâmetros de consulta do diff são inválidos.',
+        400,
+        formatZodIssues(parsed.error),
+      );
+    }
+    const { flow, checkpoints } = this.getFlow(flowId);
+    if (!flow.worktreePath) {
+      throw new FactoryFlowServiceError(
+        'FACTORY_FLOW_CONFLICT',
+        'O worktree isolado do fluxo está indisponível.',
+        409,
+      );
+    }
+
+    const { fromCheckpointId, toCheckpointId } = parsed.data;
+    const from = checkpoints.find(checkpoint => checkpoint.id === fromCheckpointId);
+    const to = checkpoints.find(checkpoint => checkpoint.id === toCheckpointId);
+    if (fromCheckpointId && (!from || !to)) {
+      throw new FactoryFlowServiceError(
+        'FACTORY_FLOW_NOT_FOUND',
+        'Um dos checkpoints informados não foi encontrado neste fluxo.',
+        404,
+      );
+    }
+    if (!flow.baseBranch && (!from || !to)) {
+      throw new FactoryFlowServiceError(
+        'FACTORY_FLOW_CONFLICT',
+        'O fluxo não tem uma branch base registrada para comparar com o worktree.',
+        409,
+      );
+    }
+    const range = from && to
+      ? { from: from.commitSha, to: to.commitSha }
+      : {
+          baseBranch: flow.baseBranch ?? 'HEAD',
+          baselineSha: checkpoints.find(checkpoint => checkpoint.iteration === 0)?.commitSha,
+        };
+    try {
+      const diff = await readFactoryWorktreeDiff(
+        { worktreePath: flow.worktreePath, flowId: flow.id, repoPath: flow.target.repoPath, range },
+        parsed.data,
+        signal,
+      );
+      if (!diff) {
+        throw new FactoryFlowServiceError(
+          'FACTORY_FLOW_NOT_FOUND',
+          'O arquivo não está nas mudanças desta comparação. Atualize a lista para consultar o diff.',
+          404,
+        );
+      }
+      return diff;
+    } catch (error) {
+      throw mapUnexpectedError(error);
+    }
+  }
+
+  getFlowIterationComparison(flowId: string, query: unknown) {
+    const parsed = FactoryFlowIterationsQuerySchema.safeParse(query);
+    if (!parsed.success) {
+      throw new FactoryFlowServiceError(
+        'FACTORY_FLOW_INVALID_INPUT',
+        'Informe um ciclo válido para comparar com o seguinte.',
+        400,
+        formatZodIssues(parsed.error),
+      );
+    }
+    const details = this.getFlow(flowId);
+    if (!getFactoryComparableIterations(details).includes(parsed.data.fromIteration)) {
+      throw new FactoryFlowServiceError(
+        'FACTORY_FLOW_NOT_FOUND',
+        'Os dois ciclos consecutivos precisam estar registrados no fluxo.',
+        404,
+      );
+    }
+    return readFactoryIterationComparison(details, parsed.data.fromIteration);
   }
 
   listFlows(filterInput: unknown = {}): FactoryFlowListResponse {
