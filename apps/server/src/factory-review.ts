@@ -1,4 +1,4 @@
-import { posix } from 'node:path';
+import { dirname, posix } from 'node:path';
 import {
   FactoryReviewVerdictSchema,
   ReturnFactoryTargetStageSchema,
@@ -20,6 +20,8 @@ import {
   GIT_WRITE_DENIED_BASH_TOOLS,
   buildReportFileToolPermissions,
   buildRestrictedRunnerArgs,
+  describeMissingStructuredReportParts,
+  normalizeStructuredMarkdownReport,
   readFactoryArtifactFile,
   readFactoryStageSidecar,
   readOptionalLatestStageDocument,
@@ -34,19 +36,86 @@ import {
 } from './prompts/factory-review.js';
 
 const VERDICT_PREFIX_PATTERN =
-  /^(?:[-*]\s*)?(?:\*\*|__)?(?:veredito|parecer(?:\s+final)?|decis[aã]o)(?:\*\*|__)?\s*:\s*(.+)$/iu;
+  /^(?:>\s*)*(?:(?:[-*]|\d+[.)])\s*)?(?:\*\*|__)?(?:veredito|parecer(?:\s+final)?|decis[aã]o)(?:\*\*|__)?\s*:\s*(.+)$/iu;
 const RETURN_TARGET_PREFIX_PATTERN =
-  /^(?:[-*]\s*)?(?:\*\*|__)?(?:alvo(?:\s+de\s+retorno)?|retorno|returnTarget)(?:\*\*|__)?\s*:\s*(.+)$/iu;
+  /^(?:>\s*)*(?:(?:[-*]|\d+[.)])\s*)?(?:\*\*|__)?(?:alvo(?:\s+de\s+retorno)?|retorno|returnTarget)(?:\*\*|__)?\s*:\s*(.+)$/iu;
+
+const REVIEW_SECTION_ALIASES: Readonly<Record<string, string>> = {
+  'resumo executivo': REVIEW_REPORT_SECTIONS.executiveSummary,
+  resumo: REVIEW_REPORT_SECTIONS.executiveSummary,
+  'resumo da revisao': REVIEW_REPORT_SECTIONS.executiveSummary,
+  'resumo do code review': REVIEW_REPORT_SECTIONS.executiveSummary,
+  'pontos encontrados': REVIEW_REPORT_SECTIONS.findings,
+  apontamentos: REVIEW_REPORT_SECTIONS.findings,
+  'apontamentos encontrados': REVIEW_REPORT_SECTIONS.findings,
+  'apontamentos / instrucoes conclusivas de correcao': REVIEW_REPORT_SECTIONS.findings,
+  'apontamentos e instrucoes conclusivas de correcao': REVIEW_REPORT_SECTIONS.findings,
+  'instrucoes conclusivas de correcao': REVIEW_REPORT_SECTIONS.findings,
+  'como testar manualmente': REVIEW_REPORT_SECTIONS.manualVerification,
+  'teste manual': REVIEW_REPORT_SECTIONS.manualVerification,
+  'testes manuais': REVIEW_REPORT_SECTIONS.manualVerification,
+  'como testar': REVIEW_REPORT_SECTIONS.manualVerification,
+  'validacao manual': REVIEW_REPORT_SECTIONS.manualVerification,
+  'roteiro de validacao manual': REVIEW_REPORT_SECTIONS.manualVerification,
+  'roteiro de teste manual': REVIEW_REPORT_SECTIONS.manualVerification,
+  'roteiro de testes manuais': REVIEW_REPORT_SECTIONS.manualVerification,
+  'guia de teste manual': REVIEW_REPORT_SECTIONS.manualVerification,
+  'guia de testes manuais': REVIEW_REPORT_SECTIONS.manualVerification,
+  'passo a passo para teste manual': REVIEW_REPORT_SECTIONS.manualVerification,
+  'verificacao manual': REVIEW_REPORT_SECTIONS.manualVerification,
+  'parecer final': REVIEW_REPORT_SECTIONS.verdict,
+  veredito: REVIEW_REPORT_SECTIONS.verdict,
+  'veredito final': REVIEW_REPORT_SECTIONS.verdict,
+  'veredito do code review': REVIEW_REPORT_SECTIONS.verdict,
+  parecer: REVIEW_REPORT_SECTIONS.verdict,
+  'decisao final': REVIEW_REPORT_SECTIONS.verdict,
+};
+
+const AMBIGUOUS_VERDICT_CHOICE_PATTERN =
+  /(?:APROVADO PARA PR|APROVADO COM RESSALVAS)\s*(?:\bOU\b|\||\/)\s*(?:REPROVADO|REQUER AJUSTES)|(?:REPROVADO|REQUER AJUSTES)\s*(?:\bOU\b|\||\/)\s*(?:APROVADO PARA PR|APROVADO COM RESSALVAS)/;
+
+/** Normaliza variações naturais de título e seções no relatório Markdown de Code Review. */
+export function normalizeReviewMarkdown(content: string): string {
+  return normalizeStructuredMarkdownReport(
+    content,
+    REVIEW_REPORT_TITLE,
+    REVIEW_REPORT_SECTIONS,
+    REVIEW_SECTION_ALIASES,
+  );
+}
 
 function extractSectionBody(content: string, heading: string): string[] | null {
-  const [, ...rawSections] = content.split(/^## /m);
-  for (const section of rawSections) {
-    const [sectionTitle, ...body] = section.split('\n');
-    if (sectionTitle?.trim() === heading) {
-      return body;
+  const normalized = normalizeReviewMarkdown(content);
+  let collecting = false;
+  const collected: string[] = [];
+  let activeFence: { readonly char: '`' | '~'; readonly length: number } | null = null;
+
+  for (const line of normalized.split('\n')) {
+    const fenceMatch = /^(`{3,}|~{3,})/.exec(line.trimStart());
+    if (fenceMatch?.[1] !== undefined) {
+      const marker = fenceMatch[1];
+      const char = marker[0] === '~' ? '~' : '`';
+      if (activeFence === null) {
+        activeFence = { char, length: marker.length };
+      } else if (activeFence.char === char && marker.length >= activeFence.length) {
+        activeFence = null;
+      }
+    } else if (activeFence === null && line.startsWith('## ')) {
+      if (collecting) {
+        return collected;
+      }
+      if (line.slice(3).trim() === heading) {
+        collecting = true;
+        continue;
+      }
+    }
+
+    if (collecting) {
+      collected.push(line);
     }
   }
-  return null;
+
+  return collecting ? collected : null;
 }
 
 function normalizeVerdictToken(raw: string): string {
@@ -59,38 +128,34 @@ function normalizeVerdictToken(raw: string): string {
     .toUpperCase();
 }
 
-function matchVerdictToken(normalized: string): FactoryReviewVerdict | null {
-  const hasApproval =
-    normalized.includes(REVIEW_VERDICT_LABELS.approved) ||
-    normalized.includes(REVIEW_VERDICT_LABELS.approvedWithWarnings);
-  const hasRejection =
-    normalized.includes(REVIEW_VERDICT_LABELS.changesRequested) ||
-    normalized.includes('REPROVADO') ||
-    normalized.includes('REQUER AJUSTES');
+function matchesVerdictLabel(normalized: string, label: string): boolean {
+  return (
+    normalized === label ||
+    normalized.startsWith(`${label} `) ||
+    normalized.startsWith(`${label}-`) ||
+    normalized.startsWith(`${label}—`) ||
+    normalized.startsWith(`${label}(`) ||
+    normalized.startsWith(`${label}:`)
+  );
+}
 
-  if (hasApproval && hasRejection) {
+function matchVerdictToken(normalized: string): FactoryReviewVerdict | null {
+  if (AMBIGUOUS_VERDICT_CHOICE_PATTERN.test(normalized)) {
     return null;
   }
 
-  if (
-    normalized === REVIEW_VERDICT_LABELS.approvedWithWarnings ||
-    normalized.startsWith(`${REVIEW_VERDICT_LABELS.approvedWithWarnings} `)
-  ) {
+  if (matchesVerdictLabel(normalized, REVIEW_VERDICT_LABELS.approvedWithWarnings)) {
     return FactoryReviewVerdictSchema.parse('approved_with_warnings');
   }
 
-  if (
-    normalized === REVIEW_VERDICT_LABELS.approved ||
-    normalized.startsWith(`${REVIEW_VERDICT_LABELS.approved} `)
-  ) {
+  if (matchesVerdictLabel(normalized, REVIEW_VERDICT_LABELS.approved)) {
     return FactoryReviewVerdictSchema.parse('approved');
   }
 
   if (
-    normalized === REVIEW_VERDICT_LABELS.changesRequested ||
-    normalized.startsWith(`${REVIEW_VERDICT_LABELS.changesRequested} `) ||
-    normalized === 'REPROVADO' ||
-    normalized === 'REQUER AJUSTES'
+    matchesVerdictLabel(normalized, REVIEW_VERDICT_LABELS.changesRequested) ||
+    matchesVerdictLabel(normalized, 'REPROVADO') ||
+    matchesVerdictLabel(normalized, 'REQUER AJUSTES')
   ) {
     return FactoryReviewVerdictSchema.parse('changes_requested');
   }
@@ -279,6 +344,7 @@ export async function getFactoryReviewStagnationReason(
 /** Argumentos restritos do runner da Etapa 05 (somente leitura no código + comandos git de inspeção). */
 export function buildReviewRunnerArgs(reportPath: string): string[] {
   return buildRestrictedRunnerArgs({
+    additionalDirectory: dirname(reportPath),
     tools: ['Read', 'Glob', 'Grep', 'Edit', 'Write', 'Bash'],
     allowed: [
       'Read',
@@ -366,8 +432,23 @@ export function readFactoryReviewTriageScope(
 
 /** Valida a estrutura mínima e o veredito determinístico do artefato `review_report` em Markdown. */
 export function isReviewReport(content: string): boolean {
+  const normalized = normalizeReviewMarkdown(content);
   return (
-    validateStructuredMarkdownReport(content, REVIEW_REPORT_TITLE, REVIEW_REPORT_SECTIONS) &&
-    parseReviewVerdict(content) !== null
+    validateStructuredMarkdownReport(normalized, REVIEW_REPORT_TITLE, REVIEW_REPORT_SECTIONS) &&
+    parseReviewVerdict(normalized) !== null
   );
+}
+
+/** Lista o título, seções obrigatórias ou veredito ausentes/inválidos no relatório de Code Review. */
+export function describeMissingReviewParts(content: string): string[] {
+  const normalized = normalizeReviewMarkdown(content);
+  const missing = describeMissingStructuredReportParts(
+    normalized,
+    REVIEW_REPORT_TITLE,
+    REVIEW_REPORT_SECTIONS,
+  );
+  if (!missing.includes(REVIEW_REPORT_SECTIONS.verdict) && parseReviewVerdict(normalized) === null) {
+    missing.push('veredito determinístico na seção Parecer Final');
+  }
+  return missing;
 }

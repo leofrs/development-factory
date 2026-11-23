@@ -37,7 +37,6 @@ interface FactoryPageProps {
   initialSection?: FactoryPageSection;
   onPickDirectory: () => void;
   onOpenNewFlow: () => void;
-  onOpenFlowTerminal: (flowId: string) => boolean;
   onOpenFlowRoadmap: (flowId: string) => void;
   onCancelFlow: (flowId: string) => Promise<FactoryFlow>;
   onRerunFlowStage: (flowId: string, stage: FactoryStageName) => Promise<void>;
@@ -88,7 +87,6 @@ export function FactoryPage({
   initialSection = 'flows',
   onPickDirectory,
   onOpenNewFlow,
-  onOpenFlowTerminal,
   onOpenFlowRoadmap,
   onCancelFlow,
   onRerunFlowStage,
@@ -314,7 +312,6 @@ export function FactoryPage({
                               actionPending={action?.pending === true}
                               actionError={action?.pending === false ? action.error : undefined}
                               onOpenRoadmap={() => onOpenFlowRoadmap(flow.id)}
-                              onOpenTerminal={() => onOpenFlowTerminal(flow.id)}
                               onStop={() => {
                                 runFlowAction(
                                   flow.id,

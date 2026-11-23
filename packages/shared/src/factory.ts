@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 export const FACTORY_FLOW_CONTRACT_VERSION = 1 as const;
 export const FACTORY_APPROVED_NOTES_MAX_LENGTH = 4000;
+export const FACTORY_CHECKPOINT_BODY_MAX_LENGTH = 555;
 export const FACTORY_MAX_AUTO_ITERATIONS = 3 as const;
 const version = z.literal(FACTORY_FLOW_CONTRACT_VERSION);
 const id = z.string().uuid();
@@ -1041,7 +1042,8 @@ export const FactoryFlowCheckpointSchema = z.strictObject({
   commitSha: gitCommitShaSchema,
   branchName: gitBranchNameSchema.nullable().default(null),
   sessionId: id.nullable().default(null),
-  message: text.max(500).nullable().default(null),
+  // Reserva espaço para o corpo separado do título pela linha em branco do Git.
+  message: text.max(500 + 2 + FACTORY_CHECKPOINT_BODY_MAX_LENGTH).nullable().default(null),
   createdAt: timestamp,
 });
 export type FactoryFlowCheckpoint = z.infer<typeof FactoryFlowCheckpointSchema>;

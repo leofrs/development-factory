@@ -100,6 +100,7 @@ import {
   getFactoryWorktreeHeadSha,
   rollbackFactoryWorktreeToCheckpoint,
 } from './factory-worktree.js';
+import type { CreateFactoryWorktreeCheckpointOptions } from './factory-worktree.js';
 import { readFactoryWorktreeDiff } from './factory-worktree-diff.js';
 import { validateFactoryStageArtifacts } from './history.js';
 import {
@@ -186,7 +187,7 @@ export interface CreateWorktreeCheckpointOptions {
   readonly stage: FactoryStageName;
   readonly iteration?: number;
   readonly sessionId?: string | null;
-  readonly message?: string;
+  readonly kind?: CreateFactoryWorktreeCheckpointOptions['kind'];
 }
 
 export interface CleanupFlowWorktreeOptions {
@@ -1709,7 +1710,7 @@ export class FactoryFlowService {
           worktreePath: flow.worktreePath,
           stage: parsedStage.data,
           iteration,
-          message: options.message,
+          kind: options.kind,
         });
 
         const checkpoint = FactoryFlowCheckpointSchema.parse({

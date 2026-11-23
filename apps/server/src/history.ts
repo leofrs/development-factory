@@ -6,13 +6,14 @@ import type { FactoryRequest, FactoryStageName } from '@development-factory/shar
 import { resolveFactoryArtifactsDirectory } from './artifacts.js';
 import { isImplementationReport } from './factory-development.js';
 import { isPrSummary } from './factory-pr.js';
-import { isReviewReport } from './factory-review.js';
+import { describeMissingReviewParts, isReviewReport } from './factory-review.js';
 import {
   FactoryStageArtifactError,
+  describeMissingStructuredReportParts,
   getFactoryStageSidecarPath,
+  normalizeStructuredMarkdownReport,
   readFactoryArtifactFile,
   readFactoryStageSidecar,
-  validateStructuredMarkdownReport,
 } from './factory-stage-runners.js';
 import { isTestReport } from './factory-tests.js';
 import { redactSecrets, redactSecretsInValue } from './secret-redaction.js';
@@ -278,28 +279,51 @@ const PLANNING_REPORT_SECTIONS = {
   tests: 'Plano de Testes',
 };
 
+const EARLY_STAGE_SECTION_ALIASES: Readonly<Record<string, string>> = {
+  'sintese central': TRIAGE_REPORT_SECTIONS.summary,
+  'sintese central (core)': TRIAGE_REPORT_SECTIONS.summary,
+  'detalhamento do cenario': TRIAGE_REPORT_SECTIONS.scenario,
+  'detalhamento do cenario (causa e expectativa)': TRIAGE_REPORT_SECTIONS.scenario,
+  'criterios de aceite': TRIAGE_REPORT_SECTIONS.acceptanceCriteria,
+  'escopo negativo': TRIAGE_REPORT_SECTIONS.negativeScope,
+  'escopo negativo (fora do escopo)': TRIAGE_REPORT_SECTIONS.negativeScope,
+  'pistas tecnicas': TRIAGE_REPORT_SECTIONS.technicalClues,
+  'pistas tecnicas citadas na task': TRIAGE_REPORT_SECTIONS.technicalClues,
+  'diagnostico tecnico': PLANNING_REPORT_SECTIONS.diagnosis,
+  'decisoes de design & contratos': PLANNING_REPORT_SECTIONS.decisions,
+  'decisoes de design e contratos': PLANNING_REPORT_SECTIONS.decisions,
+  'plano de alteracoes': PLANNING_REPORT_SECTIONS.changes,
+  'plano de alteracoes (arquivo por arquivo)': PLANNING_REPORT_SECTIONS.changes,
+  'cuidados de regressao': PLANNING_REPORT_SECTIONS.regression,
+  'plano de testes': PLANNING_REPORT_SECTIONS.tests,
+};
+
 function validateEarlyStageReport(
   content: string,
   title: string,
   sections: Readonly<Record<string, string>>,
 ): boolean {
-  const sectionTitles = new Set(Object.values(sections));
-  const normalizeTitle = (heading: string) =>
-    heading.replaceAll('**', '').trim().replace(/[.:]$/, '');
-  const normalized = content
-    .replace(/^# (.+)$/m, (_, heading: string) => `# ${normalizeTitle(heading)}`)
-    .replace(
-      /^#{2,6}[ \t]+(?:\d+\.[ \t]+)?(.+)$/gm,
-      (_, heading: string) => `## ${normalizeTitle(heading)}`,
-    )
-    .replace(
-      /^\d+\.[ \t]+\*\*([^*\r\n]+)\*\*[.:]?[ \t]*([^\r\n]*)/gm,
-      (line: string, heading: string, body: string) => {
-        const sectionTitle = normalizeTitle(heading);
-        return sectionTitles.has(sectionTitle) ? `## ${sectionTitle}\n${body}` : line;
-      },
-    );
-  return validateStructuredMarkdownReport(normalized, title, sections);
+  const normalized = normalizeStructuredMarkdownReport(
+    content,
+    title,
+    sections,
+    EARLY_STAGE_SECTION_ALIASES,
+  );
+  return describeMissingStructuredReportParts(normalized, title, sections).length === 0;
+}
+
+function describeMissingEarlyStageParts(
+  content: string,
+  title: string,
+  sections: Readonly<Record<string, string>>,
+): string[] {
+  const normalized = normalizeStructuredMarkdownReport(
+    content,
+    title,
+    sections,
+    EARLY_STAGE_SECTION_ALIASES,
+  );
+  return describeMissingStructuredReportParts(normalized, title, sections);
 }
 
 const REPORT_STAGE_HISTORY_CONFIG: Readonly<Record<FactoryStageName, StageHistoryConfig>> = {
@@ -375,12 +399,22 @@ export function validateFactoryStageArtifacts(
   reportPath: string,
   markdown = readFactoryStageMarkdown(stage, reportPath),
 ) {
-  if (!REPORT_STAGE_HISTORY_CONFIG[stage].validateReport(markdown.trim())) {
+  const trimmed = markdown.trim();
+  if (!REPORT_STAGE_HISTORY_CONFIG[stage].validateReport(trimmed)) {
+    const missing =
+      stage === 'triage'
+        ? describeMissingEarlyStageParts(trimmed, TRIAGE_REPORT_TITLE, TRIAGE_REPORT_SECTIONS)
+        : stage === 'planning'
+          ? describeMissingEarlyStageParts(trimmed, PLANNING_REPORT_TITLE, PLANNING_REPORT_SECTIONS)
+          : stage === 'review'
+            ? describeMissingReviewParts(trimmed)
+            : [];
+    const detail = missing.length > 0 ? ` — ausente/vazio: ${missing.join(', ')}` : '';
     throw new FactoryStageArtifactError(
       'FACTORY_MARKDOWN_INVALID',
       stage,
       reportPath,
-      'O relatório Markdown não contém o título e as seções obrigatórias',
+      `O relatório Markdown não contém o título e as seções obrigatórias${detail}`,
     );
   }
   return readFactoryStageSidecar(stage, reportPath);

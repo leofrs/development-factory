@@ -268,8 +268,7 @@ export function buildRestrictedRunnerArgs(config: RestrictedRunnerArgsConfig): s
     config.tools.join(','),
     '--allowedTools',
     config.allowed.join(','),
-    '--disallowedTools',
-    config.denied.join(','),
+    ...(config.denied.length > 0 ? ['--disallowedTools', config.denied.join(',')] : []),
   ];
 }
 
@@ -298,7 +297,7 @@ export function buildTriageAndPlanningRunnerArgs(
       ...(isTriage ? JIRA_READ_TOOLS : []),
       ...buildReportFileToolPermissions(reportPath),
     ],
-    denied: ['Edit(/**)'],
+    denied: [],
   });
 }
 
@@ -378,6 +377,109 @@ export async function readOptionalLatestStageDocument(
   }
 }
 
+/** Normaliza títulos de seção Markdown para comparação tolerante a formatação, numeração e acentos. */
+export function normalizeMarkdownHeadingKey(value: string): string {
+  return value
+    .replaceAll('**', '')
+    .replaceAll('__', '')
+    .replace(/`/g, '')
+    .trim()
+    .replace(/^(?:\d+[.)][ \t]+)+/, '')
+    .replace(/[.:]+$/, '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+}
+
+function resolveCanonicalMarkdownSection(
+  rawHeading: string,
+  sections: Readonly<Record<string, string>>,
+  aliases?: Readonly<Record<string, string>>,
+): string | null {
+  const key = normalizeMarkdownHeadingKey(rawHeading);
+  const canonical = aliases?.[key];
+  if (canonical && Object.values(sections).includes(canonical)) {
+    return canonical;
+  }
+  const exact = Object.values(sections).find(title => normalizeMarkdownHeadingKey(title) === key);
+  return exact ?? null;
+}
+
+/**
+ * Normaliza variações naturais de Markdown (BOM, frontmatter YAML, quebras CRLF, sufixos no título,
+ * níveis de cabeçalho, aliases e itens numerados em negrito) para os cabeçalhos canônicos da etapa.
+ */
+export function normalizeStructuredMarkdownReport(
+  content: string,
+  title: string,
+  sections: Readonly<Record<string, string>>,
+  aliases?: Readonly<Record<string, string>>,
+): string {
+  const stripped = content
+    .replace(/\r\n?/g, '\n')
+    .replace(/^\uFEFF/, '')
+    .replace(/^---\n[\s\S]*?\n---\n+/, '')
+    .trimStart();
+  const normalizedTitleKey = normalizeMarkdownHeadingKey(title);
+
+  return stripped
+    .replace(/^# +([^\n]+)$/m, (line: string, heading: string) => {
+      const key = normalizeMarkdownHeadingKey(heading);
+      if (
+        key === normalizedTitleKey ||
+        key.startsWith(`${normalizedTitleKey} `) ||
+        key.startsWith(`${normalizedTitleKey}:`) ||
+        key.startsWith(`${normalizedTitleKey}-`) ||
+        key.startsWith(`${normalizedTitleKey}—`) ||
+        key.startsWith(`${normalizedTitleKey}(`)
+      ) {
+        return `# ${title}`;
+      }
+      return line;
+    })
+    .replace(/^#{2,6}[ \t]+([^\n]+)$/gm, (line: string, heading: string) => {
+      const canonical = resolveCanonicalMarkdownSection(heading, sections, aliases);
+      return canonical ? `## ${canonical}` : line;
+    })
+    .replace(
+      /^\d+[.)][ \t]+\*\*([^*\r\n]+)\*\*[.:]?[ \t]*([^\r\n]*)/gm,
+      (line: string, heading: string, body: string) => {
+        const canonical = resolveCanonicalMarkdownSection(heading, sections, aliases);
+        return canonical ? `## ${canonical}\n${body}` : line;
+      },
+    );
+}
+
+/** Lista o título ou as seções obrigatórias ausentes/vazias de um relatório Markdown estruturado. */
+export function describeMissingStructuredReportParts(
+  normalizedContent: string,
+  title: string,
+  sections: Readonly<Record<string, string>>,
+  customValidators: Readonly<Partial<Record<string, (bodyLines: readonly string[]) => boolean>>> = {},
+): string[] {
+  const normalized = normalizedContent.replace(/\r\n?/g, '\n');
+  const [header, ...rawSections] = normalized.split(/^## /m);
+  const missing: string[] = [];
+  if (header?.split('\n')[0]?.trim() !== `# ${title}`) {
+    missing.push(`título "# ${title}"`);
+  }
+  for (const heading of Object.values(sections)) {
+    const validator = customValidators[heading];
+    const found = rawSections.some(section => {
+      const [sectionTitle, ...body] = section.split('\n');
+      if (sectionTitle?.trim() !== heading) {
+        return false;
+      }
+      return validator ? validator(body) : body.some(line => line.trim().length > 0);
+    });
+    if (!found) {
+      missing.push(heading);
+    }
+  }
+  return missing;
+}
+
 /** Valida título e seções obrigatórias de um relatório Markdown gerado por um runner da Factory. */
 export function validateStructuredMarkdownReport(
   content: string,
@@ -385,19 +487,5 @@ export function validateStructuredMarkdownReport(
   sections: Readonly<Record<string, string>>,
   customValidators: Readonly<Partial<Record<string, (bodyLines: readonly string[]) => boolean>>> = {},
 ): boolean {
-  const [header, ...rawSections] = content.split(/^## /m);
-  if (header?.split('\n')[0]?.trim() !== `# ${title}`) {
-    return false;
-  }
-
-  return Object.values(sections).every(heading =>
-    rawSections.some(section => {
-      const [sectionTitle, ...body] = section.split('\n');
-      if (sectionTitle?.trim() !== heading) {
-        return false;
-      }
-      const validator = customValidators[heading];
-      return validator ? validator(body) : body.some(line => line.trim().length > 0);
-    }),
-  );
+  return describeMissingStructuredReportParts(content, title, sections, customValidators).length === 0;
 }

@@ -1151,7 +1151,7 @@ export class SessionManager {
         await this.#factoryFlowService.createWorktreeCheckpoint(flowId, {
           stage,
           iteration: 0,
-          message: `Baseline inicial antes de ${RESTRICTED_RUNNER_STAGE_CONFIG[stage].label}`,
+          kind: 'baseline',
         });
         return this.#factoryFlowService.getFlow(flowId);
       }
@@ -1160,7 +1160,7 @@ export class SessionManager {
         await this.#factoryFlowService.createWorktreeCheckpoint(flowId, {
           stage,
           iteration: flowDetails.flow.iteration,
-          message: `Checkpoint de segurança antes de iniciar ${RESTRICTED_RUNNER_STAGE_CONFIG[stage].label} (iteração ${flowDetails.flow.iteration})`,
+          kind: 'before_stage',
         });
         return this.#factoryFlowService.getFlow(flowId);
       }
@@ -1192,7 +1192,7 @@ export class SessionManager {
         stage,
         iteration: normalizedIteration,
         sessionId: session.sessionId,
-        message: `Checkpoint automático após ${RESTRICTED_RUNNER_STAGE_CONFIG[stage].label} (iteração ${normalizedIteration})`,
+        kind: 'after_stage',
       });
       return true;
     } catch (error) {
@@ -1241,7 +1241,7 @@ export class SessionManager {
     if (stage === 'review') {
       const inputs = await readFactoryReviewInputs(flowDetails);
       return reportPath => ({
-        prompt: buildFactoryReviewPrompt({ ...inputs, task, reportPath }),
+        prompt: buildFactoryReviewPrompt({ ...inputs, task, reportPath, repositoryProfile }),
         runnerArgs: buildReviewRunnerArgs(reportPath),
       });
     }

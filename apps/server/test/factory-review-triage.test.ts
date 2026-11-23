@@ -49,6 +49,8 @@ function reviewMarkdown(verdictLine = 'Veredito: REPROVADO / REQUER AJUSTES'): s
     '- [BLOQUEANTE] src/auth.ts:14 token expirado não retorna 401.',
     '- [SUGESTÃO] src/auth.ts:28 extrair validação de header para helper.',
     '- [NIT] src/auth.ts:35 ajustar nome de variável local.',
+    '## Como Testar Manualmente',
+    '1. Enviar requisição com token expirado e confirmar resposta HTTP 401.',
     '## Parecer Final',
     verdictLine,
     '',

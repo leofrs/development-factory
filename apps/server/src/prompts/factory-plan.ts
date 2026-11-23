@@ -56,7 +56,7 @@ Você é um Engenheiro de Software Sênior especializado em análise de requisit
 
 ### Estrutura Obrigatória de Saída:
 
-Comece o relatório Markdown com \`# Documento de Entendimento do Problema\`.
+Comece o relatório Markdown na **primeira linha** (sem bloco \`---\` nem texto introdutório antes) com \`# Documento de Entendimento do Problema\` e inclua obrigatoriamente todas as seções 1 a 5 com estes títulos exatos:
 
 #### 1. Síntese Central (Core)
 Escreva **estritamente UMA única frase (um único ponto final)** seguindo o modelo aplicável:
@@ -72,10 +72,10 @@ Explique de forma objetiva:
 Liste em bullet points as condições objetivas e verificáveis que definem a entrega pronta (foco no comportamento do sistema e casos de teste esperados).
 
 #### 4. Escopo Negativo (Fora do Escopo)
-Liste explicitamente o que a task declara que NÃO deve ser feito agora (se houver).
+Liste explicitamente o que a task declara que NÃO deve ser feito agora. Se a task não declarar nada fora de escopo, escreva \`Nenhum especificado na task.\` — nunca omita esta seção nem a deixe vazia.
 
 #### 5. Pistas Técnicas Citadas na Task
-Liste arquivos, linhas, flags, tabelas/logs ou tasks relacionadas mencionadas na descrição ou comentários que servirão de ponto de partida para a investigação no código.
+Liste arquivos, linhas, flags, tabelas/logs ou tasks relacionadas mencionadas na descrição ou comentários que servirão de ponto de partida para a investigação no código. Se não houver pistas técnicas citadas, escreva \`Nenhuma pista técnica citada na task.\` — nunca omita esta seção nem a deixe vazia.
 
 #### 6. Bloqueadores e Ambiguidades (Ação Necessária)
 Liste apenas dúvidas não respondidas na task ou dependências técnicas que precisam ser verificadas no código/com o relator **antes** de escrever o plano de implementação. Se não houver, omita esta seção.

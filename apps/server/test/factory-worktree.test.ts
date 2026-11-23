@@ -366,10 +366,11 @@ test('createFactoryWorktreeCheckpoint cria commits de checkpoint, rollback resta
       worktreePath: provisioned.worktreePath,
       stage: 'development',
       iteration: 0,
-      message: 'Baseline inicial',
+      kind: 'baseline',
     });
     assert.equal(baseline.createdCommit, false);
     assert.equal(baseline.branchName, 'factory/prod-888');
+    assert.equal(baseline.message, 'Initial baseline before Development');
 
     // Iteração 1: altera arquivo rastreado e cria arquivo novo.
     writeFileSync(join(provisioned.worktreePath, 'app.ts'), 'export const version = 2;\n');
@@ -382,6 +383,11 @@ test('createFactoryWorktreeCheckpoint cria commits de checkpoint, rollback resta
     });
     assert.equal(cp1.createdCommit, true);
     assert.notEqual(cp1.commitSha, baseline.commitSha);
+    assert.equal(
+      cp1.message,
+      'Automatic checkpoint after Development (iteration 1)\n\n' +
+        '- Updated "app.ts".\n- Added "feature.ts".',
+    );
     assert.equal(
       execFileSync('git', ['status', '--porcelain'], { cwd: provisioned.worktreePath, encoding: 'utf8' }),
       '',

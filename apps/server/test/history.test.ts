@@ -152,6 +152,118 @@ for (const { stage, markdown } of [
   });
 }
 
+test('triagem aceita subtítulos internos, frontmatter e aliases naturais sem invalidar o relatório', context => {
+  const { repoDir } = createIsolatedHistoryEnv(context);
+  const states: string[] = [];
+  const history = createFactoryHistory(
+    { inputType: 'jira_url', value: 'https://empresa.atlassian.net/browse/PROD-2222', repoPath: repoDir },
+    state => states.push(state),
+    assert.fail,
+  );
+  writeFactoryStageSidecar(history.reportPath, 'triage');
+  writeFileSync(
+    history.reportPath,
+    [
+      '---',
+      'task: PROD-2222',
+      '---',
+      '',
+      '# Documento de Entendimento do Problema — PROD-2222',
+      '',
+      '#### 1. Síntese Central',
+      'Quando X ocorre, acontece Y, mas deveria acontecer Z.',
+      '',
+      '#### 2. Detalhamento do Cenário (Causa e Expectativa)',
+      '### Contexto, Causa e Impacto',
+      'Detalhes reais da causa.',
+      '### Comportamento Esperado',
+      'Detalhes reais do esperado.',
+      '',
+      '#### 3. Critérios de Aceite',
+      '- CA1: Validar o cenário.',
+      '',
+      '#### 4. Escopo Negativo',
+      'Nenhum especificado na task.',
+      '',
+      '#### 5. Pistas Técnicas',
+      'Nenhuma pista técnica citada na task.',
+    ].join('\r\n'),
+  );
+
+  assert.equal(history.finish('concluído'), undefined);
+  assert.deepEqual(states, ['saved']);
+});
+
+test('code review aceita subtítulos internos, frontmatter e aliases naturais e diagnostica partes ausentes', context => {
+  const { repoDir } = createIsolatedHistoryEnv(context);
+  const states: string[] = [];
+  const messages: string[] = [];
+  const validHistory = createFactoryHistory(
+    {
+      inputType: 'jira_url',
+      value: 'https://stays.atlassian.net/browse/PROD-2222',
+      repoPath: repoDir,
+      stage: 'review',
+    },
+    state => states.push(state),
+    message => messages.push(message),
+  );
+  writeFactoryStageSidecar(validHistory.reportPath, 'review');
+  writeFileSync(
+    validHistory.reportPath,
+    [
+      '---',
+      'task: PROD-2222',
+      '---',
+      '',
+      '# Relatório de Code Review — PROD-2222',
+      '',
+      '#### 1. Resumo Executivo',
+      '### Auditoria de Requisitos e Escopo',
+      'Critérios CA1 e CA2 atendidos.',
+      '',
+      '#### 2. Apontamentos',
+      'Nenhum apontamento bloqueante.',
+      '',
+      '#### 3. Roteiro de Validação Manual',
+      '1. Subir o servidor com `npm run dev` e validar CA1 e CA2.',
+      '',
+      '#### 4. Veredito Final',
+      '> **Veredito:** APROVADO PARA PR (nenhum item reprovado)',
+    ].join('\r\n'),
+  );
+
+  assert.equal(validHistory.finish('concluído'), undefined);
+  assert.deepEqual(states, ['saved']);
+  assert.deepEqual(messages, []);
+
+  const invalidMessages: string[] = [];
+  const invalidHistory = createFactoryHistory(
+    {
+      inputType: 'jira_url',
+      value: 'https://stays.atlassian.net/browse/PROD-2222',
+      repoPath: repoDir,
+      stage: 'review',
+    },
+    state => states.push(state),
+    message => invalidMessages.push(message),
+  );
+  writeFactoryStageSidecar(invalidHistory.reportPath, 'review');
+  writeFileSync(
+    invalidHistory.reportPath,
+    ['# Relatório de Code Review', '## Resumo Executivo', 'Resumo preenchido.'].join('\n'),
+  );
+
+  const error = invalidHistory.finish('concluído');
+  assert.equal(error?.code, 'FACTORY_MARKDOWN_INVALID');
+  assert.match(
+    error.message,
+    /ausente\/vazio: Pontos Encontrados, Como Testar Manualmente, Parecer Final/,
+  );
+  assert.deepEqual(states, ['saved', 'incomplete']);
+  assert.deepEqual(invalidMessages, [error.message]);
+});
+
 test('diagnostica o campo da etapa e chaves extras com o caminho completo no JSON', context => {
   const { repoDir } = createIsolatedHistoryEnv(context);
   const states: string[] = [];

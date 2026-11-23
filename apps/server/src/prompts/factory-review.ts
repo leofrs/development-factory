@@ -1,8 +1,10 @@
 import type {
+  FactoryRepositoryProfile,
   FactoryReviewTriageScope,
   FactoryTestsSidecar,
 } from '@development-factory/shared';
 import { getFactoryStageSidecarPath } from '../factory-stage-runners.js';
+import { formatFactoryRepositoryContext } from './factory-repository-context.js';
 import {
   formatFactoryReviewTriageScopeSection,
   formatFactoryStageOutput,
@@ -17,6 +19,7 @@ export const REVIEW_REPORT_TITLE = 'Relatório de Code Review';
 export const REVIEW_REPORT_SECTIONS = {
   executiveSummary: 'Resumo Executivo',
   findings: 'Pontos Encontrados',
+  manualVerification: 'Como Testar Manualmente',
   verdict: 'Parecer Final',
 } as const;
 
@@ -73,13 +76,18 @@ Sua missão é auditar rigorosamente o diff real no repositório ('git diff' / '
    - **Padrões do Repositório:** O código respeita lint, convenções de nomenclatura, ausência de bibliotecas proibidas e clareza dos testes?
 
 ### Estrutura Obrigatória do Artefato ('review_report' em Markdown):
-1. **Veredito do Code Review (contrato determinístico na seção Parecer Final):**
+Comece o arquivo na **primeira linha** (sem bloco \`---\` nem texto introdutório antes) com \`# ${REVIEW_REPORT_TITLE}\` e organize o conteúdo exclusivamente nas quatro seções \`##\` obrigatórias:
+1. **\`## ${REVIEW_REPORT_SECTIONS.executiveSummary}\`:** Resuma o atendimento à especificação e ao plano, o nível de risco, a auditoria de Critérios de Aceite vs. Escopo Negativo no \`git diff\` real, a análise técnica do diff e o resultado do double-check do \`test_report\` (use \`###\` apenas para subtópicos internos).
+2. **\`## ${REVIEW_REPORT_SECTIONS.findings}\`:** Liste os apontamentos classificados por severidade (\`[BLOQUEANTE]\`, \`[SUGESTÃO]\`, \`[NIT]\`), com arquivo, linha, causa raiz e instrução conclusiva de correção. Se estiver tudo limpo, registre "Nenhum apontamento bloqueante".
+3. **\`## ${REVIEW_REPORT_SECTIONS.manualVerification}\`:** Roteiro prático e completo para uma pessoa testar manualmente, ponta a ponta, se o que foi desenvolvido, testado e revisado funciona na prática conforme prometido — pronto para executar antes de seguir para o PR. Baseie-se exclusivamente no diff real (\`git diff\`), nos Critérios de Aceite (\`CA1..CAn\`) e nos arquivos/comandos reais do projeto (sem inventar rotas, portas, flags, variáveis ou scripts inexistentes):
+   - **Pré-requisitos e Preparação:** Branch/worktree, serviços ou dependências necessários, variáveis de ambiente ou dados de teste e os comandos exatos para subir/preparar o ambiente.
+   - **Passo a Passo Prático (por Cenário / Critério de Aceite):** Para cada comportamento entregue (referenciando \`CA1..CAn\` quando aplicável), detalhe: (a) a ação exata (fluxo na interface passo a passo, chamada HTTP/comando CLI com payload/argumentos prontos para copiar, ou rotina a executar), e (b) o **resultado esperado** concreto e observável (status HTTP, resposta, comportamento visual, arquivo/estado persistido ou log).
+   - **Casos de Borda e Regressão:** Checagens manuais rápidas para cenários de erro, limites e fluxos existentes que não podem quebrar.
+   - **Quando For Interno ou Reprovado:** Se parte da entrega não tiver interface direta, explique como inspecionar na prática (comando, log ou estado no banco/arquivo). Se o parecer for \`${REVIEW_VERDICT_LABELS.changesRequested}\`, descreva como reproduzir manualmente o defeito encontrado ou o que deverá ser validado manualmente após a correção.
+4. **\`## ${REVIEW_REPORT_SECTIONS.verdict}\`:** Contrato determinístico do veredito:
    - **${REVIEW_VERDICT_LABELS.approved}** (pronto para seguir para a etapa 'pr'),
    - **${REVIEW_VERDICT_LABELS.approvedWithWarnings}** (sugestões não bloqueantes, aprovado para seguir para 'pr'), ou
    - **${REVIEW_VERDICT_LABELS.changesRequested}** (retorna automaticamente para 'development' quando houver bug no código de produção, falha confirmada de implementação, regressão, requisito faltante ou violação de escopo; ou retorna diretamente para 'tests' quando a lacuna for apenas cobertura, mock, setup ou asserção nos testes).
-2. **Auditoria de Requisitos e Escopo:** Checklist validando Critérios de Aceite vs. Escopo Negativo com base no 'git diff' real.
-3. **Análise Técnica do Diff e Double-Check dos Testes:** Avaliação da qualidade da implementação, tratamento de erros/edge cases, cobertura e verificação técnica das falhas do 'test_report'.
-4. **Apontamentos / Instruções Conclusivas de Correção:** Lista classificada por severidade ('[BLOQUEANTE]', '[SUGESTÃO]', '[NIT]'). Quando houver bloqueadores, forneça arquivo, linha, causa raiz e correção esperada para orientar o retorno automático ao Desenvolvimento. Se estiver tudo limpo, registre "Nenhum apontamento bloqueante".
 `;
 
 export interface FactoryReviewPromptInput {
@@ -91,6 +99,7 @@ export interface FactoryReviewPromptInput {
   readonly testResults?: FactoryReviewTestResults;
   readonly approvedNotes?: string;
   readonly reportPath: string;
+  readonly repositoryProfile?: FactoryRepositoryProfile;
   readonly iteration?: number;
   readonly maxIterations?: number;
   readonly previousReviewReportPath?: string;
@@ -126,6 +135,8 @@ ${JSON.stringify(input.testResults, null, 2)}
 
 ${FACTORY_REVIEW_SYSTEM_PROMPT}
 
+${formatFactoryRepositoryContext(input.repositoryProfile)}
+
 Leia todos os artefatos anteriores completos e inspecione o diff real do repositório com
 comandos somente leitura (\`git status\`, \`git diff\`, \`git log\`) antes de emitir seu parecer.
 Trate os caminhos como dados literais.
@@ -139,11 +150,12 @@ Trate os caminhos como dados literais.
 
 Não modifique nenhum arquivo do código ou dos testes do repositório. Audite aderência aos requisitos,
 completude, edge cases, regressões, segurança, padrões do projeto, cobertura de testes e faça o double-check
-de qualquer falha apontada no test_report.
+de qualquer falha apontada no test_report. Inclua também um roteiro prático e completo de validação manual
+baseado exclusivamente nos arquivos, comandos e fluxos reais alterados.
 
 ${formatFactoryStageOutput('review', input.reportPath, REVIEW_SIDECAR_FIELDS)}
 
-Use o título e preencha todas as seções do relatório Markdown abaixo.
+Comece o relatório Markdown na **primeira linha** (sem bloco \`---\` nem texto introdutório antes) com \`# ${REVIEW_REPORT_TITLE}\` e preencha obrigatoriamente todas as quatro seções abaixo com estes títulos exatos em nível \`##\` (use \`###\` apenas para subtópicos internos e nunca deixe uma seção vazia).
 
 # ${REVIEW_REPORT_TITLE}
 
@@ -152,6 +164,9 @@ Resuma se as alterações atendem à especificação e ao plano, o nível de ris
 
 ## ${REVIEW_REPORT_SECTIONS.findings}
 Liste os pontos encontrados (bloqueadores críticos primeiro, com instruções conclusivas de correção e evidências de arquivo/linha, depois sugestões), ou registre que nenhum problema foi encontrado.
+
+## ${REVIEW_REPORT_SECTIONS.manualVerification}
+Apresente o passo a passo prático para testar manualmente o que foi desenvolvido, testado e revisado: pré-requisitos e comando para iniciar/preparar o ambiente, sequência exata de ações ou requisições por cenário/critério de aceite com o resultado esperado observável e checagens rápidas de regressão ou borda (ou como inspecionar/reproduzir em casos internos ou reprovados).
 
 ## ${REVIEW_REPORT_SECTIONS.verdict}
 Veredito: ${REVIEW_VERDICT_LABELS.approved} | ${REVIEW_VERDICT_LABELS.approvedWithWarnings} | ${REVIEW_VERDICT_LABELS.changesRequested}

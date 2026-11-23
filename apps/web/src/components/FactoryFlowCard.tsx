@@ -8,7 +8,6 @@ import {
   getFactoryStageStatePresentation,
   getFactoryStageStep,
 } from '../utils/factory-flow-status.js';
-import { FactoryLiveTerminalButton } from './FactoryLiveTerminalButton.js';
 import { FactoryStageActivity } from './FactoryStageActivity.js';
 
 interface FactoryFlowCardProps {
@@ -18,7 +17,6 @@ interface FactoryFlowCardProps {
   actionPending: boolean;
   actionError?: string;
   onOpenRoadmap: () => void;
-  onOpenTerminal: () => boolean;
   onStop: () => void;
   onRerun: () => void;
 }
@@ -75,7 +73,6 @@ export function FactoryFlowCard({
   actionPending,
   actionError,
   onOpenRoadmap,
-  onOpenTerminal,
   onStop,
   onRerun,
 }: FactoryFlowCardProps) {
@@ -210,13 +207,6 @@ export function FactoryFlowCard({
       )}
 
       <div className="flex flex-wrap items-center gap-2 border-t border-line-subtle pt-3">
-        {runningSession && (
-          <FactoryLiveTerminalButton
-            key={runningSession.sessionId}
-            title={flow.title}
-            onOpen={onOpenTerminal}
-          />
-        )}
         <button
           type="button"
           onClick={onOpenRoadmap}

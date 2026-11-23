@@ -269,7 +269,7 @@ console.log('https://github.com/org/development-factory/pull/88');
   writeFactoryStageSidecar(testsPath, 'tests');
   writeFileSync(
     reviewPath,
-    '# Relatório de Code Review\n## Resumo Executivo\nOk\n## Pontos Encontrados\nNenhum\n## Parecer Final\nVeredito: APROVADO PARA PR\n',
+    '# Relatório de Code Review\n## Resumo Executivo\nOk\n## Pontos Encontrados\nNenhum\n## Como Testar Manualmente\n1. Executar e conferir comportamento.\n## Parecer Final\nVeredito: APROVADO PARA PR\n',
   );
   writeFactoryStageSidecar(reviewPath, 'review');
   writeFileSync(
@@ -514,7 +514,7 @@ console.log('https://gitlab.com/org/factory/-/merge_requests/19');
   writeFactoryStageSidecar(devPath, 'development');
   writeFileSync(testsPath, '# Relatório de Testes\n## Arquivos de teste alterados\n- a.test.ts\n## Comandos executados\n- npm test\n## Resultados e cobertura\nPASS\n');
   writeFactoryStageSidecar(testsPath, 'tests');
-  writeFileSync(reviewPath, '# Relatório de Code Review\n## Resumo Executivo\nOk\n## Pontos Encontrados\nNenhum\n## Parecer Final\nVeredito: APROVADO PARA PR\n');
+  writeFileSync(reviewPath, '# Relatório de Code Review\n## Resumo Executivo\nOk\n## Pontos Encontrados\nNenhum\n## Como Testar Manualmente\n1. Executar e conferir comportamento.\n## Parecer Final\nVeredito: APROVADO PARA PR\n');
   writeFactoryStageSidecar(reviewPath, 'review');
   writeFileSync(prPath, '# Resumo do Pull Request\n## Resumo das Alterações\nOk.\n## Validação e Evidências\n| ID | Critério | Status | Evidência |\n| --- | --- | --- | --- |\n| CA1 | Ok | Atendido | PASS |\n## Dados do Pull Request\nTítulo: feat: gitlab mr\n');
   writeFactoryStageSidecar(prPath, 'pr', {

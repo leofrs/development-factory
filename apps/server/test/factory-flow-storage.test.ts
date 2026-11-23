@@ -1064,7 +1064,7 @@ test('migration v10 persiste revisão humana do PR (Etapa 2 do Bloco 06) com val
     writeFactoryStageSidecar(testsPath, 'tests');
     writeFileSync(
       reviewPath,
-      '# Relatório de Code Review\n## Resumo Executivo\nOk\n## Pontos Encontrados\nNenhum\n## Parecer Final\nVeredito: APROVADO PARA PR\n',
+      '# Relatório de Code Review\n## Resumo Executivo\nOk\n## Pontos Encontrados\nNenhum\n## Como Testar Manualmente\n1. Executar a aplicação e validar o fluxo.\n## Parecer Final\nVeredito: APROVADO PARA PR\n',
     );
     writeFactoryStageSidecar(reviewPath, 'review');
     writeFileSync(
@@ -1301,7 +1301,7 @@ test('migration v12 e getMetrics agregam lead time, 1º ciclo, motivos de reprov
             : 'APROVADO PARA PR';
       writeFileSync(
         mdPath,
-        `# Relatório de Code Review\n## Resumo Executivo\nRevisão.\n## Pontos Encontrados\nDetalhes.\n## Parecer Final\nVeredito: ${verdictText}\n`,
+        `# Relatório de Code Review\n## Resumo Executivo\nRevisão.\n## Pontos Encontrados\nDetalhes.\n## Como Testar Manualmente\n1. Validar manualmente no navegador.\n## Parecer Final\nVeredito: ${verdictText}\n`,
       );
       writeFactoryStageSidecar(mdPath, 'review', reviewOverride);
     } else {

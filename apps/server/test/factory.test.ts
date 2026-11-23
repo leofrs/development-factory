@@ -62,6 +62,7 @@ import {
 import { loadFactoryRepositoryProfile } from '../src/factory-repository-profile.js';
 import {
   buildReviewRunnerArgs,
+  describeMissingReviewParts,
   isReviewReport,
   parseReviewReturnTarget,
   parseReviewVerdict,
@@ -346,8 +347,6 @@ test('o runner da Triagem restringe o Jira a consultas e grava somente os artefa
       'Edit(//tmp/factory artifacts/flow-1/spec.json)',
       'Write(//tmp/factory artifacts/flow-1/spec.json)',
     ].join(','),
-    '--disallowedTools',
-    'Edit(/**)',
   ]);
 });
 
@@ -377,8 +376,6 @@ test('o runner do Planejamento lê o worktree e grava apenas o plano e o sidecar
       'Edit(//tmp/factory artifacts/flow-1/plan.json)',
       'Write(//tmp/factory artifacts/flow-1/plan.json)',
     ].join(','),
-    '--disallowedTools',
-    'Edit(/**)',
   ]);
 });
 
@@ -542,15 +539,33 @@ test('prompts, runners e validadores das Etapas 04 a 06 seguem contratos e permi
     testResults: reviewTestResults,
     approvedNotes: 'Auditar exposição de tokens nos logs',
     reportPath: reviewReportPath,
+    repositoryProfile: {
+      baseBranch: 'main',
+      branchPattern: 'factory/{slug}',
+      stack: ['Node.js', 'TypeScript'],
+      commands: {
+        typecheck: ['npm', 'run', 'typecheck'],
+        lint: null,
+        test: ['npm', 'test'],
+        coverage: null,
+      },
+      protectedPaths: [],
+      architectureRules: [],
+      prTemplate: null,
+    },
   });
   assert(reviewPrompt.includes(FACTORY_REVIEW_SYSTEM_PROMPT));
   assert(reviewPrompt.includes('/tmp/factory-artifacts/flow-1/tests-report.md'));
   assert(reviewPrompt.includes(JSON.stringify(reviewTestResults, null, 2)));
   assert(reviewPrompt.includes('Auditar exposição de tokens nos logs'));
+  assert(reviewPrompt.includes('"Node.js"'));
   assert(reviewPrompt.includes(`# ${REVIEW_REPORT_TITLE}`));
+  assert.match(reviewPrompt, /Comece o relatório Markdown na \*\*primeira linha\*\*/);
   for (const heading of Object.values(REVIEW_REPORT_SECTIONS)) {
     assert(reviewPrompt.includes(`## ${heading}`));
   }
+  assert.ok(reviewPrompt.includes('Pré-requisitos e Preparação'));
+  assert.ok(reviewPrompt.includes('Passo a Passo Prático'));
   assertFactoryStageOutput(reviewPrompt, 'review', reviewReportPath, [
     'verdict',
     'returnTarget',
@@ -574,6 +589,7 @@ test('prompts, runners e validadores das Etapas 04 a 06 seguem contratos e permi
 
   const reviewArgs = buildReviewRunnerArgs(reviewReportPath);
   assert(reviewArgs.includes('--restricted'));
+  assert.equal(reviewArgs[reviewArgs.indexOf('--add-dir') + 1], '/tmp/factory-artifacts/flow-1');
   assert.equal(reviewArgs[reviewArgs.indexOf('--tools') + 1], 'Read,Glob,Grep,Edit,Write,Bash');
   const reviewAllowed = reviewArgs[reviewArgs.indexOf('--allowedTools') + 1] ?? '';
   assert(reviewAllowed.includes('Bash(git diff*)'));
@@ -592,6 +608,8 @@ test('prompts, runners e validadores das Etapas 04 a 06 seguem contratos e permi
     'Alterações aderentes aos requisitos.',
     `## ${REVIEW_REPORT_SECTIONS.findings}`,
     'Nenhum bloqueador crítico encontrado.',
+    `## ${REVIEW_REPORT_SECTIONS.manualVerification}`,
+    '1. Iniciar o servidor com `npm run dev` e validar o fluxo no navegador.',
     `## ${REVIEW_REPORT_SECTIONS.verdict}`,
     'Aprovado para PR.',
   ].join('\n');
@@ -599,12 +617,28 @@ test('prompts, runners e validadores das Etapas 04 a 06 seguem contratos e permi
   assert.equal(parseReviewVerdict(validReviewReport), 'approved');
   assert.equal(isReviewReport(`# ${REVIEW_REPORT_TITLE}\n\nIncompleto.`), false);
 
+  const missingManualVerificationReport = [
+    `# ${REVIEW_REPORT_TITLE}`,
+    `## ${REVIEW_REPORT_SECTIONS.executiveSummary}`,
+    'Alterações aderentes aos requisitos.',
+    `## ${REVIEW_REPORT_SECTIONS.findings}`,
+    'Nenhum bloqueador crítico encontrado.',
+    `## ${REVIEW_REPORT_SECTIONS.verdict}`,
+    `Veredito: ${REVIEW_VERDICT_LABELS.approved}`,
+  ].join('\n');
+  assert.equal(isReviewReport(missingManualVerificationReport), false);
+  assert.deepEqual(describeMissingReviewParts(missingManualVerificationReport), [
+    REVIEW_REPORT_SECTIONS.manualVerification,
+  ]);
+
   const approvedWithWarningsReport = [
     `# ${REVIEW_REPORT_TITLE}`,
     `## ${REVIEW_REPORT_SECTIONS.executiveSummary}`,
     'Aprovado com pequenas sugestões.',
     `## ${REVIEW_REPORT_SECTIONS.findings}`,
     '- [SUGESTÃO] Extrair helper.',
+    `## ${REVIEW_REPORT_SECTIONS.manualVerification}`,
+    '1. Executar o comando da feature e conferir o resultado esperado.',
     `## ${REVIEW_REPORT_SECTIONS.verdict}`,
     `Veredito: ${REVIEW_VERDICT_LABELS.approvedWithWarnings}`,
     'Sem bloqueadores críticos.',
@@ -618,6 +652,8 @@ test('prompts, runners e validadores das Etapas 04 a 06 seguem contratos e permi
     'Falha confirmada no double-check dos testes.',
     `## ${REVIEW_REPORT_SECTIONS.findings}`,
     '- [BLOQUEANTE] src/jwt.ts:14 retorna token expirado.',
+    `## ${REVIEW_REPORT_SECTIONS.manualVerification}`,
+    '1. Reproduzir enviando token expirado para o endpoint protegido e observar status 500 em vez de 401.',
     `## ${REVIEW_REPORT_SECTIONS.verdict}`,
     `Veredito: ${REVIEW_VERDICT_LABELS.changesRequested}`,
     'Alvo de retorno: development',
@@ -633,6 +669,8 @@ test('prompts, runners e validadores das Etapas 04 a 06 seguem contratos e permi
     'Implementação íntegra; falta cobertura de caso de borda nos testes.',
     `## ${REVIEW_REPORT_SECTIONS.findings}`,
     '- [BLOQUEANTE] test/jwt.test.ts:28 falta mock de relógio expirado.',
+    `## ${REVIEW_REPORT_SECTIONS.manualVerification}`,
+    '1. Enviar token expirado e confirmar HTTP 401 manualmente; após ajustar o teste, validar `npm test`.',
     `## ${REVIEW_REPORT_SECTIONS.verdict}`,
     `Veredito: ${REVIEW_VERDICT_LABELS.changesRequested}`,
     'Alvo de retorno: tests',
@@ -649,11 +687,52 @@ test('prompts, runners e validadores das Etapas 04 a 06 seguem contratos e permi
     'Resumo.',
     `## ${REVIEW_REPORT_SECTIONS.findings}`,
     'Pontos.',
+    `## ${REVIEW_REPORT_SECTIONS.manualVerification}`,
+    'Passos.',
     `## ${REVIEW_REPORT_SECTIONS.verdict}`,
     'Veredito: APROVADO PARA PR ou REPROVADO / REQUER AJUSTES',
   ].join('\n');
   assert.equal(parseReviewVerdict(ambiguousReviewReport), null);
   assert.equal(isReviewReport(ambiguousReviewReport), false);
+
+  const normalizedReviewReport = [
+    '\uFEFF---',
+    'task: PROD-2222',
+    '---',
+    '',
+    `# ${REVIEW_REPORT_TITLE} — PROD-2222`,
+    '',
+    '#### 1. **Resumo Executivo**',
+    '### Auditoria de Requisitos e Escopo',
+    'Todos os critérios atendidos.',
+    '',
+    '#### 2. Apontamentos',
+    'Nenhum apontamento bloqueante.',
+    '',
+    '#### 3. Roteiro de Teste Manual',
+    '1. Rodar `npm run dev` e conferir resposta no navegador.',
+    '',
+    '#### 4. Veredito Final',
+    '> **Veredito:** APROVADO PARA PR (nenhum item reprovado)',
+  ].join('\r\n');
+  assert.equal(isReviewReport(normalizedReviewReport), true);
+  assert.equal(parseReviewVerdict(normalizedReviewReport), 'approved');
+
+  const normalizedRejectedReviewReport = [
+    `# ${REVIEW_REPORT_TITLE}: PROD-2222`,
+    '1. **Resumo**',
+    'Regressão identificada no diff.',
+    '2. **Instruções Conclusivas de Correção**',
+    '- [BLOQUEANTE] src/jwt.ts:14 validar expiração.',
+    '3. **Validação Manual**',
+    'Reproduzir enviando requisição com token expirado.',
+    '4. **Parecer Final**',
+    '> **Veredito:** REPROVADO / REQUER AJUSTES',
+    '> **Alvo de retorno:** development',
+  ].join('\n');
+  assert.equal(isReviewReport(normalizedRejectedReviewReport), true);
+  assert.equal(parseReviewVerdict(normalizedRejectedReviewReport), 'changes_requested');
+  assert.equal(parseReviewReturnTarget(normalizedRejectedReviewReport), 'development');
 
   const developmentReportPath = '/tmp/factory-artifacts/flow-1/dev-2.md';
   const reentryDevPrompt = buildFactoryDevelopmentPrompt({
@@ -1185,6 +1264,8 @@ test('Etapa 1 do Bloco 06 não possui placeholders, bloqueia publicação autôn
       'Aprovado com ressalvas não bloqueantes.',
       `## ${REVIEW_REPORT_SECTIONS.findings}`,
       '- [SUGESTÃO] src/auth.ts:12 extrair helper de TTL.\n- [NIT] src/auth.ts:30 ajustar comentário.',
+      `## ${REVIEW_REPORT_SECTIONS.manualVerification}`,
+      '1. Executar o fluxo autenticado e confirmar geração e renovação do token.',
       `## ${REVIEW_REPORT_SECTIONS.verdict}`,
       `Veredito: ${REVIEW_VERDICT_LABELS.approvedWithWarnings}`,
     ].join('\n'),

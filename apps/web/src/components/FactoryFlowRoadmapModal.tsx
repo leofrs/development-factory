@@ -66,7 +66,6 @@ import { FactoryFlowFindingsPanel } from './FactoryFlowFindingsPanel.js';
 import { FactoryFlowIterationsPanel } from './FactoryFlowIterationsPanel.js';
 import { FactoryFlowPrPanel } from './FactoryFlowPrPanel.js';
 import { FactoryFlowTraceabilityPanel } from './FactoryFlowTraceabilityPanel.js';
-import { FactoryLiveTerminalButton } from './FactoryLiveTerminalButton.js';
 import {
   FactoryPlanningGatePanel,
   createPlanningGateDrafts,
@@ -81,7 +80,6 @@ interface FactoryFlowRoadmapModalProps {
   runningSession?: BackgroundSessionSummary;
   initialDetails?: FactoryFlowDetails;
   onClose: () => void;
-  onOpenFlowTerminal: (flowId: string) => boolean;
   onAdvanceFlowStage: (
     flowId: string,
     options?: {
@@ -275,7 +273,6 @@ export function FactoryFlowRoadmapModal({
   runningSession,
   initialDetails,
   onClose,
-  onOpenFlowTerminal,
   onAdvanceFlowStage,
   onRerunFlowStage,
   onReturnFlowStage,
@@ -1156,17 +1153,8 @@ export function FactoryFlowRoadmapModal({
                               canRerunCurrent ||
                               canAdvanceCurrent ||
                               canReturnFromReview ||
-                              stageSession ||
                               canStopCurrent) && (
                               <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-line-subtle pt-3">
-                                {stageSession && (
-                                  <FactoryLiveTerminalButton
-                                    key={stageSession.sessionId}
-                                    title={flow.title}
-                                    onOpen={() => onOpenFlowTerminal(flow.id)}
-                                    onOpened={closeRoadmap}
-                                  />
-                                )}
                                 {stageMarkdownPath && (
                                   <button
                                     type="button"

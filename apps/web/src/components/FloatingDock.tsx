@@ -28,7 +28,6 @@ interface FloatingDockProps {
   loadingFactoryFlows?: boolean;
   factoryFlowsError?: string | null;
   onOpenTerminal: BackgroundOperationsState['openTerminal'];
-  onOpenFlowTerminal: (flowId: string) => boolean;
   onOpenFlowRoadmap?: (flowId: string) => void;
   onViewReport: (reportPath: string) => void;
   onStopSession?: (sessionId: string) => Promise<BackgroundSessionSummary>;
@@ -53,7 +52,6 @@ export function FloatingDock({
   loadingFactoryFlows,
   factoryFlowsError,
   onOpenTerminal,
-  onOpenFlowTerminal,
   onOpenFlowRoadmap,
   onViewReport,
   onStopSession,
@@ -145,7 +143,6 @@ export function FloatingDock({
             loadingFactoryFlows={loadingFactoryFlows}
             factoryFlowsError={factoryFlowsError}
             onOpenTerminal={onOpenTerminal}
-            onOpenFlowTerminal={onOpenFlowTerminal}
             onOpenFlowRoadmap={onOpenFlowRoadmap}
             onViewReport={onViewReport}
             onStopSession={onStopSession}

@@ -69,7 +69,6 @@ export default function App() {
     retryPrJiraSync,
     cancelFlow,
     openTerminal,
-    openFlowTerminal,
     minimizeTerminal,
     bindActiveSessionId,
     stopSession,
@@ -174,10 +173,6 @@ export default function App() {
     ? (factoryFlows.find(item => item.id === roadmapFlowId) ?? null)
     : null;
 
-  function openLiveFlowTerminal(flowId: string): boolean {
-    return openFlowTerminal(flowId, { liveOnly: true });
-  }
-
   return (
     <div className="min-h-screen bg-page text-primary">
       {view === 'factory' ? (
@@ -195,7 +190,6 @@ export default function App() {
             setConfiguringFactoryTask(true);
           }}
           onOpenFlowRoadmap={setRoadmapFlowId}
-          onOpenFlowTerminal={openLiveFlowTerminal}
           onCancelFlow={cancelFlow}
           onRerunFlowStage={rerunStage}
         />
@@ -269,7 +263,6 @@ export default function App() {
       <NotificationToastCenter
         notifications={notifications}
         onOpenTerminal={openTerminal}
-        onOpenFlowTerminal={openFlowTerminal}
         onViewReport={path => setViewingMarkdownPath(path)}
         onDismiss={dismissNotification}
         onClearAll={clearAllNotifications}
@@ -289,7 +282,6 @@ export default function App() {
         factoryFlowsError={factoryFlowsError}
         onOpenTerminal={openTerminal}
         onOpenFlowRoadmap={setRoadmapFlowId}
-        onOpenFlowTerminal={openLiveFlowTerminal}
         onViewReport={path => setViewingMarkdownPath(path)}
         onStopSession={stopSession}
         onCancelFlow={cancelFlow}
@@ -351,7 +343,6 @@ export default function App() {
           flow={roadmapFlow}
           runningSession={getRunningFactorySession(roadmapFlow, sessionsById)}
           onClose={() => setRoadmapFlowId(null)}
-          onOpenFlowTerminal={openLiveFlowTerminal}
           onAdvanceFlowStage={async (flowId, options) => {
             await advanceFlowStage(flowId, {
               startSession: true,

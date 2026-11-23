@@ -1,7 +1,15 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -82,6 +90,41 @@ async function setUpFlow(context: TestContext) {
 
   return { root, repoPath, worktreePath, flow, task, factoryFlowService, baseUrl, get, checkpoint };
 }
+
+test('checkpoint Git descreve alterações do índice e persiste o corpo de até 555 caracteres', async context => {
+  const { worktreePath, flow, factoryFlowService, checkpoint } = await setUpFlow(context);
+  git(worktreePath, 'config', 'commit.cleanup', 'strip');
+  git(worktreePath, 'config', 'core.commentChar', '-');
+  renameSync(join(worktreePath, 'remove.txt'), join(worktreePath, 'renamed\nnotes.txt'));
+  unlinkSync(join(worktreePath, '.gitignore'));
+  writeFileSync(join(worktreePath, 'code.ts'), 'const version = "checkpoint";\n');
+  git(worktreePath, 'add', '--', 'code.ts');
+
+  const addedFiles = 16;
+  for (let index = 0; index < addedFiles; index += 1) {
+    const name = `test-${String(index).padStart(2, '0')}-regression.test.ts`;
+    writeFileSync(join(worktreePath, name), 'export {};\n');
+  }
+
+  const created = await checkpoint(2);
+  const message = git(worktreePath, 'show', '-s', '--format=%B', created.commitSha).trimEnd();
+  const [title, body] = message.split('\n\n');
+  assert.equal(title, 'Automatic checkpoint after Tests (iteration 2)');
+  assert.ok(body && body.length <= 555);
+  const bullets = body.split('\n');
+  assert.ok(bullets.every(bullet => bullet.startsWith('- ')));
+  assert.ok(bullets.includes('- Removed ".gitignore".'));
+  assert.ok(bullets.includes('- Updated "code.ts".'));
+  assert.ok(bullets.includes('- Renamed "remove.txt" to "renamed\\nnotes.txt".'));
+  assert.ok(bullets.includes('- Added "test-00-regression.test.ts".'));
+  const remaining = /^- (\d+) additional files changed\.$/.exec(bullets.at(-1) ?? '');
+  assert.ok(remaining);
+  assert.equal(bullets.length - 1 + Number(remaining[1]), addedFiles + 3);
+
+  assert.ok(message.length > 500);
+  assert.equal(created.message, message);
+  assert.equal(factoryFlowService.getFlow(flow.id).checkpoints[0]?.message, message);
+});
 
 test('API de diff lê o worktree isolado, pagina arquivos e limita patches', async context => {
   const { repoPath, worktreePath, get, checkpoint, baseUrl } = await setUpFlow(context);

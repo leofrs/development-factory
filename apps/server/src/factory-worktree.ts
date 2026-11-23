@@ -3,7 +3,7 @@ import { chmodSync, existsSync, lstatSync, realpathSync, rmSync } from 'node:fs'
 import { lstat, realpath } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
-import { GitBranchNameSchema } from '@development-factory/shared';
+import { FACTORY_CHECKPOINT_BODY_MAX_LENGTH, GitBranchNameSchema } from '@development-factory/shared';
 import type {
   FactoryFlowTarget,
   FactoryRepositoryProfile,
@@ -18,9 +18,17 @@ import {
 import { loadFactoryRepositoryProfile } from './factory-repository-profile.js';
 
 const execFileAsync = promisify(execFile);
-const GIT_COMMAND_TIMEOUT_MS = 15_000;
+const GIT_COMMAND_TIMEOUT_MS = 25_000;
 const GIT_COMMAND_MAX_BUFFER = 1024 * 1024;
 const JIRA_KEY_PATTERN = /\b([A-Z][A-Z0-9_]*-\d+)\b/i;
+const CHECKPOINT_STAGE_LABELS: Readonly<Record<FactoryStageName, string>> = {
+  triage: 'Triage',
+  planning: 'Planning',
+  development: 'Development',
+  tests: 'Tests',
+  review: 'Code Review',
+  pr: 'Pull Request',
+};
 
 export type FactoryWorktreeErrorCode =
   | 'INVALID_GIT_REPOSITORY'
@@ -70,7 +78,7 @@ export interface CreateFactoryWorktreeCheckpointOptions {
   readonly worktreePath: string;
   readonly stage: FactoryStageName;
   readonly iteration: number;
-  readonly message?: string;
+  readonly kind?: 'baseline' | 'before_stage' | 'after_stage';
 }
 
 export interface CreatedFactoryWorktreeCheckpoint {
@@ -658,6 +666,72 @@ export async function hasEmptyFactoryWorktreeCheckpointDiff(
   });
 }
 
+function formatCheckpointTitle({
+  stage,
+  iteration,
+  kind,
+}: CreateFactoryWorktreeCheckpointOptions): string {
+  const label = CHECKPOINT_STAGE_LABELS[stage];
+  switch (kind) {
+    case 'baseline':
+      return `Initial baseline before ${label}`;
+    case 'before_stage':
+      return `Safety checkpoint before ${label} (iteration ${iteration})`;
+    default:
+      return `Automatic checkpoint after ${label} (iteration ${iteration})`;
+  }
+}
+
+function describeStagedCheckpointFiles(stagedChanges: string): string[] {
+  const fields = stagedChanges.split('\0');
+  const bullets: string[] = [];
+  for (let index = 0; index < fields.length; index += 2) {
+    const status = fields[index];
+    const path = fields[index + 1];
+    if (!status || !path) {
+      break;
+    }
+
+    const quotedPath = JSON.stringify(path);
+    if (status.startsWith('R')) {
+      const destination = fields[index + 2];
+      if (!destination) {
+        break;
+      }
+      bullets.push(`- Renamed ${quotedPath} to ${JSON.stringify(destination)}.`);
+      index += 1;
+      continue;
+    }
+
+    const action = status === 'A' ? 'Added' : status === 'D' ? 'Removed' : 'Updated';
+    bullets.push(`- ${action} ${quotedPath}.`);
+  }
+  return bullets;
+}
+
+function formatCheckpointBody(stagedChanges: string): string {
+  const bullets = describeStagedCheckpointFiles(stagedChanges);
+  const body = bullets.join('\n');
+  if (body.length <= FACTORY_CHECKPOINT_BODY_MAX_LENGTH) {
+    return body || '- Saved pending worktree changes.';
+  }
+
+  const summaryLength = `- ${bullets.length} additional files changed.`.length;
+  const visibleBullets: string[] = [];
+  let length = summaryLength;
+  for (const bullet of bullets) {
+    if (length + bullet.length + 1 <= FACTORY_CHECKPOINT_BODY_MAX_LENGTH) {
+      visibleBullets.push(bullet);
+      length += bullet.length + 1;
+    }
+  }
+
+  const remaining = bullets.length - visibleBullets.length;
+  const additional = visibleBullets.length > 0 ? 'additional ' : '';
+  const files = remaining === 1 ? 'file' : 'files';
+  return [...visibleBullets, `- ${remaining} ${additional}${files} changed.`].join('\n');
+}
+
 /**
  * Cria um commit de checkpoint no worktree caso haja alterações pendentes (ou captura o `HEAD` atual
  * quando limpo) e retorna o SHA resultante para persistência no SQLite.
@@ -670,26 +744,39 @@ export async function createFactoryWorktreeCheckpoint(
     worktreePath: options.worktreePath,
   });
 
-  const commitMessage =
-    options.message?.trim() ||
-    `factory(checkpoint): ${options.stage} (iteração ${options.iteration})`;
+  const title = formatCheckpointTitle(options);
 
   return withWorktreeLock(resolvedWorktree, async () => {
     try {
       const statusBefore = await runGit(resolvedWorktree, ['status', '--porcelain']);
+      let message = title;
       let createdCommit = false;
 
       if (statusBefore.length > 0) {
         await runGit(resolvedWorktree, ['add', '-A']);
-        const stagedStatus = await runGit(resolvedWorktree, ['status', '--porcelain']);
-        if (stagedStatus.length > 0) {
+        const stagedChanges = await runGit(resolvedWorktree, [
+          'diff',
+          '--cached',
+          '--name-status',
+          '-z',
+          '--find-renames',
+          '--no-color',
+          '--no-ext-diff',
+          '--no-relative',
+          '--ignore-submodules=dirty',
+          '--',
+        ]);
+        if (stagedChanges.length > 0) {
+          const body = formatCheckpointBody(stagedChanges);
+          message = `${title}\n\n${body}`;
           const authorArgs = await resolveGitCommitAuthorArgs(resolvedWorktree);
           await runGit(resolvedWorktree, [
             ...authorArgs,
             'commit',
             '--no-verify',
+            '--cleanup=verbatim',
             '-m',
-            commitMessage,
+            message,
           ]);
           createdCommit = true;
         }
@@ -700,7 +787,7 @@ export async function createFactoryWorktreeCheckpoint(
       return {
         commitSha,
         branchName: branchName || null,
-        message: commitMessage,
+        message,
         createdCommit,
       };
     } catch (error) {

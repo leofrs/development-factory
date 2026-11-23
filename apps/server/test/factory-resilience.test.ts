@@ -577,6 +577,11 @@ test('reinício do servidor reconcilia fluxos presos em running para waiting_act
     assert.equal(afterResumeDetails.checkpoints[0]?.id, baselineCheckpointId);
     assert.equal(afterResumeDetails.checkpoints[0]?.commitSha, baselineSha);
     assert.ok(afterResumeDetails.checkpoints.length >= 2);
+    assert.equal(
+      afterResumeDetails.checkpoints[1]?.message,
+      `Safety checkpoint before Development (iteration ${resumeBody.flow.iteration})\n\n` +
+        '- Updated "src/app.ts".',
+    );
 
     const activeManaged = serverTwo.sessionManager.getSession(resumedSession.sessionId);
     assert.ok(activeManaged && resumedSession.reportPath);

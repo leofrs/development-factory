@@ -115,7 +115,6 @@ function factoryPageElement(props: Partial<ComponentProps<typeof FactoryPage>> =
     onPickDirectory: noop,
     onOpenNewFlow: noop,
     onOpenFlowRoadmap: noop,
-    onOpenFlowTerminal: unavailableTerminal,
     onCancelFlow: async flowId => createFlow({ id: flowId, state: 'cancelled' }),
     onRerunFlowStage: noopAsync,
     ...props,
@@ -365,7 +364,6 @@ test('Roadmap navega pelo diff paginado e compara evidências e checkpoints de c
         flow={flow}
         initialDetails={details}
         onClose={noop}
-        onOpenFlowTerminal={unavailableTerminal}
         onAdvanceFlowStage={noopAsync}
         onRerunFlowStage={noopAsync}
         onViewMarkdown={noop}
@@ -436,7 +434,7 @@ test('Roadmap navega pelo diff paginado e compara evidências e checkpoints de c
   }
 });
 
-test('Factory abre o terminal da etapa atual pelas três telas e atualiza a atividade em tempo real', async context => {
+test('Factory oculta o terminal das etapas e mantém a atividade em tempo real e o terminal de review', async context => {
   const runningFlow = createFlow({
     transitions: [
       {
@@ -459,6 +457,13 @@ test('Factory abre o terminal da etapa atual pelas três telas e atualiza a ativ
     title: 'Sessão avulsa',
     flowId: null,
   });
+  const reviewSession = createSession({
+    sessionId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+    mode: 'review',
+    title: 'Review #99',
+    flowId: null,
+    stage: null,
+  });
   const queuedFlow = createFlow({
     id: '22222222-2222-4222-8222-222222222222',
     title: 'Fluxo na fila',
@@ -466,7 +471,7 @@ test('Factory abre o terminal da etapa atual pelas três telas e atualiza a ativ
     currentSessionId: null,
     updatedAt: runningFlow.createdAt,
   });
-  const snapshot = { sessions: [session, oldSession, standaloneSession] };
+  const snapshot = { sessions: [session, oldSession, standaloneSession, reviewSession] };
   const streams: FakeEventSource[] = [];
   class FakeEventSource {
     onopen?: () => void;
@@ -538,22 +543,18 @@ test('Factory abre o terminal da etapa atual pelas três telas e atualiza a ativ
     const [roadmapOpen, setRoadmapOpen] = useState(true);
     const [popoverOpen, setPopoverOpen] = useState(true);
     const flow = operations.factoryFlowsById.get(runningFlow.id);
-    const openFlowTerminal = (flowId: string) =>
-      operations.openFlowTerminal(flowId, { liveOnly: true });
 
     return (
       <>
         {factoryPageElement({
           factoryFlows: operations.factoryFlows,
           sessionsById: operations.sessionsById,
-          onOpenFlowTerminal: openFlowTerminal,
         })}
         {roadmapOpen && flow && (
           <FactoryFlowRoadmapModal
             flow={flow}
             runningSession={getRunningFactorySession(flow, operations.sessionsById)}
             onClose={() => setRoadmapOpen(false)}
-            onOpenFlowTerminal={openFlowTerminal}
             onAdvanceFlowStage={noopAsync}
             onRerunFlowStage={noopAsync}
             onViewMarkdown={noop}
@@ -565,16 +566,12 @@ test('Factory abre o terminal da etapa atual pelas três telas e atualiza a ativ
             sessions={operations.sessions}
             factoryFlows={operations.factoryFlows}
             onOpenTerminal={operations.openTerminal}
-            onOpenFlowTerminal={openFlowTerminal}
             onViewReport={noop}
             onClose={() => setPopoverOpen(false)}
           />
         )}
         <button id="reset-terminal" type="button" onClick={operations.minimizeTerminal}>
           Minimizar terminal
-        </button>
-        <button id="open-operations" type="button" onClick={() => setPopoverOpen(true)}>
-          Operações
         </button>
         <output id="terminal-session">{operations.activeTerminalSession?.sessionId}</output>
       </>
@@ -594,9 +591,11 @@ test('Factory abre o terminal da etapa atual pelas três telas e atualiza a ativ
 
   try {
     await act(() => root.render(<Harness />));
-    assert.equal(container.querySelectorAll(`main ${terminalButton}`).length, 1);
-    assert.equal(container.querySelectorAll(`dialog ${terminalButton}`).length, 1);
-    assert.equal(container.querySelectorAll(`#live-operations ${terminalButton}`).length, 2);
+    assert.equal(container.querySelectorAll(`main ${terminalButton}`).length, 0);
+    assert.equal(container.querySelectorAll(`dialog ${terminalButton}`).length, 0);
+    assert.equal(container.querySelectorAll(`#live-operations ${terminalButton}`).length, 0);
+    assert.doesNotMatch(container.querySelector('main')?.textContent ?? '', /Abrir terminal/);
+    assert.doesNotMatch(container.querySelector('dialog')?.textContent ?? '', /Abrir terminal/);
     assert.match(container.querySelector('main')?.textContent ?? '', /Aguardando atividade/);
 
     const [events] = streams;
@@ -622,18 +621,15 @@ test('Factory abre o terminal da etapa atual pelas três telas e atualiza a ativ
     assert.match(stageCard?.textContent ?? '', /Último comandonpm test/);
     assert.equal(stageCard?.querySelector('[role="timer"]')?.textContent, '00:02');
 
-    for (const location of ['main', 'dialog', '#live-operations']) {
-      await click(`${location} button[aria-label="Abrir terminal ao vivo · ${runningFlow.title}"]`);
-      assert.equal(activeSession(), session.sessionId);
-      await click('#reset-terminal');
-      assert.equal(activeSession(), '');
-    }
-    assert.equal(container.querySelector('dialog'), null);
+    const reviewButtons = [...container.querySelectorAll<HTMLButtonElement>('#live-operations button')].filter(
+      button => button.textContent?.trim() === 'Abrir terminal',
+    );
+    assert.equal(reviewButtons.length, 1);
+    await act(() => reviewButtons[0]?.click());
+    assert.equal(activeSession(), reviewSession.sessionId);
     assert.equal(container.querySelector('#live-operations'), null);
-
-    await click('#open-operations');
-    await click('button[aria-label="Abrir terminal ao vivo · Sessão avulsa"]');
-    assert.equal(activeSession(), standaloneSession.sessionId);
+    await click('#reset-terminal');
+    assert.equal(activeSession(), '');
 
     await act(() => {
       events.emit({
@@ -642,7 +638,6 @@ test('Factory abre o terminal da etapa atual pelas três telas e atualiza a ativ
       });
       events.emit({ type: 'session.updated', session });
     });
-    assert.equal(container.querySelector(`main ${terminalButton}`), null);
     assert.equal(container.querySelector('main [role="timer"]'), null);
   } finally {
     await act(() => root.unmount());
@@ -927,7 +922,6 @@ test('FactoryFlowRoadmapModal exibe botão Parar apenas quando o fluxo está Em 
       flow: waitingFlow,
       onClose: noop,
       onAdvanceFlowStage: noopAsync,
-      onOpenFlowTerminal: unavailableTerminal,
       onRerunFlowStage: noopAsync,
       onCancelFlow: noopAsync,
       onViewMarkdown: noop,
@@ -959,7 +953,6 @@ test('FactoryFlowRoadmapModal exibe botão Parar apenas quando o fluxo está Em 
       flow: runningFlow,
       onClose: noop,
       onAdvanceFlowStage: noopAsync,
-      onOpenFlowTerminal: unavailableTerminal,
       onRerunFlowStage: noopAsync,
       onCancelFlow: noopAsync,
       onViewMarkdown: noop,
@@ -1052,7 +1045,6 @@ test('BackgroundTasksPopover exibe múltiplos fluxos da Factory em paralelo com 
       ],
       factoryFlows: [flowA, flowB, flowC, cancelledFlow],
       onOpenTerminal: unavailableTerminal,
-      onOpenFlowTerminal: unavailableTerminal,
       onOpenFlowRoadmap: noop,
       onViewReport: noop,
       onStopSession: async () => reviewSessionRunning,
@@ -1198,7 +1190,6 @@ test('Etapas 04 (tests) e 05 (review) geram notificações e botões de reexecu�
       flow: testsFlow,
       onClose: noop,
       onAdvanceFlowStage: noopAsync,
-      onOpenFlowTerminal: unavailableTerminal,
       onRerunFlowStage: noopAsync,
       onReturnFlowStage: noopAsync,
       onViewMarkdown: noop,
@@ -1220,7 +1211,6 @@ test('Etapas 04 (tests) e 05 (review) geram notificações e botões de reexecu�
       flow: prFlow,
       onClose: noop,
       onAdvanceFlowStage: noopAsync,
-      onOpenFlowTerminal: unavailableTerminal,
       onRerunFlowStage: noopAsync,
       onReturnFlowStage: noopAsync,
       onViewMarkdown: noop,
@@ -1245,7 +1235,6 @@ test('Etapas 04 (tests) e 05 (review) geram notificações e botões de reexecu�
       flow: circuitBreakerFlow,
       onClose: noop,
       onAdvanceFlowStage: noopAsync,
-      onOpenFlowTerminal: unavailableTerminal,
       onRerunFlowStage: noopAsync,
       onReturnFlowStage: noopAsync,
       onViewMarkdown: noop,
@@ -1261,7 +1250,6 @@ test('Etapas 04 (tests) e 05 (review) geram notificações e botões de reexecu�
       sessions: [],
       factoryFlows: [prFlow],
       onOpenTerminal: unavailableTerminal,
-      onOpenFlowTerminal: unavailableTerminal,
       onOpenFlowRoadmap: noop,
       onViewReport: noop,
       onClose: noop,
@@ -1319,7 +1307,6 @@ test('FactoryFlowRoadmapModal e BackgroundTasksPopover exibem motivo de pausa e 
       flow: reconciledFlow,
       onClose: noop,
       onAdvanceFlowStage: noopAsync,
-      onOpenFlowTerminal: unavailableTerminal,
       onRerunFlowStage: noopAsync,
       onViewMarkdown: noop,
     }),
@@ -1334,7 +1321,6 @@ test('FactoryFlowRoadmapModal e BackgroundTasksPopover exibem motivo de pausa e 
       sessions: [],
       factoryFlows: [reconciledFlow],
       onOpenTerminal: unavailableTerminal,
-      onOpenFlowTerminal: unavailableTerminal,
       onOpenFlowRoadmap: noop,
       onViewReport: noop,
       onRerunFlowStage: noopAsync,
@@ -1413,7 +1399,6 @@ test('FactoryFlowRoadmapModal exibe portão humano estruturado do Bloco 01 com b
       initialDetails,
       onClose: noop,
       onAdvanceFlowStage: noopAsync,
-      onOpenFlowTerminal: unavailableTerminal,
       onRerunFlowStage: noopAsync,
       onViewMarkdown: noop,
     }),
@@ -1539,7 +1524,6 @@ test('FactoryFlowRoadmapModal exibe portão humano estruturado do Bloco 02 e man
       initialDetails: editableDetails,
       onClose: noop,
       onAdvanceFlowStage: noopAsync,
-      onOpenFlowTerminal: unavailableTerminal,
       onRerunFlowStage: noopAsync,
       onViewMarkdown: noop,
     }),
@@ -1610,7 +1594,6 @@ test('FactoryFlowRoadmapModal exibe portão humano estruturado do Bloco 02 e man
       },
       onClose: noop,
       onAdvanceFlowStage: noopAsync,
-      onOpenFlowTerminal: unavailableTerminal,
       onRerunFlowStage: noopAsync,
       onViewMarkdown: noop,
     }),
@@ -1628,7 +1611,6 @@ test('FactoryFlowRoadmapModal exibe portão humano estruturado do Bloco 02 e man
       sessions: [],
       factoryFlows: [developmentFlow],
       onOpenTerminal: unavailableTerminal,
-      onOpenFlowTerminal: unavailableTerminal,
       onOpenFlowRoadmap: noop,
       onViewReport: noop,
       onClose: noop,
@@ -2081,8 +2063,7 @@ test('FactoryFlowRoadmapModal filtra findings por severidade, salta para linha n
           flow: baseFlow,
           initialDetails: currentDetails,
           onClose: noop,
-          onOpenFlowTerminal: unavailableTerminal,
-          onAdvanceFlowStage: async () => {
+              onAdvanceFlowStage: async () => {
             advancedCount += 1;
           },
           onRerunFlowStage: noopAsync,
@@ -2436,8 +2417,7 @@ test('FactoryFlowRoadmapModal + FactoryFlowPrPanel pré-carregam Etapa 1, valida
           flow: baseFlow,
           initialDetails: currentDetails,
           onClose: noop,
-          onOpenFlowTerminal: unavailableTerminal,
-          onAdvanceFlowStage: noopAsync,
+              onAdvanceFlowStage: noopAsync,
           onRerunFlowStage: noopAsync,
           onSavePrReview: async (_id, request) => {
             savedPayloads.push(request);
@@ -2761,8 +2741,7 @@ test('FactoryFlowRoadmapModal + FactoryFlowPrPanel exibem bloqueio de secret sca
             flow: currentFlow,
             initialDetails: makeDetails(),
             onClose: noop,
-            onOpenFlowTerminal: unavailableTerminal,
-            onAdvanceFlowStage: noopAsync,
+                  onAdvanceFlowStage: noopAsync,
             onRerunFlowStage: noopAsync,
             onSavePrReview: async () => {
               throw new Error('não esperado');

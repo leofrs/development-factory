@@ -21,7 +21,8 @@ import {
 } from './factory-worktree.js';
 
 const execFileAsync = promisify(execFile);
-const PREFLIGHT_TIMEOUT_MS = 5_000;
+const PREFLIGHT_TIMEOUT_MS = 25_000;
+const GITHUB_PREFLIGHT_TIMEOUT_MS = 5_000;
 const COMMAND_MAX_BUFFER = 64 * 1024;
 const JIRA_MCP_NAME = 'claude.ai Atlassian Rovo';
 
@@ -29,6 +30,28 @@ const gitTimeout: FactoryPreflightCheck = {
   status: 'error',
   message: 'A verificação do Git excedeu o tempo limite. Confira o acesso à pasta e tente novamente.',
 };
+
+const ansiEscapePattern = new RegExp(`${String.fromCodePoint(0x1b)}\\[[0-9;]*[A-Za-z]`, 'g');
+
+function stripAnsi(value: string): string {
+  return value.replace(ansiEscapePattern, '');
+}
+
+function buildSanitizedCliEnv(): NodeJS.ProcessEnv {
+  const { FORCE_COLOR: _forceColor, ...rest } = process.env;
+  return {
+    ...rest,
+    NO_COLOR: '1',
+    GH_PROMPT_DISABLED: '1',
+    GH_NO_UPDATE_NOTIFIER: '1',
+  };
+}
+
+function isJiraMcpConnected(stdout: string): boolean {
+  return stripAnsi(stdout)
+    .split(/\r?\n/)
+    .some(line => /^\s*Status:\s*(?:[✓✔]\s*)?Connected\s*$/i.test(line));
+}
 
 function runCommand(
   executable: string,
@@ -42,7 +65,7 @@ function runCommand(
     signal,
     killSignal: 'SIGKILL',
     maxBuffer: COMMAND_MAX_BUFFER,
-    env: { ...process.env, NO_COLOR: '1', GH_PROMPT_DISABLED: '1', GH_NO_UPDATE_NOTIFIER: '1' },
+    env: buildSanitizedCliEnv(),
   });
 }
 
@@ -61,13 +84,14 @@ async function checkClaude(signal: AbortSignal): Promise<FactoryPreflightCheck> 
 }
 
 async function checkGitHub(signal: AbortSignal): Promise<FactoryPreflightCheck> {
+  const githubSignal = AbortSignal.any([signal, AbortSignal.timeout(GITHUB_PREFLIGHT_TIMEOUT_MS)]);
   try {
-    await runCommand('gh', ['auth', 'status'], signal);
+    await runCommand('gh', ['auth', 'status'], githubSignal);
     return { status: 'ok', message: 'O GitHub CLI confirmou a autenticação.' };
   } catch {
     return {
       status: 'warning',
-      message: signal.aborted
+      message: githubSignal.aborted
         ? 'A verificação do GitHub excedeu o tempo limite. Execute gh auth status antes da etapa de PR.'
         : 'Confira a instalação do GitHub CLI no WSL e use gh auth login antes da etapa de PR.',
     };
@@ -88,7 +112,7 @@ async function checkJiraMcp(
 
   try {
     const { stdout } = await runCommand('claude', ['mcp', 'get', JIRA_MCP_NAME], signal, repoRoot);
-    if (stdout.split('\n').some(line => /^\s*Status:\s*(?:✓\s*)?Connected\s*$/i.test(line))) {
+    if (isJiraMcpConnected(stdout)) {
       return { status: 'ok', message: 'O MCP do Jira está conectado pelo Atlassian Rovo.' };
     }
   } catch {

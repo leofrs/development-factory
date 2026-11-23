@@ -162,6 +162,16 @@ test('Preflight avisa sobre falta de autenticação no GitHub e requer Jira apen
   assert.match(jiraResult.checks.jiraMcp.message, /Atlassian Rovo/);
 });
 
+test('Preflight aceita o formato real de saída do Claude Code para Jira MCP conectado', async context => {
+  const { repoPath, endpoint } = await startFixture(context, {
+    jiraStatus: '\u001b[35m✔\u001b[39m Connected',
+  });
+
+  const result = await preflight(endpoint, { repoPath, inputType: 'jira_url' });
+  assert.equal(result.blocked, false);
+  assert.equal(result.checks.jiraMcp.status, 'ok');
+});
+
 test('Preflight bloqueia repositório inválido, manifesto corrompido e branch base ausente', async context => {
   const { rootDir, repoPath, endpoint } = await startFixture(context);
   const notGit = await preflight(endpoint, { repoPath: rootDir, inputType: 'title' });
