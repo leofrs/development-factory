@@ -15,6 +15,8 @@ import {
   FactoryFlowSchema,
   FactoryFlowStageSchema,
   FactoryIdempotencyKeySchema,
+  FactoryMetricsQuerySchema,
+  FactoryMetricsResponseSchema,
   FactoryPlanningApprovalSchema,
   FactoryStageNameSchema,
   ListFactoryFlowsFilterSchema,
@@ -51,6 +53,7 @@ import {
   type FactoryFlowState,
   type FactoryFlowTraceabilityMatrix,
   type FactoryFlowTransitionCommand,
+  type FactoryMetricsResponse,
   type FactoryPlanningApproval,
   type FactoryPlanningApprovalInput,
   type FactoryPlanningGate,
@@ -59,6 +62,8 @@ import {
   type FactoryPrPublication,
   type FactoryPrReview,
   type FactoryReviewGate,
+  type FactoryReviewOutcomeRecord,
+  type FactoryReviewSidecar,
   type FactoryReviewTriage,
   type FactoryReviewTriageInput,
   type FactoryStageName,
@@ -227,6 +232,30 @@ function formatZodIssues(error: z.ZodError): string[] {
     const path = issue.path.length > 0 ? `${issue.path.join('.')}: ` : '';
     return `${path}${issue.message}`;
   });
+}
+
+function extractReviewRejectionReasons(sidecar: FactoryReviewSidecar): string[] {
+  const blocking = sidecar.findings.filter(finding => finding.severity === 'BLOQUEANTE');
+  const relevant =
+    blocking.length > 0
+      ? blocking
+      : sidecar.verdict === 'changes_requested'
+        ? sidecar.findings
+        : [];
+
+  if (relevant.length === 0) {
+    return sidecar.verdict === 'changes_requested'
+      ? ['Ajustes solicitados no Code Review']
+      : [];
+  }
+
+  return relevant
+    .map(finding => {
+      const label =
+        finding.category?.trim() || finding.signature?.trim() || finding.explanation.trim();
+      return label.slice(0, 500);
+    })
+    .filter(label => label.length > 0);
 }
 
 function fingerprintFlowRequest(
@@ -980,6 +1009,54 @@ export class FactoryFlowService {
     }
   }
 
+  getMetrics(queryInput: unknown = {}): FactoryMetricsResponse {
+    const parsed = FactoryMetricsQuerySchema.safeParse(queryInput);
+    if (!parsed.success) {
+      throw new FactoryFlowServiceError(
+        'FACTORY_FLOW_INVALID_INPUT',
+        'Os filtros de consulta das métricas da Factory são inválidos.',
+        400,
+        formatZodIssues(parsed.error),
+      );
+    }
+
+    try {
+      const unrecordedArtifacts = this.repository.listReadyReviewArtifactsWithoutOutcome(
+        parsed.data.repoPath,
+      );
+      const extraOutcomesByFlow = new Map<string, FactoryReviewOutcomeRecord[]>();
+
+      for (const artifact of unrecordedArtifacts) {
+        try {
+          const sidecar = readFactoryStageSidecar('review', artifact.path);
+          const list = extraOutcomesByFlow.get(artifact.flowId) ?? [];
+          list.push({
+            contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+            id: artifact.id,
+            flowId: artifact.flowId,
+            artifactId: artifact.id,
+            iteration: artifact.iteration > 0 ? artifact.iteration : 1,
+            verdict: sidecar.verdict,
+            rejectionReasons: extractReviewRejectionReasons(sidecar),
+            createdAt: artifact.createdAt,
+          });
+          extraOutcomesByFlow.set(artifact.flowId, list);
+        } catch {
+          // Ignora artefatos legados sem arquivo sidecar legível no disco.
+        }
+      }
+
+      const metrics = this.repository.getMetrics({
+        ...parsed.data,
+        now: this.now(),
+        ...(extraOutcomesByFlow.size > 0 ? { extraOutcomesByFlow } : {}),
+      });
+      return FactoryMetricsResponseSchema.parse(metrics);
+    } catch (error) {
+      throw mapUnexpectedError(error);
+    }
+  }
+
   assertStageHandoff(details: FactoryFlowDetails, stage: FactoryStageName): void {
     if (stage === 'triage') {
       return;
@@ -1491,7 +1568,30 @@ export class FactoryFlowService {
           error: parsed.data.error ?? null,
         });
 
-        return this.repository.saveArtifact(artifact, options);
+        const saved = this.repository.saveArtifact(artifact, options);
+        if (
+          saved.stage === 'review' &&
+          saved.kind === 'review_report' &&
+          saved.format === 'markdown' &&
+          saved.status === 'ready'
+        ) {
+          try {
+            const sidecar = readFactoryStageSidecar('review', saved.path);
+            this.repository.recordReviewOutcome({
+              contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+              id: this.generateId(),
+              flowId,
+              artifactId: saved.id,
+              iteration: saved.iteration > 0 ? saved.iteration : 1,
+              verdict: sidecar.verdict,
+              rejectionReasons: extractReviewRejectionReasons(sidecar),
+              createdAt: timestamp,
+            });
+          } catch {
+            // Ignora sidecar ausente/inválido em registros sintéticos sem arquivo no disco.
+          }
+        }
+        return saved;
       });
     } catch (error) {
       throw mapUnexpectedError(error);

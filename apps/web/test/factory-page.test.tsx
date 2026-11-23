@@ -9,6 +9,7 @@ import {
   buildFactoryTraceabilityMatrix,
   FACTORY_FLOW_CONTRACT_VERSION,
   FACTORY_MAX_AUTO_ITERATIONS,
+  FACTORY_STAGE_ORDER,
   FACTORY_STAGE_SIDECAR_CONTRACT_VERSION,
 } from '@development-factory/shared';
 import type {
@@ -16,6 +17,7 @@ import type {
   BackgroundSessionSummary,
   FactoryFlow,
   FactoryFlowDetails,
+  FactoryMetricsResponse,
   FactoryPreflightResponse,
 } from '@development-factory/shared';
 import { BackgroundTasksPopover } from '../src/components/BackgroundTasksPopover';
@@ -32,6 +34,7 @@ import { MarkdownViewerModal } from '../src/components/MarkdownViewerModal';
 import { NotificationToastCenter } from '../src/components/NotificationToastCenter';
 import { buildNotification, useBackgroundOperations } from '../src/hooks/useBackgroundOperations';
 import type { AppNotification } from '../src/hooks/useBackgroundOperations';
+import { useFactoryMetrics, type FactoryMetricsController } from '../src/hooks/useFactoryMetrics.js';
 import type { FactoryPreflight } from '../src/hooks/useFactoryPreflight.js';
 import { getRunningFactorySession } from '../src/utils/factory-flow-status.js';
 
@@ -2920,6 +2923,312 @@ test('FactoryFlowRoadmapModal + FactoryFlowPrPanel exibem bloqueio de secret sca
     assert.equal(publishCount, 2);
     assert.equal(retryCount, 1);
     assert.match(syncedPanel.textContent ?? '', /Comentário com link do PR e resumo das evidências publicado no card AUTH-202/);
+  } finally {
+    await act(() => root.unmount());
+  }
+});
+
+test('FactoryPage renderiza estados carregando, erro, vazio e populado na aba Métricas da Factory', () => {
+  const makeMetricsController = (
+    state: FactoryMetricsController['state'],
+    overrides: Partial<FactoryMetricsController> = {},
+  ): FactoryMetricsController => ({
+    state,
+    repoPathFilter: '',
+    periodFilter: 'all',
+    setRepoPathFilter: noop,
+    setPeriodFilter: noop,
+    refresh: noop,
+    ...overrides,
+  });
+
+  // 1. Estado carregando.
+  const loadingHtml = renderFactoryPage({
+    initialSection: 'metrics',
+    metrics: makeMetricsController({ status: 'loading' }),
+  });
+  assert.match(loadingHtml, /Carregando métricas da Factory/);
+  assert.match(loadingHtml, /aria-selected="true"[^>]*>.*Métricas da Factory/);
+
+  // 2. Estado de falha.
+  const errorHtml = renderFactoryPage({
+    initialSection: 'metrics',
+    metrics: makeMetricsController({
+      status: 'failed',
+      message: 'Falha ao consultar telemetria.',
+    }),
+  });
+  assert.match(errorHtml, /role="alert"[^>]*>.*Falha ao consultar telemetria\./);
+  assert.match(errorHtml, /Tentar novamente/);
+
+  // 3. Estado vazio (sem fluxos no período).
+  const emptyData: FactoryMetricsResponse = {
+    contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+    generatedAt: '2026-11-22T12:00:00.000Z',
+    filters: { repoPath: null, period: 'all', from: null, to: null },
+    availableRepos: [],
+    summary: {
+      totalFlows: 0,
+      completedFlows: 0,
+      cancelledFlows: 0,
+      failedFlows: 0,
+      activeFlows: 0,
+      openedPrs: 0,
+      averageFlowLeadTimeMs: null,
+    },
+    stageLeadTimes: FACTORY_STAGE_ORDER.map(stage => ({
+      stage,
+      completedCount: 0,
+      partialCount: 0,
+      averageDurationMs: null,
+      minDurationMs: null,
+      maxDurationMs: null,
+    })),
+    firstCycleReview: {
+      evaluatedFlows: 0,
+      approvedFirstCycle: 0,
+      rejectedFirstCycle: 0,
+      approvalRatePercent: null,
+    },
+    rejectionReasons: [],
+    byRepository: [],
+  };
+  const emptyHtml = renderFactoryPage({
+    initialSection: 'metrics',
+    metrics: makeMetricsController({ status: 'loaded', data: emptyData }),
+  });
+  assert.match(emptyHtml, /Nenhuma etapa concluída com timestamps completos neste recorte/);
+  assert.match(emptyHtml, /Nenhum fluxo avaliado no Bloco 05 neste período/);
+  assert.match(emptyHtml, /Nenhuma reprovação registrada no Bloco 05 neste período/);
+  assert.match(emptyHtml, /Nenhum fluxo registrado para os filtros selecionados/);
+
+  // 4. Estado populado.
+  const populatedData: FactoryMetricsResponse = {
+    contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+    generatedAt: '2026-11-22T12:00:00.000Z',
+    filters: { repoPath: null, period: '30d', from: '2026-10-23T12:00:00.000Z', to: null },
+    availableRepos: ['/home/dev/repos/api-core', '/home/dev/repos/web-app'],
+    summary: {
+      totalFlows: 5,
+      completedFlows: 3,
+      cancelledFlows: 1,
+      failedFlows: 0,
+      activeFlows: 1,
+      openedPrs: 2,
+      averageFlowLeadTimeMs: 125_000,
+    },
+    stageLeadTimes: [
+      { stage: 'triage', completedCount: 5, partialCount: 0, averageDurationMs: 15_000, minDurationMs: 10_000, maxDurationMs: 20_000 },
+      { stage: 'planning', completedCount: 4, partialCount: 0, averageDurationMs: 30_000, minDurationMs: 20_000, maxDurationMs: 40_000 },
+      { stage: 'development', completedCount: 3, partialCount: 1, averageDurationMs: 65_000, minDurationMs: 45_000, maxDurationMs: 90_000 },
+      { stage: 'tests', completedCount: 3, partialCount: 0, averageDurationMs: 20_000, minDurationMs: 15_000, maxDurationMs: 25_000 },
+      { stage: 'review', completedCount: 3, partialCount: 0, averageDurationMs: 18_000, minDurationMs: 12_000, maxDurationMs: 24_000 },
+      { stage: 'pr', completedCount: 2, partialCount: 0, averageDurationMs: 8_000, minDurationMs: 5_000, maxDurationMs: 11_000 },
+    ],
+    firstCycleReview: {
+      evaluatedFlows: 4,
+      approvedFirstCycle: 3,
+      rejectedFirstCycle: 1,
+      approvalRatePercent: 75,
+    },
+    rejectionReasons: [
+      { reason: 'cobertura', count: 3, flowCount: 2 },
+      { reason: 'regressao', count: 1, flowCount: 1 },
+    ],
+    byRepository: [
+      {
+        repoPath: '/home/dev/repos/api-core',
+        totalFlows: 3,
+        completedFlows: 2,
+        cancelledFlows: 1,
+        failedFlows: 0,
+        activeFlows: 0,
+        openedPrs: 2,
+        firstCycleApprovalRatePercent: 66.7,
+      },
+      {
+        repoPath: '/home/dev/repos/web-app',
+        totalFlows: 2,
+        completedFlows: 1,
+        cancelledFlows: 0,
+        failedFlows: 0,
+        activeFlows: 1,
+        openedPrs: 0,
+        firstCycleApprovalRatePercent: 100,
+      },
+    ],
+  };
+  const populatedHtml = renderFactoryPage({
+    initialSection: 'metrics',
+    metrics: makeMetricsController(
+      { status: 'loaded', data: populatedData },
+      { periodFilter: '30d' },
+    ),
+  });
+  assert.match(populatedHtml, /01 · Triagem/);
+  assert.match(populatedHtml, /03 · Desenvolvimento/);
+  assert.match(populatedHtml, /1m 5s/);
+  assert.match(populatedHtml, /1 parcial/);
+  assert.match(populatedHtml, /75%/);
+  assert.match(populatedHtml, /3 de 4 avaliados/);
+  assert.match(populatedHtml, /#1<\/span>cobertura/);
+  assert.match(populatedHtml, /3 ocorrências · 2 fluxos/);
+  assert.match(populatedHtml, /api-core/);
+  assert.match(populatedHtml, /66\.7%/);
+});
+
+test('FactoryPage alterna para a aba de métricas e aplica filtros de repositório e período via useFactoryMetrics', async context => {
+  const window = parseHTML('<html><body><div id="metrics-root"></div></body></html>');
+  const { document } = window;
+  const overrides: Array<[object, string, unknown]> = [
+    [globalThis, 'window', window],
+    [globalThis, 'document', document],
+    [globalThis, 'IS_REACT_ACT_ENVIRONMENT', true],
+    [window.HTMLElement.prototype, 'attachEvent', () => undefined],
+    [window.HTMLElement.prototype, 'detachEvent', () => undefined],
+  ];
+  for (const [target, name, value] of overrides) {
+    const original = Object.getOwnPropertyDescriptor(target, name);
+    Object.defineProperty(target, name, { configurable: true, value, writable: true });
+    context.after(() => {
+      if (original) {
+        Object.defineProperty(target, name, original);
+      } else {
+        Reflect.deleteProperty(target, name);
+      }
+    });
+  }
+
+  const seenUrls: string[] = [];
+  context.mock.method(globalThis, 'fetch', (input: RequestInfo | URL) => {
+    const rawUrl = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+    seenUrls.push(rawUrl);
+    const parsed = new URL(rawUrl);
+    const selectedRepo = parsed.searchParams.get('repoPath');
+    const selectedPeriod = (parsed.searchParams.get('period') ?? 'all') as FactoryMetricsResponse['filters']['period'];
+    const isAlpha = selectedRepo === '/home/dev/repos/api-core';
+
+    const payload: FactoryMetricsResponse = {
+      contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+      generatedAt: '2026-11-22T12:00:00.000Z',
+      filters: { repoPath: selectedRepo, period: selectedPeriod, from: null, to: null },
+      availableRepos: ['/home/dev/repos/api-core', '/home/dev/repos/web-app'],
+      summary: {
+        totalFlows: isAlpha ? 2 : 3,
+        completedFlows: isAlpha ? 2 : 2,
+        cancelledFlows: isAlpha ? 0 : 1,
+        failedFlows: 0,
+        activeFlows: 0,
+        openedPrs: isAlpha ? 2 : 2,
+        averageFlowLeadTimeMs: 42_000,
+      },
+      stageLeadTimes: FACTORY_STAGE_ORDER.map(stage => ({
+        stage,
+        completedCount: isAlpha ? 2 : 3,
+        partialCount: 0,
+        averageDurationMs: 12_000,
+        minDurationMs: 10_000,
+        maxDurationMs: 14_000,
+      })),
+      firstCycleReview: {
+        evaluatedFlows: isAlpha ? 2 : 3,
+        approvedFirstCycle: isAlpha ? 2 : 2,
+        rejectedFirstCycle: isAlpha ? 0 : 1,
+        approvalRatePercent: isAlpha ? 100 : 66.7,
+      },
+      rejectionReasons: isAlpha ? [] : [{ reason: 'cobertura', count: 1, flowCount: 1 }],
+      byRepository: [
+        {
+          repoPath: '/home/dev/repos/api-core',
+          totalFlows: 2,
+          completedFlows: 2,
+          cancelledFlows: 0,
+          failedFlows: 0,
+          activeFlows: 0,
+          openedPrs: 2,
+          firstCycleApprovalRatePercent: 100,
+        },
+        ...(isAlpha
+          ? []
+          : [
+              {
+                repoPath: '/home/dev/repos/web-app',
+                totalFlows: 1,
+                completedFlows: 0,
+                cancelledFlows: 1,
+                failedFlows: 0,
+                activeFlows: 0,
+                openedPrs: 0,
+                firstCycleApprovalRatePercent: 0,
+              },
+            ]),
+      ],
+    };
+    return Promise.resolve(Response.json(payload));
+  });
+
+  function Harness() {
+    const metrics = useFactoryMetrics();
+    return factoryPageElement({ metrics });
+  }
+
+  const container = document.getElementById('metrics-root');
+  assert(container);
+  const root = createRoot(container);
+
+  const flush = async () => {
+    await act(async () => {
+      await new Promise(resolve => {
+        setTimeout(resolve, 0);
+      });
+    });
+  };
+
+  try {
+    await act(async () => {
+      root.render(createElement(Harness));
+    });
+    await flush();
+
+    // Clica na aba "Métricas da Factory".
+    const metricsTab = Array.from(container.querySelectorAll('button[role="tab"]')).find(button =>
+      button.textContent?.includes('Métricas da Factory'),
+    );
+    assert(metricsTab);
+    await act(async () => {
+      (metricsTab as HTMLButtonElement).click();
+    });
+    assert.match(container.textContent ?? '', /66\.7%/);
+    assert.match(container.textContent ?? '', /cobertura/);
+
+    // Filtra por repositório específico e período 7d.
+    const repoSelect = container.querySelector('select[id$="-repo"]') as HTMLSelectElement | null;
+    const periodSelect = container.querySelector('select[id$="-period"]') as HTMLSelectElement | null;
+    assert(repoSelect);
+    assert(periodSelect);
+
+    await act(async () => {
+      Object.defineProperty(repoSelect, 'value', {
+        configurable: true,
+        value: '/home/dev/repos/api-core',
+      });
+      repoSelect.dispatchEvent(new window.Event('change', { bubbles: true }));
+    });
+    await flush();
+
+    await act(async () => {
+      Object.defineProperty(periodSelect, 'value', {
+        configurable: true,
+        value: '7d',
+      });
+      periodSelect.dispatchEvent(new window.Event('change', { bubbles: true }));
+    });
+    await flush();
+
+    assert.match(seenUrls.at(-1) ?? '', /repoPath=%2Fhome%2Fdev%2Frepos%2Fapi-core/);
+    assert.match(seenUrls.at(-1) ?? '', /period=7d/);
+    assert.match(container.textContent ?? '', /100%/);
+    assert.match(container.textContent ?? '', /Nenhuma reprovação registrada no Bloco 05 neste período/);
   } finally {
     await act(() => root.unmount());
   }

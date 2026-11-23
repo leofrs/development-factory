@@ -20,6 +20,7 @@ import {
   createFactoryFlow,
   fetchFactoryFlowDetails,
   fetchFactoryFlows,
+  fetchFactoryMetrics,
   fetchFactoryPreflight,
   publishFactoryPr,
   retryFactoryPrJiraSync,
@@ -770,4 +771,71 @@ test('publishFactoryPr e retryFactoryPrJiraSync enviam requisições e validam p
   } finally {
     globalThis.fetch = previousFetch;
   }
+});
+
+test('cliente HTTP fetchFactoryMetrics envia filtros na query string e valida resposta Zod', async context => {
+  const seenUrls: string[] = [];
+  const expectedResponse = {
+    contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+    generatedAt: '2026-11-22T12:00:00.000Z',
+    filters: {
+      repoPath: '/home/dev/repos/app',
+      period: '30d' as const,
+      from: '2026-10-23T12:00:00.000Z',
+      to: null,
+    },
+    availableRepos: ['/home/dev/repos/app'],
+    summary: {
+      totalFlows: 4,
+      completedFlows: 3,
+      cancelledFlows: 1,
+      failedFlows: 0,
+      activeFlows: 0,
+      openedPrs: 2,
+      averageFlowLeadTimeMs: 90_000,
+    },
+    stageLeadTimes: FACTORY_STAGE_ORDER.map(stage => ({
+      stage,
+      completedCount: 3,
+      partialCount: 0,
+      averageDurationMs: 15_000,
+      minDurationMs: 10_000,
+      maxDurationMs: 20_000,
+    })),
+    firstCycleReview: {
+      evaluatedFlows: 3,
+      approvedFirstCycle: 2,
+      rejectedFirstCycle: 1,
+      approvalRatePercent: 66.7,
+    },
+    rejectionReasons: [{ reason: 'cobertura', count: 2, flowCount: 1 }],
+    byRepository: [
+      {
+        repoPath: '/home/dev/repos/app',
+        totalFlows: 4,
+        completedFlows: 3,
+        cancelledFlows: 1,
+        failedFlows: 0,
+        activeFlows: 0,
+        openedPrs: 2,
+        firstCycleApprovalRatePercent: 66.7,
+      },
+    ],
+  };
+
+  context.mock.method(globalThis, 'fetch', async (input: string | URL | Request) => {
+    seenUrls.push(typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url);
+    return Response.json(expectedResponse);
+  });
+
+  const result = await fetchFactoryMetrics({
+    repoPath: '/home/dev/repos/app',
+    period: '30d',
+  });
+  assert.equal(
+    seenUrls[0],
+    'http://127.0.0.1:3001/api/factory/metrics?repoPath=%2Fhome%2Fdev%2Frepos%2Fapp&period=30d',
+  );
+  assert.equal(result.firstCycleReview.approvalRatePercent, 66.7);
+  assert.equal(result.summary.openedPrs, 2);
 });

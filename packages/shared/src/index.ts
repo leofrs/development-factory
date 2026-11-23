@@ -10,6 +10,7 @@ import { ReviewReportDirectoryPathSchema, ReviewStateSchema } from './review.js'
 export * from './review.js';
 export * from './factory.js';
 export * from './factory-flow-inspection.js';
+export * from './factory-metrics.js';
 export * from './factory-pr-review.js';
 export * from './factory-review-triage.js';
 export * from './factory-traceability.js';

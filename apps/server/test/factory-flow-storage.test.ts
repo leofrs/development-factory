@@ -46,7 +46,7 @@ test('SqliteFactoryFlowRepository aplica migrations e persiste múltiplos fluxos
     const applied = repo1.getAppliedMigrations();
     assert.equal(applied.length, REVIEW_MIGRATIONS.length);
     assert.ok(applied.some(migration => migration.name === 'add_factory_flows'));
-    assert.equal(applied.at(-1)?.name, 'add_factory_pr_publication');
+    assert.equal(applied.at(-1)?.name, 'add_factory_review_outcomes');
 
     const service1 = new FactoryFlowService(repo1, { now: createClock() });
 
@@ -1250,5 +1250,455 @@ test('migration v11 persiste prPublication no SQLite de forma idempotente', asyn
     repo2.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('migration v12 e getMetrics agregam lead time, 1º ciclo, motivos de reprovação, cancelados e timestamps parciais', async () => {
+  const { dir, dbPath } = createTempDbPath();
+  const artifactsDir = mkdtempSync(join(tmpdir(), 'df-factory-metrics-artifacts-'));
+
+  function writeStageArtifactPair(
+    name: string,
+    stage: 'triage' | 'planning' | 'development' | 'tests' | 'review' | 'pr',
+    reviewOverride?: {
+      verdict: 'approved' | 'approved_with_warnings' | 'changes_requested';
+      returnTarget?: 'development' | 'tests' | null;
+      findings: Array<{
+        severity: 'BLOQUEANTE' | 'SUGESTÃO' | 'NIT';
+        file: string;
+        line: number;
+        explanation: string;
+        category?: string;
+        signature?: string;
+      }>;
+    },
+  ): string {
+    const mdPath = join(artifactsDir, `${name}.md`);
+    if (stage === 'triage') {
+      writeFileSync(mdPath, triageMarkdown('Escopo de métricas.'));
+      writeFactoryStageSidecar(mdPath, 'triage');
+    } else if (stage === 'planning') {
+      writeFileSync(mdPath, planningMarkdown('Plano de métricas.'));
+      writeFactoryStageSidecar(mdPath, 'planning');
+    } else if (stage === 'development') {
+      writeFileSync(
+        mdPath,
+        '# Relatório de Implementação\n## Arquivos alterados\n- src/a.ts\n## Resumo das mudanças\nOk.\n## Status dos passos do plano\n| Passo | Status | Obs |\n| --- | --- | --- |\n| 1 | Concluído | Ok |\n',
+      );
+      writeFactoryStageSidecar(mdPath, 'development');
+    } else if (stage === 'tests') {
+      writeFileSync(
+        mdPath,
+        '# Relatório de Testes\n## Arquivos de teste alterados\n- test/a.test.ts\n## Comandos executados\n- npm test\n## Resultados e cobertura\nPASS\n',
+      );
+      writeFactoryStageSidecar(mdPath, 'tests');
+    } else if (stage === 'review') {
+      const verdictText =
+        reviewOverride?.verdict === 'changes_requested'
+          ? 'REPROVADO / REQUER AJUSTES'
+          : reviewOverride?.verdict === 'approved_with_warnings'
+            ? 'APROVADO COM RESSALVAS'
+            : 'APROVADO PARA PR';
+      writeFileSync(
+        mdPath,
+        `# Relatório de Code Review\n## Resumo Executivo\nRevisão.\n## Pontos Encontrados\nDetalhes.\n## Parecer Final\nVeredito: ${verdictText}\n`,
+      );
+      writeFactoryStageSidecar(mdPath, 'review', reviewOverride);
+    } else {
+      writeFileSync(
+        mdPath,
+        '# Resumo do Pull Request\n## Resumo das Alterações\nEntrega.\n## Validação e Evidências\n| ID | Critério de Aceite | Status | Evidência |\n| --- | --- | --- | --- |\n| CA1 | Validar | Atendido | npm test |\n## Dados do Pull Request\nTítulo: feat(metrics): painel\n',
+      );
+      writeFactoryStageSidecar(mdPath, 'pr', {
+        title: 'feat(metrics): painel',
+        baseBranch: 'main',
+        headBranch: 'factory/metrics',
+      });
+    }
+    return mdPath;
+  }
+
+  try {
+    const repo = SqliteFactoryFlowRepository.open({ dbPath });
+    let currentMs = Date.parse('2026-11-20T12:00:00.000Z');
+    const advanceClock = (seconds: number): string => {
+      currentMs += seconds * 1000;
+      return new Date(currentMs).toISOString();
+    };
+    const service = new FactoryFlowService(repo, {
+      now: () => new Date(currentMs).toISOString(),
+    });
+
+    // Estado inicial vazio.
+    const emptyMetrics = service.getMetrics();
+    assert.equal(emptyMetrics.summary.totalFlows, 0);
+    assert.equal(emptyMetrics.summary.averageFlowLeadTimeMs, null);
+    assert.equal(emptyMetrics.firstCycleReview.approvalRatePercent, null);
+    assert.deepEqual(emptyMetrics.rejectionReasons, []);
+    assert.deepEqual(emptyMetrics.byRepository, []);
+    assert.equal(emptyMetrics.stageLeadTimes.length, 6);
+    assert.ok(emptyMetrics.stageLeadTimes.every(item => item.averageDurationMs === null));
+
+    // Fluxo 1 (/tmp/repo-alpha): concluído no 1º ciclo com PR publicado.
+    const flow1 = await service.createFlow({
+      task: { inputType: 'jira_key', value: 'MET-1', repoPath: '/tmp/repo-alpha' },
+    });
+    await service.registerArtifact(flow1.flow.id, {
+      stage: 'triage',
+      kind: 'specification',
+      path: writeStageArtifactPair('f1-triage', 'triage'),
+      status: 'ready',
+    });
+    await service.transitionFlow(flow1.flow.id, { to: 'running', at: advanceClock(10), reason: 'Triagem' });
+    await service.transitionFlow(flow1.flow.id, { to: 'waiting_action', at: advanceClock(10), reason: 'Triagem ok' });
+    await service.advanceStage(flow1.flow.id, { at: advanceClock(10) }); // planning start
+    await service.registerArtifact(flow1.flow.id, {
+      stage: 'planning',
+      kind: 'plan',
+      path: writeStageArtifactPair('f1-plan', 'planning'),
+      status: 'ready',
+    });
+    await service.transitionFlow(flow1.flow.id, { to: 'waiting_action', at: advanceClock(20), reason: 'Plano ok' });
+    await service.advanceStage(flow1.flow.id, { at: advanceClock(10) }); // dev start
+    await service.registerArtifact(flow1.flow.id, {
+      stage: 'development',
+      kind: 'implementation_report',
+      path: writeStageArtifactPair('f1-dev', 'development'),
+      status: 'ready',
+    });
+    await service.advanceStage(flow1.flow.id, { at: advanceClock(30) }); // tests start
+    await service.registerArtifact(flow1.flow.id, {
+      stage: 'tests',
+      kind: 'test_report',
+      path: writeStageArtifactPair('f1-tests', 'tests'),
+      status: 'ready',
+    });
+    await service.advanceStage(flow1.flow.id, { at: advanceClock(15) }); // review start
+    await service.transitionFlow(flow1.flow.id, {
+      to: 'running',
+      at: advanceClock(5),
+      reason: 'Executando review',
+    });
+    await service.registerArtifact(flow1.flow.id, {
+      stage: 'review',
+      kind: 'review_report',
+      path: writeStageArtifactPair('f1-review', 'review', {
+        verdict: 'approved',
+        returnTarget: null,
+        findings: [],
+      }),
+      status: 'ready',
+    });
+    await service.transitionFlow(flow1.flow.id, {
+      to: 'waiting_action',
+      at: advanceClock(20),
+      reason: 'Review ok',
+      lastReviewVerdict: 'approved',
+    });
+    await service.advanceStage(flow1.flow.id, { at: advanceClock(5) }); // pr start
+    const f1PrPath = writeStageArtifactPair('f1-pr', 'pr');
+    const f1PrArtifact = await service.registerArtifact(flow1.flow.id, {
+      stage: 'pr',
+      kind: 'pr_summary',
+      path: f1PrPath,
+      status: 'ready',
+    });
+    const completedAt1 = advanceClock(15);
+    await service.transitionFlow(flow1.flow.id, {
+      to: 'completed',
+      at: completedAt1,
+      reason: 'PR publicado',
+      prPublication: {
+        prArtifactId: f1PrArtifact.id,
+        status: 'published',
+        provider: 'github',
+        prUrl: 'https://github.com/org/alpha/pull/1',
+        prNumber: 1,
+        commitSha: 'a'.repeat(40),
+        headBranch: 'factory/met-1',
+        baseBranch: 'main',
+        draft: false,
+        publishedAt: completedAt1,
+        secretFindings: [],
+        jiraSync: { status: 'not_requested', issueKey: 'MET-1', updatedAt: null, error: null },
+        error: null,
+        updatedAt: completedAt1,
+      },
+    });
+
+    // Fluxo 2 (/tmp/repo-alpha): 2 ciclos de review (reprovado no 1º com motivos 'cobertura' e 'regressao', aprovado no 2º), concluído sem PR publicado.
+    currentMs = Date.parse('2026-11-21T10:00:00.000Z');
+    const flow2 = await service.createFlow({
+      task: { inputType: 'jira_key', value: 'MET-2', repoPath: '/tmp/repo-alpha' },
+    });
+    await service.registerArtifact(flow2.flow.id, {
+      stage: 'triage',
+      kind: 'specification',
+      path: writeStageArtifactPair('f2-triage', 'triage'),
+      status: 'ready',
+    });
+    await service.transitionFlow(flow2.flow.id, { to: 'running', at: advanceClock(5), reason: 'Triagem' });
+    await service.transitionFlow(flow2.flow.id, { to: 'waiting_action', at: advanceClock(10), reason: 'Triagem ok' });
+    await service.advanceStage(flow2.flow.id, { at: advanceClock(5) }); // planning
+    await service.registerArtifact(flow2.flow.id, {
+      stage: 'planning',
+      kind: 'plan',
+      path: writeStageArtifactPair('f2-plan', 'planning'),
+      status: 'ready',
+    });
+    await service.transitionFlow(flow2.flow.id, { to: 'waiting_action', at: advanceClock(10), reason: 'Plano ok' });
+    await service.advanceStage(flow2.flow.id, { at: advanceClock(10) }); // dev iter 1
+    await service.registerArtifact(flow2.flow.id, {
+      stage: 'development',
+      kind: 'implementation_report',
+      path: writeStageArtifactPair('f2-dev1', 'development'),
+      status: 'ready',
+    });
+    await service.advanceStage(flow2.flow.id, { at: advanceClock(20) }); // tests iter 1
+    await service.registerArtifact(flow2.flow.id, {
+      stage: 'tests',
+      kind: 'test_report',
+      path: writeStageArtifactPair('f2-tests1', 'tests'),
+      status: 'ready',
+    });
+    await service.advanceStage(flow2.flow.id, { at: advanceClock(10) }); // review iter 1
+    await service.transitionFlow(flow2.flow.id, {
+      to: 'running',
+      at: advanceClock(5),
+      reason: 'Executando review ciclo 1',
+    });
+    await service.registerArtifact(flow2.flow.id, {
+      stage: 'review',
+      kind: 'review_report',
+      path: writeStageArtifactPair('f2-review1', 'review', {
+        verdict: 'changes_requested',
+        returnTarget: 'development',
+        findings: [
+          {
+            severity: 'BLOQUEANTE',
+            file: 'src/a.ts',
+            line: 10,
+            explanation: 'Falta teste de erro.',
+            category: 'cobertura',
+          },
+          {
+            severity: 'BLOQUEANTE',
+            file: 'src/b.ts',
+            line: 22,
+            explanation: 'Quebrou contrato existente.',
+            category: 'regressao',
+          },
+        ],
+      }),
+      status: 'ready',
+    });
+    await service.transitionFlow(flow2.flow.id, {
+      to: 'waiting_action',
+      at: advanceClock(15),
+      reason: 'Ajustes solicitados',
+      lastReviewVerdict: 'changes_requested',
+    });
+    await service.returnStage(flow2.flow.id, {
+      targetStage: 'development',
+      at: advanceClock(5),
+    });
+    await service.registerArtifact(flow2.flow.id, {
+      stage: 'development',
+      kind: 'implementation_report',
+      path: writeStageArtifactPair('f2-dev2', 'development'),
+      status: 'ready',
+    });
+    await service.advanceStage(flow2.flow.id, { at: advanceClock(25) }); // tests iter 2
+    await service.registerArtifact(flow2.flow.id, {
+      stage: 'tests',
+      kind: 'test_report',
+      path: writeStageArtifactPair('f2-tests2', 'tests'),
+      status: 'ready',
+    });
+    await service.advanceStage(flow2.flow.id, { at: advanceClock(15) }); // review iter 2
+    await service.transitionFlow(flow2.flow.id, {
+      to: 'running',
+      at: advanceClock(5),
+      reason: 'Executando review ciclo 2',
+    });
+    await service.registerArtifact(flow2.flow.id, {
+      stage: 'review',
+      kind: 'review_report',
+      path: writeStageArtifactPair('f2-review2', 'review', {
+        verdict: 'approved',
+        returnTarget: null,
+        findings: [],
+      }),
+      status: 'ready',
+    });
+    await service.transitionFlow(flow2.flow.id, {
+      to: 'waiting_action',
+      at: advanceClock(15),
+      reason: 'Aprovado no 2º ciclo',
+      lastReviewVerdict: 'approved',
+    });
+    await service.advanceStage(flow2.flow.id, { at: advanceClock(5) }); // pr
+    await service.registerArtifact(flow2.flow.id, {
+      stage: 'pr',
+      kind: 'pr_summary',
+      path: writeStageArtifactPair('f2-pr', 'pr'),
+      status: 'ready',
+    });
+    await service.transitionFlow(flow2.flow.id, {
+      to: 'completed',
+      at: advanceClock(10),
+      reason: 'Concluído manualmente',
+    });
+
+    // Fluxo 3 (/tmp/repo-beta): antigo (fora de 7d), cancelado após concluir triagem, com desenvolvimento em andamento (timestamp parcial).
+    currentMs = Date.parse('2026-10-01T10:00:00.000Z');
+    const flow3 = await service.createFlow({
+      task: { inputType: 'title', value: 'Fluxo cancelado antigo', repoPath: '/tmp/repo-beta' },
+    });
+    await service.registerArtifact(flow3.flow.id, {
+      stage: 'triage',
+      kind: 'specification',
+      path: writeStageArtifactPair('f3-triage', 'triage'),
+      status: 'ready',
+    });
+    await service.transitionFlow(flow3.flow.id, { to: 'running', at: advanceClock(10), reason: 'Triagem' });
+    await service.transitionFlow(flow3.flow.id, { to: 'waiting_action', at: advanceClock(40), reason: 'Triagem ok' });
+    await service.advanceStage(flow3.flow.id, { at: advanceClock(10) }); // planning running (sem finishedAt)
+    await service.cancelFlow(flow3.flow.id, {
+      at: advanceClock(20),
+      reason: 'Cancelado pelo usuário antes do review',
+    });
+
+    // Fluxo 4 (/tmp/repo-beta): recente (dentro de 7d), reprovado no 1º ciclo por 'cobertura' e cancelado em seguida.
+    currentMs = Date.parse('2026-11-22T09:00:00.000Z');
+    const flow4 = await service.createFlow({
+      task: { inputType: 'jira_key', value: 'MET-4', repoPath: '/tmp/repo-beta' },
+    });
+    await service.transitionFlow(flow4.flow.id, { to: 'running', at: advanceClock(5), reason: 'Triagem' });
+    // Registra motivo diretamente para validar persistência mesmo sem sidecar no disco.
+    repo.recordReviewOutcome({
+      contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+      id: randomUUID(),
+      flowId: flow4.flow.id,
+      artifactId: null,
+      iteration: 1,
+      verdict: 'changes_requested',
+      rejectionReasons: ['Cobertura', 'cobertura'],
+      createdAt: advanceClock(10),
+    });
+    await service.cancelFlow(flow4.flow.id, {
+      at: advanceClock(5),
+      reason: 'Cancelado após reprovação',
+    });
+
+    // Fluxo 5 (/tmp/repo-beta): em andamento na triagem (timestamp parcial: startedAt sem finishedAt).
+    currentMs = Date.parse('2026-11-22T10:00:00.000Z');
+    const flow5 = await service.createFlow({
+      task: { inputType: 'title', value: 'Fluxo em andamento parcial', repoPath: '/tmp/repo-beta' },
+    });
+    await service.transitionFlow(flow5.flow.id, {
+      to: 'running',
+      at: advanceClock(5),
+      reason: 'Triagem em andamento',
+    });
+
+    // Consulta global (todo o período).
+    currentMs = Date.parse('2026-11-22T12:00:00.000Z');
+    const allMetrics = service.getMetrics();
+    assert.deepEqual(allMetrics.availableRepos, ['/tmp/repo-alpha', '/tmp/repo-beta']);
+    assert.equal(allMetrics.summary.totalFlows, 5);
+    assert.equal(allMetrics.summary.completedFlows, 2);
+    assert.equal(allMetrics.summary.cancelledFlows, 2);
+    assert.equal(allMetrics.summary.failedFlows, 0);
+    assert.equal(allMetrics.summary.activeFlows, 1);
+    assert.equal(allMetrics.summary.openedPrs, 1);
+    assert.ok(allMetrics.summary.averageFlowLeadTimeMs !== null);
+
+    // Triagem: concluída em flow1 (20s), flow2 (15s), flow3 (50s); cancelada em flow4 e em aberto (parcial) em flow5.
+    const triageLead = allMetrics.stageLeadTimes.find(item => item.stage === 'triage');
+    assert.deepEqual(triageLead, {
+      stage: 'triage',
+      completedCount: 3,
+      partialCount: 1,
+      averageDurationMs: Math.round((20_000 + 15_000 + 50_000) / 3),
+      minDurationMs: 15_000,
+      maxDurationMs: 50_000,
+    });
+
+    // Planejamento: concluído em flow1 (30s) e flow2 (20s); cancelado em flow3 (não entra na média).
+    const planningLead = allMetrics.stageLeadTimes.find(item => item.stage === 'planning');
+    assert.equal(planningLead?.completedCount, 2);
+    assert.equal(planningLead?.averageDurationMs, 25_000);
+
+    // 1º ciclo: flow1 aprovado; flow2 reprovado; flow3 e flow5 nunca chegaram ao review; flow4 reprovado -> 1 de 3 (33.3%).
+    assert.deepEqual(allMetrics.firstCycleReview, {
+      evaluatedFlows: 3,
+      approvedFirstCycle: 1,
+      rejectedFirstCycle: 2,
+      approvalRatePercent: 33.3,
+    });
+
+    // Ranking de motivos: cobertura (1 em flow2 + 2 em flow4 = 3 ocorrências, 2 fluxos), regressao (1 ocorrência, 1 fluxo).
+    assert.deepEqual(allMetrics.rejectionReasons, [
+      { reason: 'cobertura', count: 3, flowCount: 2 },
+      { reason: 'regressao', count: 1, flowCount: 1 },
+    ]);
+
+    // Throughput por repositório.
+    assert.deepEqual(allMetrics.byRepository, [
+      {
+        repoPath: '/tmp/repo-alpha',
+        totalFlows: 2,
+        completedFlows: 2,
+        cancelledFlows: 0,
+        failedFlows: 0,
+        activeFlows: 0,
+        openedPrs: 1,
+        firstCycleApprovalRatePercent: 50,
+      },
+      {
+        repoPath: '/tmp/repo-beta',
+        totalFlows: 3,
+        completedFlows: 0,
+        cancelledFlows: 2,
+        failedFlows: 0,
+        activeFlows: 1,
+        openedPrs: 0,
+        firstCycleApprovalRatePercent: 0,
+      },
+    ]);
+
+    // Filtro por janela de 7 dias exclui flow3 (2026-10-01).
+    const recentMetrics = service.getMetrics({ period: '7d' });
+    assert.equal(recentMetrics.summary.totalFlows, 4);
+    assert.equal(recentMetrics.summary.cancelledFlows, 1);
+    assert.equal(recentMetrics.summary.activeFlows, 1);
+    assert.deepEqual(recentMetrics.availableRepos, ['/tmp/repo-alpha', '/tmp/repo-beta']);
+
+    // Filtro por repositório específico.
+    const alphaMetrics = service.getMetrics({ repoPath: '/tmp/repo-alpha', period: '7d' });
+    assert.equal(alphaMetrics.summary.totalFlows, 2);
+    assert.equal(alphaMetrics.summary.completedFlows, 2);
+    assert.equal(alphaMetrics.summary.openedPrs, 1);
+    assert.equal(alphaMetrics.firstCycleReview.approvalRatePercent, 50);
+    assert.deepEqual(alphaMetrics.rejectionReasons, [
+      { reason: 'cobertura', count: 1, flowCount: 1 },
+      { reason: 'regressao', count: 1, flowCount: 1 },
+    ]);
+    assert.equal(alphaMetrics.byRepository.length, 1);
+    repo.close();
+
+    // Executa migration v12 novamente para comprovar idempotência.
+    const rawDb = new DatabaseSync(dbPath);
+    try {
+      const v12Migration = REVIEW_MIGRATIONS.find(migration => migration.version === 12);
+      assert.ok(v12Migration);
+      v12Migration.up(rawDb);
+    } finally {
+      rawDb.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(artifactsDir, { recursive: true, force: true });
   }
 });

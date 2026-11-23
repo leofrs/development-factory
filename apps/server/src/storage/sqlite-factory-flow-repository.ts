@@ -1,10 +1,16 @@
 import { DatabaseSync } from 'node:sqlite';
 import {
+  FACTORY_FLOW_CONTRACT_VERSION,
+  FACTORY_METRICS_PERIOD_DAYS,
   FACTORY_STAGE_ORDER,
   FactoryFlowArtifactSchema,
   FactoryFlowCheckpointSchema,
   FactoryFlowSchema,
   FactoryFlowStageSchema,
+  FactoryMetricsPeriodSchema,
+  FactoryMetricsResponseSchema,
+  FactoryReviewOutcomeRecordSchema,
+  isFactoryReviewApprovedVerdict,
   returnFactoryFlowStage,
   transitionFactoryFlow,
   type FactoryFlow,
@@ -14,8 +20,11 @@ import {
   type FactoryFlowStage,
   type FactoryFlowState,
   type FactoryFlowTransitionCommand,
+  type FactoryMetricsPeriod,
+  type FactoryMetricsResponse,
   type FactoryPrPublication,
   type FactoryPrReview,
+  type FactoryReviewOutcomeRecord,
   type FactoryReviewTriage,
   type FactoryStageName,
   type FactoryStageState,
@@ -77,6 +86,26 @@ export interface UpdateFactoryFlowWorktreeInput {
 export interface ListFactoryCheckpointsFilter {
   readonly stage?: FactoryStageName;
   readonly iteration?: number;
+}
+
+export interface FactoryMetricsRepositoryFilter {
+  readonly repoPath?: string;
+  readonly period?: FactoryMetricsPeriod;
+  readonly from?: string;
+  readonly to?: string;
+  readonly now?: string;
+  readonly extraOutcomesByFlow?: ReadonlyMap<string, readonly FactoryReviewOutcomeRecord[]>;
+}
+
+interface FactoryReviewOutcomeRow {
+  id: string;
+  flow_id: string;
+  artifact_id: string | null;
+  contract_version: number;
+  iteration: number;
+  verdict: string;
+  rejection_reasons_json: string;
+  created_at: string;
 }
 
 interface FactoryFlowRow {
@@ -296,6 +325,114 @@ function rowToCheckpoint(row: FactoryCheckpointRow): FactoryFlowCheckpoint {
     );
   }
   return parsed.data;
+}
+
+function rowToReviewOutcome(row: FactoryReviewOutcomeRow): FactoryReviewOutcomeRecord {
+  const parsed = FactoryReviewOutcomeRecordSchema.safeParse({
+    contractVersion: row.contract_version,
+    id: row.id,
+    flowId: row.flow_id,
+    artifactId: row.artifact_id,
+    iteration: row.iteration,
+    verdict: row.verdict,
+    rejectionReasons: parseJson(row.rejection_reasons_json, `motivos de reprovação ${row.id}`),
+    createdAt: row.created_at,
+  });
+
+  if (!parsed.success) {
+    throw new ReviewStorageError(
+      'STORAGE_CORRUPTED_DATA',
+      `O registro do resultado de Code Review ${row.id} no banco local viola o contrato atual.`,
+    );
+  }
+  return parsed.data;
+}
+
+function resolveMetricsWindow(filter: FactoryMetricsRepositoryFilter): {
+  period: FactoryMetricsPeriod;
+  generatedAt: string;
+  from: string | null;
+  to: string | null;
+} {
+  const period = FactoryMetricsPeriodSchema.parse(filter.period ?? 'all');
+  const generatedAt = filter.now ?? new Date().toISOString();
+  let from = filter.from ?? null;
+  if (from === null && period !== 'all') {
+    const days = FACTORY_METRICS_PERIOD_DAYS[period];
+    const nowMs = Date.parse(generatedAt);
+    from = new Date(nowMs - days * 86_400_000).toISOString();
+  }
+  const to = filter.to ?? null;
+  return { period, generatedAt, from, to };
+}
+
+function hasReturnedFromReview(flow: FactoryFlow): boolean {
+  if (flow.iteration > 1) {
+    return true;
+  }
+  return flow.transitions.some(
+    transition =>
+      /Retorno da etapa review/i.test(transition.reason) ||
+      /Code Review reprovou/i.test(transition.reason),
+  );
+}
+
+function evaluateFlowFirstCycleReview(
+  flow: FactoryFlow,
+  outcomes: readonly FactoryReviewOutcomeRecord[],
+  reviewArtifactCount: number,
+): 'approved' | 'rejected' | 'not_evaluated' {
+  const returned =
+    hasReturnedFromReview(flow) ||
+    outcomes.some(outcome => outcome.iteration > 1) ||
+    reviewArtifactCount > 1;
+
+  if (outcomes.length > 0) {
+    const first = outcomes[0];
+    if (!first) {
+      return 'not_evaluated';
+    }
+    if (returned || first.verdict === 'changes_requested') {
+      return 'rejected';
+    }
+    return isFactoryReviewApprovedVerdict(first.verdict) ? 'approved' : 'rejected';
+  }
+
+  if (
+    flow.lastReviewVerdict === null &&
+    !returned &&
+    flow.currentStage !== 'pr' &&
+    flow.state !== 'completed'
+  ) {
+    return 'not_evaluated';
+  }
+
+  if (returned) {
+    return 'rejected';
+  }
+  if (flow.lastReviewVerdict !== null) {
+    return isFactoryReviewApprovedVerdict(flow.lastReviewVerdict) ? 'approved' : 'rejected';
+  }
+  return 'approved';
+}
+
+function roundApprovalRate(approved: number, evaluated: number): number | null {
+  if (evaluated <= 0) {
+    return null;
+  }
+  return Math.round((approved / evaluated) * 1000) / 10;
+}
+
+function normalizeRejectionReason(raw: string): { key: string; label: string } | null {
+  const collapsed = raw.trim().replace(/\s+/g, ' ');
+  if (collapsed.length === 0) {
+    return null;
+  }
+  const label = collapsed.slice(0, 500);
+  return {
+    key: label.normalize().toLowerCase(),
+    label,
+  };
 }
 
 function isConstraintError(error: unknown): boolean {
@@ -1087,6 +1224,524 @@ export class SqliteFactoryFlowRepository {
       .all(...params) as unknown as FactoryCheckpointRow[];
 
     return rows.map(rowToCheckpoint);
+  }
+
+  recordReviewOutcome(outcomeInput: FactoryReviewOutcomeRecord): FactoryReviewOutcomeRecord {
+    const parsed = FactoryReviewOutcomeRecordSchema.safeParse(outcomeInput);
+    if (!parsed.success) {
+      throw new ReviewStorageError(
+        'STORAGE_INVALID_INPUT',
+        `Os dados do resultado de Code Review são inválidos para persistência: ${parsed.error.issues.map(issue => issue.message).join('; ')}`,
+      );
+    }
+
+    return this.runInTransaction(() => {
+      const flow = this.getFlowById(parsed.data.flowId);
+      if (!flow) {
+        throw new ReviewStorageError(
+          'STORAGE_NOT_FOUND',
+          `Fluxo ${parsed.data.flowId} não encontrado para registrar resultado de Code Review.`,
+        );
+      }
+
+      try {
+        this.db
+          .prepare(
+            `INSERT INTO factory_flow_review_outcomes (
+              id,
+              flow_id,
+              artifact_id,
+              contract_version,
+              iteration,
+              verdict,
+              rejection_reasons_json,
+              created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            parsed.data.id,
+            parsed.data.flowId,
+            parsed.data.artifactId,
+            parsed.data.contractVersion,
+            parsed.data.iteration,
+            parsed.data.verdict,
+            JSON.stringify(parsed.data.rejectionReasons),
+            parsed.data.createdAt,
+          );
+      } catch (error) {
+        if (isConstraintError(error)) {
+          throw new ReviewStorageError(
+            'STORAGE_CONFLICT',
+            `Já existe um resultado de Code Review com o identificador ${parsed.data.id}.`,
+            { cause: error },
+          );
+        }
+        throw error;
+      }
+
+      return parsed.data;
+    });
+  }
+
+  listReviewOutcomesByFlowId(flowId: string): FactoryReviewOutcomeRecord[] {
+    this.ensureOpen();
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM factory_flow_review_outcomes
+         WHERE flow_id = ?
+         ORDER BY iteration ASC, created_at ASC, rowid ASC`,
+      )
+      .all(flowId) as unknown as FactoryReviewOutcomeRow[];
+
+    return rows.map(rowToReviewOutcome);
+  }
+
+  listReadyReviewArtifactsWithoutOutcome(repoPath?: string): FactoryFlowArtifact[] {
+    this.ensureOpen();
+    const rows = (
+      repoPath !== undefined
+        ? this.db
+            .prepare(
+              `SELECT a.*
+               FROM factory_flow_artifacts a
+               INNER JOIN factory_flows f ON f.id = a.flow_id
+               LEFT JOIN factory_flow_review_outcomes o ON o.artifact_id = a.id
+               WHERE a.stage = 'review'
+                 AND a.kind = 'review_report'
+                 AND a.format = 'markdown'
+                 AND a.status = 'ready'
+                 AND f.repo_path = ?
+                 AND o.id IS NULL
+               ORDER BY a.iteration ASC, a.created_at ASC, a.rowid ASC`,
+            )
+            .all(repoPath)
+        : this.db
+            .prepare(
+              `SELECT a.*
+               FROM factory_flow_artifacts a
+               LEFT JOIN factory_flow_review_outcomes o ON o.artifact_id = a.id
+               WHERE a.stage = 'review'
+                 AND a.kind = 'review_report'
+                 AND a.format = 'markdown'
+                 AND a.status = 'ready'
+                 AND o.id IS NULL
+               ORDER BY a.iteration ASC, a.created_at ASC, a.rowid ASC`,
+            )
+            .all()
+    ) as unknown as FactoryArtifactRow[];
+
+    return rows.map(rowToArtifact);
+  }
+
+  getMetrics(filter: FactoryMetricsRepositoryFilter = {}): FactoryMetricsResponse {
+    this.ensureOpen();
+    const { period, generatedAt, from, to } = resolveMetricsWindow(filter);
+    const fromMs = from !== null ? Date.parse(from) : null;
+    const toMs = to !== null ? Date.parse(to) : null;
+
+    const repoRows = this.db
+      .prepare('SELECT DISTINCT repo_path FROM factory_flows ORDER BY repo_path ASC')
+      .all() as Array<{ repo_path: string }>;
+    const availableRepos = repoRows.map(row => row.repo_path);
+
+    const repoFilter = filter.repoPath;
+    const flowRows = (
+      repoFilter !== undefined
+        ? this.db
+            .prepare('SELECT * FROM factory_flows WHERE repo_path = ? ORDER BY updated_at DESC, created_at DESC')
+            .all(repoFilter)
+        : this.db
+            .prepare('SELECT * FROM factory_flows ORDER BY updated_at DESC, created_at DESC')
+            .all()
+    ) as unknown as FactoryFlowRow[];
+
+    const flows = flowRows.map(rowToFlow).filter(flow => {
+      const updatedMs = Date.parse(flow.updatedAt);
+      if (!Number.isFinite(updatedMs)) {
+        return fromMs === null && toMs === null;
+      }
+      if (fromMs !== null && updatedMs < fromMs) {
+        return false;
+      }
+      if (toMs !== null && updatedMs > toMs) {
+        return false;
+      }
+      return true;
+    });
+
+    const matchingFlowIds = new Set(flows.map(flow => flow.id));
+
+    const stageRows = (
+      repoFilter !== undefined
+        ? this.db
+            .prepare(
+              `SELECT s.* FROM factory_flow_stages s
+               INNER JOIN factory_flows f ON f.id = s.flow_id
+               WHERE f.repo_path = ?`,
+            )
+            .all(repoFilter)
+        : this.db.prepare('SELECT * FROM factory_flow_stages').all()
+    ) as unknown as FactoryStageRow[];
+
+    const stageDurations = new Map<FactoryStageName, number[]>(
+      FACTORY_STAGE_ORDER.map(stage => [stage, []]),
+    );
+    const stagePartials = new Map<FactoryStageName, number>(
+      FACTORY_STAGE_ORDER.map(stage => [stage, 0]),
+    );
+
+    for (const row of stageRows) {
+      if (!matchingFlowIds.has(row.flow_id)) {
+        continue;
+      }
+      const stage = rowToStage(row);
+      const durations = stageDurations.get(stage.name);
+      if (!durations) {
+        continue;
+      }
+
+      if (stage.state === 'completed') {
+        if (stage.startedAt !== null && stage.finishedAt !== null) {
+          const startedMs = Date.parse(stage.startedAt);
+          const finishedMs = Date.parse(stage.finishedAt);
+          if (Number.isFinite(startedMs) && Number.isFinite(finishedMs) && finishedMs >= startedMs) {
+            durations.push(finishedMs - startedMs);
+            continue;
+          }
+        }
+        stagePartials.set(stage.name, (stagePartials.get(stage.name) ?? 0) + 1);
+        continue;
+      }
+
+      if (stage.state !== 'pending' && (stage.startedAt === null || stage.finishedAt === null)) {
+        stagePartials.set(stage.name, (stagePartials.get(stage.name) ?? 0) + 1);
+      }
+    }
+
+    const stageLeadTimes = FACTORY_STAGE_ORDER.map(stage => {
+      const durations = stageDurations.get(stage) ?? [];
+      const partialCount = stagePartials.get(stage) ?? 0;
+      if (durations.length === 0) {
+        return {
+          stage,
+          completedCount: 0,
+          partialCount,
+          averageDurationMs: null,
+          minDurationMs: null,
+          maxDurationMs: null,
+        };
+      }
+      let sum = 0;
+      let min = durations[0] ?? 0;
+      let max = durations[0] ?? 0;
+      for (const duration of durations) {
+        sum += duration;
+        if (duration < min) {
+          min = duration;
+        }
+        if (duration > max) {
+          max = duration;
+        }
+      }
+      return {
+        stage,
+        completedCount: durations.length,
+        partialCount,
+        averageDurationMs: Math.round(sum / durations.length),
+        minDurationMs: min,
+        maxDurationMs: max,
+      };
+    });
+
+    const outcomeRows = (
+      repoFilter !== undefined
+        ? this.db
+            .prepare(
+              `SELECT o.* FROM factory_flow_review_outcomes o
+               INNER JOIN factory_flows f ON f.id = o.flow_id
+               WHERE f.repo_path = ?
+               ORDER BY o.iteration ASC, o.created_at ASC, o.rowid ASC`,
+            )
+            .all(repoFilter)
+        : this.db
+            .prepare(
+              `SELECT * FROM factory_flow_review_outcomes
+               ORDER BY iteration ASC, created_at ASC, rowid ASC`,
+            )
+            .all()
+    ) as unknown as FactoryReviewOutcomeRow[];
+
+    const outcomesByFlow = new Map<string, FactoryReviewOutcomeRecord[]>();
+    const recordedArtifactIds = new Set<string>();
+    for (const row of outcomeRows) {
+      if (!matchingFlowIds.has(row.flow_id)) {
+        continue;
+      }
+      const parsedOutcome = rowToReviewOutcome(row);
+      const list = outcomesByFlow.get(parsedOutcome.flowId) ?? [];
+      list.push(parsedOutcome);
+      outcomesByFlow.set(parsedOutcome.flowId, list);
+      if (parsedOutcome.artifactId !== null) {
+        recordedArtifactIds.add(parsedOutcome.artifactId);
+      }
+    }
+
+    if (filter.extraOutcomesByFlow) {
+      for (const [flowId, extraList] of filter.extraOutcomesByFlow) {
+        if (!matchingFlowIds.has(flowId)) {
+          continue;
+        }
+        const target = outcomesByFlow.get(flowId) ?? [];
+        for (const extra of extraList) {
+          if (extra.artifactId !== null && recordedArtifactIds.has(extra.artifactId)) {
+            continue;
+          }
+          target.push(extra);
+        }
+        target.sort((left, right) => {
+          if (left.iteration !== right.iteration) {
+            return left.iteration - right.iteration;
+          }
+          return Date.parse(left.createdAt) - Date.parse(right.createdAt);
+        });
+        outcomesByFlow.set(flowId, target);
+      }
+    }
+
+    const artifactCountRows = (
+      repoFilter !== undefined
+        ? this.db
+            .prepare(
+              `SELECT a.flow_id, COUNT(*) AS artifact_count
+               FROM factory_flow_artifacts a
+               INNER JOIN factory_flows f ON f.id = a.flow_id
+               WHERE a.stage = 'review'
+                 AND a.kind = 'review_report'
+                 AND a.status = 'ready'
+                 AND f.repo_path = ?
+               GROUP BY a.flow_id`,
+            )
+            .all(repoFilter)
+        : this.db
+            .prepare(
+              `SELECT flow_id, COUNT(*) AS artifact_count
+               FROM factory_flow_artifacts
+               WHERE stage = 'review'
+                 AND kind = 'review_report'
+                 AND status = 'ready'
+               GROUP BY flow_id`,
+            )
+            .all()
+    ) as Array<{ flow_id: string; artifact_count: number }>;
+
+    const reviewArtifactCountByFlow = new Map<string, number>();
+    for (const row of artifactCountRows) {
+      if (matchingFlowIds.has(row.flow_id)) {
+        reviewArtifactCountByFlow.set(row.flow_id, row.artifact_count);
+      }
+    }
+
+    let completedFlows = 0;
+    let cancelledFlows = 0;
+    let failedFlows = 0;
+    let activeFlows = 0;
+    let openedPrs = 0;
+    let flowLeadTimeSum = 0;
+    let flowLeadTimeCount = 0;
+
+    let evaluatedFlows = 0;
+    let approvedFirstCycle = 0;
+    let rejectedFirstCycle = 0;
+
+    const rejectionReasonBuckets = new Map<
+      string,
+      { labelCounts: Map<string, number>; count: number; flowIds: Set<string> }
+    >();
+
+    const repoBuckets = new Map<
+      string,
+      {
+        repoPath: string;
+        totalFlows: number;
+        completedFlows: number;
+        cancelledFlows: number;
+        failedFlows: number;
+        activeFlows: number;
+        openedPrs: number;
+        evaluatedFirstCycle: number;
+        approvedFirstCycle: number;
+      }
+    >();
+
+    for (const flow of flows) {
+      const repoBucket = repoBuckets.get(flow.target.repoPath) ?? {
+        repoPath: flow.target.repoPath,
+        totalFlows: 0,
+        completedFlows: 0,
+        cancelledFlows: 0,
+        failedFlows: 0,
+        activeFlows: 0,
+        openedPrs: 0,
+        evaluatedFirstCycle: 0,
+        approvedFirstCycle: 0,
+      };
+      repoBucket.totalFlows += 1;
+
+      if (flow.state === 'completed') {
+        completedFlows += 1;
+        repoBucket.completedFlows += 1;
+        if (flow.finishedAt !== null) {
+          const createdMs = Date.parse(flow.createdAt);
+          const finishedMs = Date.parse(flow.finishedAt);
+          if (Number.isFinite(createdMs) && Number.isFinite(finishedMs) && finishedMs >= createdMs) {
+            flowLeadTimeSum += finishedMs - createdMs;
+            flowLeadTimeCount += 1;
+          }
+        }
+      } else if (flow.state === 'cancelled') {
+        cancelledFlows += 1;
+        repoBucket.cancelledFlows += 1;
+      } else if (flow.state === 'failed') {
+        failedFlows += 1;
+        repoBucket.failedFlows += 1;
+      } else {
+        activeFlows += 1;
+        repoBucket.activeFlows += 1;
+      }
+
+      if (flow.prPublication?.status === 'published' && flow.prPublication.prUrl !== null) {
+        openedPrs += 1;
+        repoBucket.openedPrs += 1;
+      }
+
+      const flowOutcomes = outcomesByFlow.get(flow.id) ?? [];
+      const firstCycleVerdict = evaluateFlowFirstCycleReview(
+        flow,
+        flowOutcomes,
+        reviewArtifactCountByFlow.get(flow.id) ?? 0,
+      );
+
+      if (firstCycleVerdict === 'approved') {
+        evaluatedFlows += 1;
+        approvedFirstCycle += 1;
+        repoBucket.evaluatedFirstCycle += 1;
+        repoBucket.approvedFirstCycle += 1;
+      } else if (firstCycleVerdict === 'rejected') {
+        evaluatedFlows += 1;
+        rejectedFirstCycle += 1;
+        repoBucket.evaluatedFirstCycle += 1;
+      }
+
+      for (const outcome of flowOutcomes) {
+        if (outcome.verdict !== 'changes_requested' && outcome.rejectionReasons.length === 0) {
+          continue;
+        }
+        const reasons =
+          outcome.rejectionReasons.length > 0
+            ? outcome.rejectionReasons
+            : ['Ajustes solicitados no Code Review'];
+        for (const rawReason of reasons) {
+          const normalized = normalizeRejectionReason(rawReason);
+          if (!normalized) {
+            continue;
+          }
+          const existing = rejectionReasonBuckets.get(normalized.key) ?? {
+            labelCounts: new Map<string, number>(),
+            count: 0,
+            flowIds: new Set<string>(),
+          };
+          existing.labelCounts.set(
+            normalized.label,
+            (existing.labelCounts.get(normalized.label) ?? 0) + 1,
+          );
+          existing.count += 1;
+          existing.flowIds.add(flow.id);
+          rejectionReasonBuckets.set(normalized.key, existing);
+        }
+      }
+
+      repoBuckets.set(flow.target.repoPath, repoBucket);
+    }
+
+    const rejectionReasons = Array.from(rejectionReasonBuckets.values())
+      .map(bucket => {
+        const bestLabel =
+          Array.from(bucket.labelCounts.entries()).sort((left, right) => {
+            if (right[1] !== left[1]) {
+              return right[1] - left[1];
+            }
+            return left[0].localeCompare(right[0]);
+          })[0]?.[0] ?? '';
+        return {
+          reason: bestLabel,
+          count: bucket.count,
+          flowCount: bucket.flowIds.size,
+        };
+      })
+      .sort((left, right) => {
+        if (right.count !== left.count) {
+          return right.count - left.count;
+        }
+        if (right.flowCount !== left.flowCount) {
+          return right.flowCount - left.flowCount;
+        }
+        return left.reason.localeCompare(right.reason);
+      });
+
+    const byRepository = Array.from(repoBuckets.values())
+      .map(bucket => ({
+        repoPath: bucket.repoPath,
+        totalFlows: bucket.totalFlows,
+        completedFlows: bucket.completedFlows,
+        cancelledFlows: bucket.cancelledFlows,
+        failedFlows: bucket.failedFlows,
+        activeFlows: bucket.activeFlows,
+        openedPrs: bucket.openedPrs,
+        firstCycleApprovalRatePercent: roundApprovalRate(
+          bucket.approvedFirstCycle,
+          bucket.evaluatedFirstCycle,
+        ),
+      }))
+      .sort((left, right) => {
+        if (right.completedFlows !== left.completedFlows) {
+          return right.completedFlows - left.completedFlows;
+        }
+        if (right.totalFlows !== left.totalFlows) {
+          return right.totalFlows - left.totalFlows;
+        }
+        return left.repoPath.localeCompare(right.repoPath);
+      });
+
+    return FactoryMetricsResponseSchema.parse({
+      contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
+      generatedAt,
+      filters: {
+        repoPath: repoFilter ?? null,
+        period,
+        from,
+        to,
+      },
+      availableRepos,
+      summary: {
+        totalFlows: flows.length,
+        completedFlows,
+        cancelledFlows,
+        failedFlows,
+        activeFlows,
+        openedPrs,
+        averageFlowLeadTimeMs:
+          flowLeadTimeCount > 0 ? Math.round(flowLeadTimeSum / flowLeadTimeCount) : null,
+      },
+      stageLeadTimes,
+      firstCycleReview: {
+        evaluatedFlows,
+        approvedFirstCycle,
+        rejectedFirstCycle,
+        approvalRatePercent: roundApprovalRate(approvedFirstCycle, evaluatedFlows),
+      },
+      rejectionReasons,
+      byRepository,
+    });
   }
 
   getAppliedMigrations(): AppliedMigration[] {

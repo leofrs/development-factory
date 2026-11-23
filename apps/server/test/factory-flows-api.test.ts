@@ -28,6 +28,7 @@ import {
   FactoryFlowDetailsSchema,
   FactoryFlowListResponseSchema,
   FactoryFlowSchema,
+  FactoryMetricsResponseSchema,
   FactoryTestsSidecarSchema,
   RollbackFactoryFlowCheckpointResponseSchema,
   SaveFactoryPrReviewResponseSchema,
@@ -3333,3 +3334,96 @@ test(
     );
   },
 );
+
+test('GET /api/factory/metrics valida origem, filtros e agrega métricas reais do SQLite', async context => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'df-factory-metrics-api-'));
+  const dbPath = join(rootDir, 'reviews.db');
+  const artifactsDir = join(rootDir, 'artifacts');
+  mkdirSync(artifactsDir, { recursive: true });
+
+  const { server, factoryFlowService, shutdown } = createReviewServer({ dbPath });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+
+  const address = server.address();
+  assert(address && typeof address !== 'string');
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+
+  context.after(async () => {
+    await shutdown();
+    rmSync(rootDir, { recursive: true, force: true });
+  });
+
+  // Sem origem -> 403.
+  const noOriginRes = await fetch(`${baseUrl}/api/factory/metrics`);
+  assert.equal(noOriginRes.status, 403);
+
+  // Filtro inválido -> 400.
+  const badPeriodRes = await fetch(`${baseUrl}/api/factory/metrics?period=invalid`, {
+    headers: { Origin: ALLOWED_ORIGIN },
+  });
+  assert.equal(badPeriodRes.status, 400);
+  const badPeriodBody = FactoryFlowApiErrorResponseSchema.parse(await badPeriodRes.json());
+  assert.equal(badPeriodBody.error.code, 'FACTORY_FLOW_INVALID_INPUT');
+
+  // Popula um fluxo com review reprovado no 1º ciclo e outro concluído.
+  const triagePath = join(artifactsDir, 'triage.md');
+  const reviewPath = join(artifactsDir, 'review.md');
+  writeFileSync(triagePath, triageMarkdown('Escopo API.'));
+  writeFactoryStageSidecar(triagePath, 'triage');
+  writeFileSync(
+    reviewPath,
+    '# Relatório de Code Review\n## Resumo Executivo\nAjuste.\n## Pontos Encontrados\n- [BLOQUEANTE] src/a.ts:1 falta validação.\n## Parecer Final\nVeredito: REPROVADO / REQUER AJUSTES\nAlvo de retorno: development\n',
+  );
+  writeFactoryStageSidecar(reviewPath, 'review', {
+    verdict: 'changes_requested',
+    returnTarget: 'development',
+    findings: [
+      {
+        severity: 'BLOQUEANTE',
+        file: 'src/a.ts',
+        line: 1,
+        explanation: 'Validar payload na entrada.',
+        category: 'seguranca',
+      },
+    ],
+  });
+
+  const created = await factoryFlowService.createFlow({
+    task: { inputType: 'jira_key', value: 'API-10', repoPath: '/tmp/repo-api-metrics' },
+  });
+  await factoryFlowService.registerArtifact(created.flow.id, {
+    stage: 'triage',
+    kind: 'specification',
+    path: triagePath,
+    status: 'ready',
+  });
+  await factoryFlowService.transitionFlow(created.flow.id, {
+    to: 'running',
+    reason: 'Iniciado',
+  });
+  await factoryFlowService.registerArtifact(created.flow.id, {
+    stage: 'review',
+    kind: 'review_report',
+    path: reviewPath,
+    status: 'ready',
+  });
+  await factoryFlowService.cancelFlow(created.flow.id, {
+    reason: 'Cancelado pelo usuário após review',
+  });
+
+  const metricsRes = await fetch(
+    `${baseUrl}/api/factory/metrics?repoPath=${encodeURIComponent('/tmp/repo-api-metrics')}&period=7d`,
+    { headers: { Origin: ALLOWED_ORIGIN } },
+  );
+  assert.equal(metricsRes.status, 200);
+  const metrics = FactoryMetricsResponseSchema.parse(await metricsRes.json());
+  assert.equal(metrics.filters.repoPath, '/tmp/repo-api-metrics');
+  assert.equal(metrics.filters.period, '7d');
+  assert.equal(metrics.summary.totalFlows, 1);
+  assert.equal(metrics.summary.cancelledFlows, 1);
+  assert.deepEqual(metrics.rejectionReasons, [
+    { reason: 'seguranca', count: 1, flowCount: 1 },
+  ]);
+  assert.equal(metrics.byRepository[0]?.repoPath, '/tmp/repo-api-metrics');
+});

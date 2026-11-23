@@ -9,6 +9,7 @@ import {
   FactoryFlowSchema,
   FactoryFlowStageSchema,
   FactoryFlowTraceabilityMatrixSchema,
+  FactoryMetricsResponseSchema,
   FactoryPreflightResponseSchema,
   PublishFactoryPrResponseSchema,
   RetryFactoryPrJiraSyncResponseSchema,
@@ -26,6 +27,8 @@ import type {
   FactoryFlow,
   FactoryFlowDetails,
   FactoryFlowStage,
+  FactoryMetricsQuery,
+  FactoryMetricsResponse,
   FactoryPreflightRequest,
   FactoryPreflightResponse,
   ListFactoryFlowsFilterInput,
@@ -232,6 +235,57 @@ export async function fetchFactoryFlows(
       throw error;
     }
     throw toFactoryFlowRequestError(error, 'Não foi possível listar os fluxos da Factory.');
+  }
+}
+
+/** Consulta métricas agregadas de qualidade e adoção da Factory. */
+export async function fetchFactoryMetrics(
+  query?: Partial<FactoryMetricsQuery>,
+  signal?: AbortSignal,
+): Promise<FactoryMetricsResponse> {
+  const fallbackMessage = 'Não foi possível carregar as métricas da Factory.';
+  try {
+    const params = new URLSearchParams();
+    if (query?.repoPath) {
+      params.set('repoPath', query.repoPath);
+    }
+    if (query?.period) {
+      params.set('period', query.period);
+    }
+    if (query?.from) {
+      params.set('from', query.from);
+    }
+    if (query?.to) {
+      params.set('to', query.to);
+    }
+
+    const qs = params.toString();
+    const url = `${API_BASE_URL}/api/factory/metrics${qs ? `?${qs}` : ''}`;
+    const response = await fetch(url, {
+      method: 'GET',
+      cache: 'no-store',
+      signal,
+    });
+    const payload = await parseJsonResponse(response);
+    if (!response.ok) {
+      throw extractApiError(payload, response.status, fallbackMessage);
+    }
+
+    const parsed = FactoryMetricsResponseSchema.safeParse(payload);
+    if (!parsed.success) {
+      throw new FactoryFlowApiError(
+        'Formato inesperado ao carregar as métricas da Factory.',
+        'FACTORY_FLOW_INVALID_RESPONSE',
+        response.status,
+      );
+    }
+
+    return parsed.data;
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw error;
+    }
+    throw toFactoryFlowRequestError(error, fallbackMessage);
   }
 }
 

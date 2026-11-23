@@ -1,10 +1,19 @@
-import { useId, useState } from 'react';
-import { Activity, CircleCheck, Clock, FolderGit2, GitPullRequest, Plus } from 'lucide-react';
+import { useId, useState, type KeyboardEvent } from 'react';
+import {
+  Activity,
+  BarChart3,
+  CircleCheck,
+  Clock,
+  FolderGit2,
+  GitPullRequest,
+  Plus,
+} from 'lucide-react';
 import type {
   BackgroundSessionSummary,
   FactoryFlow,
   FactoryStageName,
 } from '@development-factory/shared';
+import type { FactoryMetricsController } from '../hooks/useFactoryMetrics.js';
 import type { FactoryPreflight } from '../hooks/useFactoryPreflight.js';
 import {
   getRunningFactorySession,
@@ -12,7 +21,10 @@ import {
   isFactoryFlowReadyForPr,
 } from '../utils/factory-flow-status.js';
 import { FactoryFlowCard } from './FactoryFlowCard.js';
+import { FactoryMetricsPanel } from './FactoryMetricsPanel.js';
 import { FactoryPreflightPanel } from './FactoryPreflightPanel.js';
+
+export type FactoryPageSection = 'flows' | 'metrics';
 
 interface FactoryPageProps {
   repoPath: string;
@@ -21,6 +33,8 @@ interface FactoryPageProps {
   sessionsById: ReadonlyMap<string, BackgroundSessionSummary>;
   loadingFactoryFlows: boolean;
   factoryFlowsError: string | null;
+  metrics?: FactoryMetricsController;
+  initialSection?: FactoryPageSection;
   onPickDirectory: () => void;
   onOpenNewFlow: () => void;
   onOpenFlowTerminal: (flowId: string) => boolean;
@@ -28,6 +42,20 @@ interface FactoryPageProps {
   onCancelFlow: (flowId: string) => Promise<FactoryFlow>;
   onRerunFlowStage: (flowId: string, stage: FactoryStageName) => Promise<void>;
 }
+
+const pageSections = [
+  { id: 'flows', label: 'Fluxos', Icon: Activity },
+  { id: 'metrics', label: 'Métricas da Factory', Icon: BarChart3 },
+] as const;
+
+const noopMetricsController: FactoryMetricsController = {
+  state: { status: 'loading' },
+  repoPathFilter: '',
+  periodFilter: 'all',
+  setRepoPathFilter: () => undefined,
+  setPeriodFilter: () => undefined,
+  refresh: () => undefined,
+};
 
 const flowGroups = [
   { id: 'running', label: 'Em execução', Icon: Activity, color: 'text-accent' },
@@ -56,6 +84,8 @@ export function FactoryPage({
   sessionsById,
   loadingFactoryFlows,
   factoryFlowsError,
+  metrics = noopMetricsController,
+  initialSection = 'flows',
   onPickDirectory,
   onOpenNewFlow,
   onOpenFlowTerminal,
@@ -66,6 +96,7 @@ export function FactoryPage({
   const pageId = useId();
   const preflightStatusId = `${pageId}-preflight`;
   const flowsHeadingId = `${pageId}-flows`;
+  const [activeSection, setActiveSection] = useState<FactoryPageSection>(initialSection);
   const [flowActions, setFlowActions] = useState(() => new Map<string, FlowActionState>());
   const canOpenFlow = preflight.state.status === 'checked' && !preflight.state.result.blocked;
   const showFlowGroups = factoryFlows.length > 0 || (!loadingFactoryFlows && !factoryFlowsError);
@@ -106,6 +137,32 @@ export function FactoryPage({
           error: error instanceof Error ? error.message : fallback,
         }),
       );
+  }
+
+  function handleSectionTabKeyDown(event: KeyboardEvent<HTMLButtonElement>, index: number) {
+    let nextIndex: number;
+    switch (event.key) {
+      case 'ArrowLeft':
+        nextIndex = (index + pageSections.length - 1) % pageSections.length;
+        break;
+      case 'ArrowRight':
+        nextIndex = (index + 1) % pageSections.length;
+        break;
+      case 'Home':
+        nextIndex = 0;
+        break;
+      case 'End':
+        nextIndex = pageSections.length - 1;
+        break;
+      default:
+        return;
+    }
+    const target = pageSections[nextIndex];
+    if (target) {
+      event.preventDefault();
+      setActiveSection(target.id);
+      document.getElementById(`${pageId}-${target.id}-tab`)?.focus();
+    }
   }
 
   return (
@@ -158,7 +215,38 @@ export function FactoryPage({
         <FactoryPreflightPanel preflight={preflight} statusId={preflightStatusId} checkJiraInTask />
       </div>
 
-      <section aria-labelledby={flowsHeadingId} className="mt-8">
+      <div
+        role="tablist"
+        aria-label="Seções da Factory"
+        className="mt-6 flex flex-wrap gap-1 border-b border-line pb-2"
+      >
+        {pageSections.map(({ id, label, Icon }, index) => (
+          <button
+            key={id}
+            id={`${pageId}-${id}-tab`}
+            type="button"
+            role="tab"
+            aria-selected={activeSection === id}
+            aria-controls={`${pageId}-${id}-panel`}
+            tabIndex={activeSection === id ? 0 : -1}
+            onClick={() => setActiveSection(id)}
+            onKeyDown={event => handleSectionTabKeyDown(event, index)}
+            className="flex items-center gap-2 rounded-lg px-3.5 py-2 text-xs font-medium text-secondary transition hover:bg-hover aria-selected:bg-selected aria-selected:text-accent"
+          >
+            <Icon size={14} aria-hidden="true" />
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {activeSection === 'flows' ? (
+        <div
+          id={`${pageId}-flows-panel`}
+          role="tabpanel"
+          aria-labelledby={`${pageId}-flows-tab`}
+          className="mt-6"
+        >
+          <section aria-labelledby={flowsHeadingId}>
         <div className="mb-3 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
           <h2 id={flowsHeadingId} className="text-lg font-semibold">
             Fluxos ativos e recentes
@@ -252,7 +340,18 @@ export function FactoryPage({
             })}
           </div>
         )}
-      </section>
+          </section>
+        </div>
+      ) : (
+        <div
+          id={`${pageId}-metrics-panel`}
+          role="tabpanel"
+          aria-labelledby={`${pageId}-metrics-tab`}
+          className="mt-6"
+        >
+          <FactoryMetricsPanel metrics={metrics} />
+        </div>
+      )}
     </main>
   );
 }

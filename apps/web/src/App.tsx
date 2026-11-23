@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { ArrowRight, Check, ChevronRight, Folder, FolderGit2, GitBranch, GitPullRequest, Layers3, LockKeyhole, ScanLine, Terminal } from 'lucide-react';
 import { ClientMessageSchema, ReviewDestinationSchema } from '@development-factory/shared';
 import type { FactoryFlowInputType, FactoryStageName, TargetType } from '@development-factory/shared';
@@ -15,6 +15,7 @@ import { MarkdownViewerModal } from './components/MarkdownViewerModal';
 import { NotificationToastCenter } from './components/NotificationToastCenter';
 import { SeverityMatrixModal } from './components/SeverityMatrixModal';
 import { useBackgroundOperations } from './hooks/useBackgroundOperations';
+import { useFactoryMetrics } from './hooks/useFactoryMetrics.js';
 import { useFactoryPreflight } from './hooks/useFactoryPreflight.js';
 
 const storageKey = 'development-factory.repoPath';
@@ -79,6 +80,20 @@ export default function App() {
   const [factoryInputType, setFactoryInputType] = useState<FactoryFlowInputType>('jira_key');
   const repositoryPreflight = useFactoryPreflight(view === 'factory' ? repoPath : '', 'title');
   const taskPreflight = useFactoryPreflight(configuringFactoryTask ? repoPath : '', factoryInputType);
+  const metricsRefreshKey = useMemo(
+    () =>
+      factoryFlows
+        .map(
+          flow =>
+            `${flow.id}:${flow.state}:${flow.currentStage}:${flow.iteration}:${flow.updatedAt}:${flow.prPublication?.status ?? ''}`,
+        )
+        .join('|'),
+    [factoryFlows],
+  );
+  const factoryMetrics = useFactoryMetrics({
+    enabled: view === 'factory',
+    refreshKey: metricsRefreshKey,
+  });
   const [roadmapFlowId, setRoadmapFlowId] = useState<string | null>(null);
   const [viewingMarkdownPath, setViewingMarkdownPath] = useState<string | null>(null);
   const [pickingDirectory, setPickingDirectory] = useState<'repository' | 'report' | null>(null);
@@ -173,6 +188,7 @@ export default function App() {
           sessionsById={sessionsById}
           loadingFactoryFlows={loadingFactoryFlows}
           factoryFlowsError={factoryFlowsError}
+          metrics={factoryMetrics}
           onPickDirectory={() => setPickingDirectory('repository')}
           onOpenNewFlow={() => {
             setFactoryInputType('jira_key');

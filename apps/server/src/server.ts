@@ -334,6 +334,17 @@ async function readOptionalJsonBody(req: IncomingMessage): Promise<unknown> {
   }
 }
 
+function parseFactoryMetricsQuery(searchParams: URLSearchParams): Record<string, string> {
+  const query: Record<string, string> = {};
+  for (const key of ['repoPath', 'period', 'from', 'to'] as const) {
+    const value = searchParams.get(key);
+    if (value !== null && value.trim() !== '') {
+      query[key] = value;
+    }
+  }
+  return query;
+}
+
 function parseListFactoryFlowsQuery(searchParams: URLSearchParams): Record<string, unknown> {
   const filter: Record<string, unknown> = {};
   const state = searchParams.get('state');
@@ -403,6 +414,12 @@ async function handleFactoryFlowApiRequest(
         return;
       }
       const result = await runFactoryPreflight(input.data);
+      res.writeHead(200).end(JSON.stringify(result));
+      return;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/factory/metrics') {
+      const result = factoryFlowService.getMetrics(parseFactoryMetricsQuery(url.searchParams));
       res.writeHead(200).end(JSON.stringify(result));
       return;
     }
@@ -1182,6 +1199,7 @@ export function createReviewServer(options?: CreateReviewServerOptions) {
 
     if (
       url.pathname === '/api/factory/preflight' ||
+      url.pathname === '/api/factory/metrics' ||
       url.pathname === '/api/factory/flows' ||
       url.pathname.startsWith('/api/factory/flows/')
     ) {

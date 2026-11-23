@@ -298,6 +298,27 @@ export const REVIEW_MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    version: 12,
+    name: 'add_factory_review_outcomes',
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS factory_flow_review_outcomes (
+          id TEXT PRIMARY KEY,
+          flow_id TEXT NOT NULL REFERENCES factory_flows(id) ON DELETE RESTRICT,
+          artifact_id TEXT,
+          contract_version INTEGER NOT NULL,
+          iteration INTEGER NOT NULL DEFAULT 1,
+          verdict TEXT NOT NULL,
+          rejection_reasons_json TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        ) STRICT;
+
+        CREATE INDEX IF NOT EXISTS idx_factory_flow_review_outcomes_flow_iter
+          ON factory_flow_review_outcomes (flow_id, iteration ASC, created_at ASC);
+      `);
+    },
+  },
 ];
 
 function validateMigrations(migrations: readonly Migration[]): void {

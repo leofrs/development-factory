@@ -21,6 +21,7 @@ export {
   type CreateFactoryFlowIdempotentlyResult,
   type CreateFactoryFlowResult,
   type FactoryFlowRepositoryOptions,
+  type FactoryMetricsRepositoryFilter,
   type ListFactoryCheckpointsFilter,
   type ListFactoryFlowsFilter,
   type SaveFactoryArtifactOptions,
