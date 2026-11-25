@@ -16,6 +16,7 @@ import { scanFactoryWorktreeSecrets, scanUnifiedDiffForSecrets } from '../src/fa
 import { provisionFactoryWorktree } from '../src/factory-worktree.js';
 import { createReviewServer } from '../src/server.js';
 import {
+  approvePlanWithoutPendingDecisions,
   planningMarkdown,
   triageMarkdown,
   writeFactoryStageSidecar,
@@ -290,7 +291,9 @@ console.log('https://github.com/org/development-factory/pull/88');
   await factoryFlowService.advanceStage(flowId);
   await factoryFlowService.registerArtifact(flowId, { stage: 'planning', kind: 'plan', path: planPath, status: 'ready' });
   await factoryFlowService.transitionFlow(flowId, { to: 'waiting_action', reason: 'Plano ok' });
-  await factoryFlowService.advanceStage(flowId);
+  await factoryFlowService.advanceStage(flowId, {
+    planningApproval: approvePlanWithoutPendingDecisions(factoryFlowService.getFlow(flowId)),
+  });
   await factoryFlowService.registerArtifact(flowId, { stage: 'development', kind: 'implementation_report', path: devPath, status: 'ready' });
   await factoryFlowService.advanceStage(flowId);
   await factoryFlowService.registerArtifact(flowId, { stage: 'tests', kind: 'test_report', path: testsPath, status: 'ready' });
@@ -529,7 +532,9 @@ console.log('https://gitlab.com/org/factory/-/merge_requests/19');
   await factoryFlowService.advanceStage(flowId);
   await factoryFlowService.registerArtifact(flowId, { stage: 'planning', kind: 'plan', path: planPath, status: 'ready' });
   await factoryFlowService.transitionFlow(flowId, { to: 'waiting_action', reason: 'Plano ok' });
-  await factoryFlowService.advanceStage(flowId);
+  await factoryFlowService.advanceStage(flowId, {
+    planningApproval: approvePlanWithoutPendingDecisions(factoryFlowService.getFlow(flowId)),
+  });
   await factoryFlowService.registerArtifact(flowId, { stage: 'development', kind: 'implementation_report', path: devPath, status: 'ready' });
   await factoryFlowService.advanceStage(flowId);
   await factoryFlowService.registerArtifact(flowId, { stage: 'tests', kind: 'test_report', path: testsPath, status: 'ready' });

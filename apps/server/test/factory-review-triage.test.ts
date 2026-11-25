@@ -33,6 +33,7 @@ import {
   runMigrations,
 } from '../src/storage/index.js';
 import {
+  approvePlanWithoutPendingDecisions,
   planningMarkdown,
   triageMarkdown,
   writeFactoryStageSidecar,
@@ -171,7 +172,9 @@ async function prepareStageArtifactsToReview(
     status: 'ready',
   });
   await service.transitionFlow(flowId, { to: 'waiting_action', reason: 'Plano concluído' });
-  await service.advanceStage(flowId);
+  await service.advanceStage(flowId, {
+    planningApproval: approvePlanWithoutPendingDecisions(service.getFlow(flowId)),
+  });
 
   await service.registerArtifact(flowId, {
     stage: 'development',

@@ -333,55 +333,123 @@ function resolvePlanningGateForFlow(
   }
 }
 
+function isAwaitingPlanningApproval(flow: FactoryFlow): boolean {
+  return (
+    flow.currentStage === 'planning' &&
+    flow.state === 'waiting_action' &&
+    flow.currentSessionId === null &&
+    flow.error === null &&
+    flow.loopPausedReason === null
+  );
+}
+
+function getReviewablePlanningArtifact(
+  flow: FactoryFlow,
+  details: Pick<FactoryFlowDetails, 'stages' | 'artifacts'>,
+): FactoryFlowArtifact | undefined {
+  if (
+    !isAwaitingPlanningApproval(flow) ||
+    !details.stages.some(
+      stage => stage.name === 'triage' && stage.state === 'completed' && stage.error === null,
+    )
+  ) {
+    return undefined;
+  }
+  return getReadyFactoryStageArtifact(details, 'planning');
+}
+
 function buildValidatedPlanningApproval(
   details: FactoryFlowDetails,
-  approvalInput: FactoryPlanningApprovalInput,
+  approvalInput: FactoryPlanningApprovalInput | undefined,
   approvedAt: string,
 ): FactoryPlanningApproval {
-  const planningArtifact = getReadyFactoryStageArtifact(details, 'planning');
-  if (planningArtifact) {
-    const planningSidecar = readFactoryStageSidecar('planning', planningArtifact.path);
-    for (let index = 0; index < planningSidecar.pendingDecisions.length; index += 1) {
-      const pending = planningSidecar.pendingDecisions[index];
-      if (!pending) {
-        continue;
-      }
-      const decisionId = resolvePlanningPendingDecisionId(pending, index);
-      const decision =
-        approvalInput.decisions.find(item => item.id === decisionId) ??
-        approvalInput.decisions.find(item => item.question === pending.question);
-      if (!decision) {
-        throw new FactoryFlowServiceError(
-          'FACTORY_FLOW_INVALID_INPUT',
-          `Responda a decisão pendente ${decisionId} antes de aprovar o Planejamento.`,
-          400,
-        );
-      }
-      if (decision.mode === 'recommended' && decision.selectedOption !== pending.recommendedOption) {
-        throw new FactoryFlowServiceError(
-          'FACTORY_FLOW_INVALID_INPUT',
-          `A opção selecionada para ${decisionId} não corresponde à opção recomendada do plano.`,
-          400,
-        );
-      }
-      if (
-        decision.mode === 'alternative' &&
-        (!pending.options.includes(decision.selectedOption) ||
-          decision.selectedOption === pending.recommendedOption)
-      ) {
-        throw new FactoryFlowServiceError(
-          'FACTORY_FLOW_INVALID_INPUT',
-          `A opção alternativa selecionada para ${decisionId} não pertence às alternativas do plano.`,
-          400,
-        );
-      }
+  const planningArtifact = getReviewablePlanningArtifact(details.flow, details);
+  if (!planningArtifact || !approvalInput || approvalInput.planArtifactId !== planningArtifact.id) {
+    throw new FactoryFlowServiceError(
+      'FACTORY_FLOW_INVALID_STAGE_ADVANCE',
+      planningArtifact && approvalInput
+        ? 'O plano foi substituído. Revise e aprove o plano vigente para avançar.'
+        : 'Revise e aprove o plano vigente antes de avançar para Desenvolvimento.',
+      409,
+    );
+  }
+
+  const sidecar = readFactoryStageSidecar('planning', planningArtifact.path);
+  const submittedDecisions = new Map(approvalInput.decisions.map(decision => [decision.id, decision]));
+  const decisions = sidecar.pendingDecisions.map((pending, index) => {
+    const decisionId = resolvePlanningPendingDecisionId(pending, index);
+    const decision = submittedDecisions.get(decisionId);
+    if (!decision) {
+      throw new FactoryFlowServiceError(
+        'FACTORY_FLOW_INVALID_INPUT',
+        `Responda a decisão pendente ${decisionId} antes de aprovar o Planejamento.`,
+        400,
+      );
     }
+    if (decision.mode === 'recommended' && decision.selectedOption !== pending.recommendedOption) {
+      throw new FactoryFlowServiceError(
+        'FACTORY_FLOW_INVALID_INPUT',
+        `A opção selecionada para ${decisionId} não corresponde à opção recomendada do plano.`,
+        400,
+      );
+    }
+    if (
+      decision.mode === 'alternative' &&
+      (!pending.options.includes(decision.selectedOption) ||
+        decision.selectedOption === pending.recommendedOption)
+    ) {
+      throw new FactoryFlowServiceError(
+        'FACTORY_FLOW_INVALID_INPUT',
+        `A opção alternativa selecionada para ${decisionId} não pertence às alternativas do plano.`,
+        400,
+      );
+    }
+    return {
+      ...decision,
+      question: pending.question,
+      recommendedOption: pending.recommendedOption,
+    };
+  });
+  if (decisions.length !== submittedDecisions.size) {
+    throw new FactoryFlowServiceError(
+      'FACTORY_FLOW_INVALID_INPUT',
+      'Envie apenas decisões pendentes do plano vigente.',
+      400,
+    );
   }
 
   return FactoryPlanningApprovalSchema.parse({
     ...approvalInput,
+    decisions,
     approvedAt,
   });
+}
+
+function assertDevelopmentPlanApproval(details: FactoryFlowDetails): void {
+  const plan = getReadyFactoryStageArtifact(details, 'planning');
+  let approvedPlanId = details.flow.planningApproval?.planArtifactId;
+  if (approvedPlanId === undefined) {
+    // Fluxos legados retomam o plano já entregue ao Desenvolvimento.
+    const handoff = details.flow.transitions.find(transition => transition.stage === 'development');
+    if (handoff) {
+      const handoffTime = Date.parse(handoff.at);
+      approvedPlanId = getLatestReadyFactoryStageArtifact(
+        {
+          artifacts: details.artifacts.filter(
+            artifact => Date.parse(artifact.createdAt) <= handoffTime,
+          ),
+        },
+        'planning',
+      )?.id;
+    }
+  }
+  if (!plan || approvedPlanId !== plan.id) {
+    throw new FactoryFlowServiceError(
+      'FACTORY_FLOW_INVALID_STAGE_ADVANCE',
+      'O Desenvolvimento requer a aprovação do plano vigente.',
+      409,
+    );
+  }
 }
 
 function resolveReviewGateForFlow(
@@ -485,7 +553,7 @@ function buildValidatedReviewTriage(
 }
 
 function assertStageContracts(
-  details: FactoryFlowDetails,
+  details: Pick<FactoryFlowDetails, 'stages' | 'artifacts'>,
   stages: readonly FactoryStageName[],
   missingMessage: string,
 ): void {
@@ -881,7 +949,7 @@ export class FactoryFlowService {
 
       return {
         contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
-        flow,
+        flow: this.withPlanForApproval(flow, { stages, artifacts }),
         stages,
         artifacts,
         worktreePath: flow.worktreePath,
@@ -1004,7 +1072,9 @@ export class FactoryFlowService {
     }
 
     try {
-      const flows = this.repository.listFlows(parsed.data);
+      const flows = this.repository
+        .listFlows(parsed.data)
+        .map(flow => this.withPlanForApproval(flow));
       return {
         contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
         flows,
@@ -1071,6 +1141,9 @@ export class FactoryFlowService {
       FACTORY_STAGE_ORDER.slice(0, FACTORY_STAGE_ORDER.indexOf(stage)),
       HANDOFF_CONFIG[stage].missingMessage,
     );
+    if (stage === 'development' && details.flow.currentStage !== 'planning') {
+      assertDevelopmentPlanApproval(details);
+    }
   }
 
   async transitionFlow(
@@ -1167,12 +1240,13 @@ export class FactoryFlowService {
           }
         }
 
-        return this.repository.saveFlowTransition(flowId, effectiveCommand, saveOptions);
+        const saved = this.repository.saveFlowTransition(flowId, effectiveCommand, saveOptions);
+        return this.withPlanForApproval(saved.flow);
       });
 
       return {
         contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
-        flow: result.flow,
+        flow: result,
       };
     } catch (error) {
       throw mapUnexpectedError(error);
@@ -1258,7 +1332,7 @@ export class FactoryFlowService {
 
           const at = parsed.data.at ?? this.now();
           const planningApproval =
-            parsed.data.planningApproval !== undefined && nextStage === 'development'
+            nextStage === 'development'
               ? buildValidatedPlanningApproval(details, parsed.data.planningApproval, at)
               : undefined;
           const validatedReviewTriage =
@@ -1485,6 +1559,9 @@ export class FactoryFlowService {
             'Use a ação de avanço ou retorno antes de vincular uma sessão a outra etapa.',
             409,
           );
+        }
+        if (targetStage === 'development') {
+          assertDevelopmentPlanApproval(this.getFlow(flowId));
         }
 
         if (flow.state === 'running') {
@@ -2743,6 +2820,32 @@ export class FactoryFlowService {
     } catch (error) {
       throw mapUnexpectedError(error);
     }
+  }
+
+  private withPlanForApproval(
+    flow: FactoryFlow,
+    loaded?: Pick<FactoryFlowDetails, 'stages' | 'artifacts'>,
+  ): FactoryFlow {
+    if (!isAwaitingPlanningApproval(flow)) {
+      return flow;
+    }
+    const details = loaded ?? {
+      stages: this.repository.listStagesByFlowId(flow.id),
+      artifacts: this.repository.listArtifactsByFlowId(flow.id),
+    };
+    const plan = getReviewablePlanningArtifact(flow, details);
+    if (!plan) {
+      return flow;
+    }
+    try {
+      assertStageContracts(details, ['triage', 'planning'], HANDOFF_CONFIG.development.missingMessage);
+    } catch (error) {
+      if (error instanceof FactoryFlowServiceError) {
+        return flow;
+      }
+      throw error;
+    }
+    return { ...flow, planForApproval: { artifactId: plan.id, path: plan.path } };
   }
 
   private parseFlowId(flowIdInput: string): string {

@@ -419,6 +419,8 @@ test(
     const beforeApprove = await harness.fetchFlowDetails(flowId);
     assert.equal(beforeApprove.planningGate?.pendingDecisions.length, 1);
     assert.equal(beforeApprove.planningGate?.acceptanceCriteria[0]?.id, 'CA1');
+    assert.ok(beforeApprove.flow.planForApproval);
+    const { artifactId: planArtifactId } = beforeApprove.flow.planForApproval;
 
     // Tentar enviar planningApproval sem responder D1 retorna 400 FACTORY_FLOW_INVALID_INPUT.
     const missingDecisionRes = await fetch(`${harness.baseUrl}/api/factory/flows/${flowId}/advance`, {
@@ -426,6 +428,7 @@ test(
       headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         planningApproval: {
+          planArtifactId,
           decisions: [],
           acceptanceCriteria: [
             { id: 'CA1', description: 'Validar estoque antes de reservar.', approved: true },
@@ -446,13 +449,12 @@ test(
       headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         planningApproval: {
+          planArtifactId,
           decisions: [
             {
               id: 'D1',
-              question: 'Qual estratégia de lock usar?',
               mode: 'alternative',
               selectedOption: 'Lock pessimista SELECT FOR UPDATE',
-              recommendedOption: 'Lock otimista por versão',
             },
           ],
           acceptanceCriteria: [

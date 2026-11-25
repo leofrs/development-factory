@@ -29,6 +29,7 @@ import {
 } from '../src/session-manager.js';
 import { SqliteReviewRepository } from '../src/storage/index.js';
 import {
+  approvePlanWithoutPendingDecisions,
   planningMarkdown,
   triageMarkdown,
   writeFactoryStageSidecar,
@@ -193,7 +194,7 @@ test('timeout configurável por bloco encerra sessão travada graciosamente, mar
       development: 1000,
     },
   });
-  const { server, shutdown, sessionManager } = serverBundle;
+  const { server, shutdown, sessionManager, factoryFlowService } = serverBundle;
   const emittedEvents: AppEvent[] = [];
   const unsubscribe = sessionManager.onEvent(event => emittedEvents.push(event));
 
@@ -317,23 +318,17 @@ test('timeout configurável por bloco encerra sessão travada graciosamente, mar
     writeFactoryStageSidecar(planningSession.reportPath, 'planning');
     sessionManager.writeInput(planningSessionId, 'EXIT0');
 
-    await waitForAsync(async () => {
-      const res = await fetch(`${baseUrl}/api/factory/flows/${flowId}`, {
-        headers: { Origin: ALLOWED_ORIGIN },
-      });
-      const details = FactoryFlowDetailsSchema.parse(await res.json());
-      return (
-        details.flow.currentStage === 'planning' &&
-        details.flow.state === 'waiting_action' &&
-        details.flow.currentSessionId === null
-      );
-    });
+    await waitFor(() => factoryFlowService.getFlow(flowId).flow.planForApproval !== undefined);
+    const ready = factoryFlowService.getFlow(flowId);
 
     // 4. Avança para Desenvolvimento e valida timeout em etapa mutante preservando worktree/checkpoint.
     const startDevRes = await fetch(`${baseUrl}/api/factory/flows/${flowId}/advance`, {
       method: 'POST',
       headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ startSession: true }),
+      body: JSON.stringify({
+        startSession: true,
+        planningApproval: approvePlanWithoutPendingDecisions(ready),
+      }),
     });
     assert.equal(startDevRes.status, 200);
     const startDevBody = (await startDevRes.json()) as { session: unknown };
@@ -450,22 +445,16 @@ test('reinício do servidor reconcilia fluxos presos em running para waiting_act
     writeFactoryStageSidecar(planningSession.reportPath, 'planning');
     serverOne.sessionManager.writeInput(planningSessionId, 'EXIT0');
 
-    await waitForAsync(async () => {
-      const res = await fetch(`${baseUrl1}/api/factory/flows/${flowId}`, {
-        headers: { Origin: ALLOWED_ORIGIN },
-      });
-      const details = FactoryFlowDetailsSchema.parse(await res.json());
-      return (
-        details.flow.currentStage === 'planning' &&
-        details.flow.state === 'waiting_action' &&
-        details.flow.currentSessionId === null
-      );
-    });
+    const readFlow = () => serverOne.factoryFlowService.getFlow(flowId);
+    await waitFor(() => readFlow().flow.planForApproval !== undefined);
 
     const startDevRes = await fetch(`${baseUrl1}/api/factory/flows/${flowId}/advance`, {
       method: 'POST',
       headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ startSession: true }),
+      body: JSON.stringify({
+        startSession: true,
+        planningApproval: approvePlanWithoutPendingDecisions(readFlow()),
+      }),
     });
     assert.equal(startDevRes.status, 200);
     const devStartBody = (await startDevRes.json()) as { session: unknown };

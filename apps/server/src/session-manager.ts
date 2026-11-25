@@ -1305,13 +1305,23 @@ export class SessionManager {
       throw error;
     }
     if (flowDetails) {
-      const current = this.#factoryFlowService?.getFlow(flowDetails.flow.id).flow;
-      if (!current || isFinalFactoryFlowState(current.state) || current.currentStage !== stage) {
+      const current = this.#factoryFlowService?.getFlow(flowDetails.flow.id);
+      if (
+        !current ||
+        isFinalFactoryFlowState(current.flow.state) ||
+        current.flow.currentStage !== stage ||
+        (stage === 'development' &&
+          getReadyFactoryStageArtifact(current, 'planning')?.id !==
+            getReadyFactoryStageArtifact(flowDetails, 'planning')?.id)
+      ) {
         throw new SessionManagerError(
           'FACTORY_STAGE_CONFLICT',
           `O fluxo mudou enquanto os artefatos eram preparados para a etapa ${stage}.`,
           409,
         );
+      }
+      if (stage === 'development') {
+        this.#factoryFlowService?.assertStageHandoff(current, stage);
       }
       this.#assertCapacity();
     }

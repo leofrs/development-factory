@@ -46,6 +46,7 @@ import {
   getFactoryStageSidecarPath,
 } from '../src/factory-stage-runners.js';
 import {
+  approvePlanWithoutPendingDecisions,
   planningMarkdown,
   sidecarFixtures,
   triageMarkdown,
@@ -933,7 +934,11 @@ if (check === 'typecheck' || check === 'lint') {
     writeFactoryStageSidecar(specOne.path, 'triage');
     assert.deepEqual(await getDetails(), afterPlanOne);
 
-    const developmentResponse = await postAction('advance', { startSession: true, approvedNotes });
+    const developmentResponse = await postAction('advance', {
+      startSession: true,
+      approvedNotes,
+      planningApproval: approvePlanWithoutPendingDecisions(afterPlanOne),
+    });
     assert.equal(developmentResponse.status, 200);
     const development = z.object({ session: BackgroundSessionSummarySchema }).parse(
       await developmentResponse.json(),
@@ -1718,15 +1723,15 @@ for (const scenario of loopScenarios) {
     writeFileSync(planningSession.reportPath, planningMarkdown('Implementar a alteração.'));
     writeFactoryStageSidecar(planningSession.reportPath, 'planning');
     sessionManager.writeInput(planningSession.sessionId, 'EXIT0');
-    await waitForFlowDetails(
+    const ready = await waitForFlowDetails(
       getDetails,
-      details => details.flow.currentStage === 'planning' && details.flow.state === 'waiting_action',
+      details => details.flow.planForApproval !== undefined,
     );
 
     const approveRes = await fetch(`${baseUrl}/api/factory/flows/${flowId}/advance`, {
       method: 'POST',
       headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ startSession: true }),
+      body: JSON.stringify({ startSession: true, planningApproval: approvePlanWithoutPendingDecisions(ready) }),
     });
     assert.equal(approveRes.status, 200);
 
@@ -1876,7 +1881,7 @@ test(
     process.env.PATH = `${binDir}:${previousPath ?? ''}`;
     process.env.XDG_DATA_HOME = xdgDataHome;
 
-    const { server, sessionManager, shutdown } = createReviewServer({ dbPath });
+    const { server, sessionManager, shutdown, factoryFlowService } = createReviewServer({ dbPath });
     server.listen(0, '127.0.0.1');
     await once(server, 'listening');
 
@@ -1926,7 +1931,6 @@ test(
     assert.equal(flowOne.flow.baseBranch, 'main');
     assert.equal(flowTwo.flow.baseBranch, 'main');
 
-    // Conclui triagem e planejamento para os dois fluxos chegarem em waiting_action no planejamento.
     for (const item of [flowOne, flowTwo]) {
       assert.ok(item.session.reportPath);
       await waitFor(() => Boolean(sessionManager.getSession(item.session.sessionId)?.buffer.replay().includes('READY:')));
@@ -1947,7 +1951,7 @@ test(
       writeFileSync(planningSession.reportPath, planningMarkdown(`Implementar ${item.flow.id}.`));
       writeFactoryStageSidecar(planningSession.reportPath, 'planning');
       sessionManager.writeInput(planningSession.sessionId, 'EXIT0');
-      await waitFor(() => sessionManager.getSession(planningSession.sessionId)?.status === 'exited');
+      await waitFor(() => factoryFlowService.getFlow(item.flow.id).flow.planForApproval !== undefined);
     }
 
     // Avança ambos os fluxos para Desenvolvimento (etapa mutante) simultaneamente!
@@ -1955,12 +1959,18 @@ test(
       fetch(`${baseUrl}/api/factory/flows/${flowOne.flow.id}/advance`, {
         method: 'POST',
         headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ startSession: true }),
+        body: JSON.stringify({
+          startSession: true,
+          planningApproval: approvePlanWithoutPendingDecisions(factoryFlowService.getFlow(flowOne.flow.id)),
+        }),
       }),
       fetch(`${baseUrl}/api/factory/flows/${flowTwo.flow.id}/advance`, {
         method: 'POST',
         headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ startSession: true }),
+        body: JSON.stringify({
+          startSession: true,
+          planningApproval: approvePlanWithoutPendingDecisions(factoryFlowService.getFlow(flowTwo.flow.id)),
+        }),
       }),
     ]);
     assert.equal(devResOne.status, 200);
@@ -2213,12 +2223,12 @@ test(
     writeFileSync(planSession.reportPath, planningMarkdown('Implementar a funcionalidade.'));
     writeFactoryStageSidecar(planSession.reportPath, 'planning');
     sessionManager.writeInput(planSession.sessionId, 'EXIT0');
-    await waitFor(() => sessionManager.getSession(planSession.sessionId)?.status === 'exited');
+    const ready = await waitForFlowDetails(getDetails, details => details.flow.planForApproval !== undefined);
 
     const approveRes = await fetch(`${baseUrl}/api/factory/flows/${flowId}/advance`, {
       method: 'POST',
       headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ startSession: true }),
+      body: JSON.stringify({ startSession: true, planningApproval: approvePlanWithoutPendingDecisions(ready) }),
     });
     assert.equal(approveRes.status, 200);
 
@@ -2926,11 +2936,67 @@ test(
     writeFactoryStageSidecar(planningSession.reportPath, 'planning', {
       pendingDecisions,
     });
+    assert.equal((await getDetails(flowId)).flow.planForApproval, undefined);
     sessionManager.writeInput(planningSessionId, 'EXIT0');
+
+    const firstPlan = await waitForFlowDetails(
+      () => getDetails(flowId),
+      details => details.flow.planForApproval !== undefined,
+    );
+    assert.ok(firstPlan.flow.planForApproval);
+    const firstPlanId = firstPlan.flow.planForApproval.artifactId;
+
+    const postAction = (action: string, body: unknown) =>
+      fetch(`${baseUrl}/api/factory/flows/${flowId}/${action}`, {
+        method: 'POST',
+        headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+    const [withoutApproval, directStart, directTransition] = await Promise.all([
+      postAction('advance', { startSession: true, approvedNotes: 'Revisar depois.' }),
+      postAction('start', { stage: 'development' }),
+      postAction('transitions', {
+        to: 'running',
+        stage: 'development',
+        reason: 'Iniciar desenvolvimento diretamente',
+      }),
+    ]);
+    for (const blocked of [withoutApproval, directStart, directTransition]) {
+      assert.equal(blocked.status, 409);
+      await blocked.body?.cancel();
+    }
+    assert.equal((await getDetails(flowId)).flow.planForApproval?.artifactId, firstPlanId);
+
+    const rerun = await postAction('rerun', { stage: 'planning' });
+    assert.equal(rerun.status, 200);
+    const secondPlanSession = z
+      .object({ session: BackgroundSessionSummarySchema })
+      .parse(await rerun.json()).session;
+    assert.ok(secondPlanSession.reportPath);
+    assert.notEqual(secondPlanSession.reportPath, planningSession.reportPath);
+    assert.equal((await getDetails(flowId)).flow.planForApproval, undefined);
+    await waitReady(secondPlanSession.sessionId);
+    writeFileSync(secondPlanSession.reportPath, planningMarkdown('Plano revisado com D1 e D2.'));
+    writeFactoryStageSidecar(secondPlanSession.reportPath, 'planning', { pendingDecisions });
+    sessionManager.writeInput(secondPlanSession.sessionId, 'EXIT0');
 
     const planningPaused = await waitForFlowDetails(
       () => getDetails(flowId),
-      details => details.flow.state === 'waiting_action' && details.flow.currentSessionId === null,
+      details => details.flow.planForApproval !== undefined,
+    );
+    assert.ok(planningPaused.flow.planForApproval);
+    const { artifactId: planArtifactId } = planningPaused.flow.planForApproval;
+    assert.notEqual(planArtifactId, firstPlanId);
+    assert.ok(planningPaused.artifacts.some(artifact => artifact.id === firstPlanId));
+    const listResponse = await fetch(`${baseUrl}/api/factory/flows`, {
+      headers: { Origin: ALLOWED_ORIGIN },
+    });
+    assert.equal(listResponse.status, 200);
+    const listed = FactoryFlowListResponseSchema.parse(await listResponse.json());
+    assert.deepEqual(
+      listed.flows.find(flow => flow.id === flowId)?.planForApproval,
+      planningPaused.flow.planForApproval,
     );
     assert.deepEqual(planningPaused.planningGate, {
       pendingDecisions: pendingDecisions.map((decision, index) => ({
@@ -2950,13 +3016,12 @@ test(
       body: JSON.stringify({
         startSession: true,
         planningApproval: {
+          planArtifactId,
           decisions: [
             {
               id: 'D1',
-              question: 'Qual biblioteca usar para HMAC?',
               mode: 'recommended',
               selectedOption: 'node:crypto nativo',
-              recommendedOption: 'node:crypto nativo',
             },
           ],
           acceptanceCriteria: [
@@ -2966,23 +3031,22 @@ test(
       }),
     });
     assert.equal(incompleteApprovalRes.status, 400);
+    const incompleteApproval = FactoryFlowApiErrorResponseSchema.parse(await incompleteApprovalRes.json());
+    assert.match(incompleteApproval.error.message, /D2/);
 
     const planningApproval = {
+      planArtifactId,
       decisions: [
         {
           id: 'D1',
-          question: 'Qual biblioteca usar para HMAC?',
           mode: 'recommended' as const,
           selectedOption: 'node:crypto nativo',
-          recommendedOption: 'node:crypto nativo',
           customNote: 'Usar timingSafeEqual na comparação.',
         },
         {
           id: 'D2',
-          question: 'Como tratar payload inválido?',
           mode: 'alternative' as const,
           selectedOption: 'Enfileirar em DLQ',
-          recommendedOption: 'Retornar HTTP 400',
         },
       ],
       acceptanceCriteria: [
@@ -2992,27 +3056,41 @@ test(
       ],
       notes: 'Priorizar cobertura de timing attack.',
     };
-
-    const advanceRes = await fetch(`${baseUrl}/api/factory/flows/${flowId}/advance`, {
-      method: 'POST',
-      headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        startSession: true,
-        cols: 100,
-        rows: 30,
-        planningApproval,
-      }),
+    const staleApproval = await postAction('advance', {
+      startSession: true,
+      planningApproval: { ...planningApproval, planArtifactId: firstPlanId },
     });
-    assert.equal(advanceRes.status, 200);
-    const advancedBody = (await advanceRes.json()) as {
-      flow: { currentStage: string; planningApproval?: { approvedAt: string; notes?: string } | null };
-      session: BackgroundSessionSummary;
-    };
+    assert.equal(staleApproval.status, 409);
+    const staleError = FactoryFlowApiErrorResponseSchema.parse(await staleApproval.json());
+    assert.match(staleError.error.message, /plano foi substituído/);
+    assert.equal(sessionManager.listSessions().filter(session => session.stage === 'development').length, 0);
+
+    const advanceRequest = { startSession: true, cols: 100, rows: 30, planningApproval };
+    const responses = await Promise.all([
+      postAction('advance', advanceRequest),
+      postAction('advance', advanceRequest),
+    ]);
+    const advanceRes = responses.find(res => res.status === 200);
+    const repeated = responses.find(res => res !== advanceRes);
+    assert.ok(advanceRes);
+    assert.ok(repeated?.status === 400 || repeated?.status === 409);
+    await repeated.body?.cancel();
+    const advancedBody = z.object({
+      flow: FactoryFlowSchema,
+      session: BackgroundSessionSummarySchema,
+    }).parse(await advanceRes.json());
+    const devSessions = sessionManager.listSessions().filter(session => {
+      return session.flowId === flowId && session.stage === 'development';
+    });
+    assert.deepEqual(devSessions.map(session => session.sessionId), [advancedBody.session.sessionId]);
     assert.equal(advancedBody.flow.currentStage, 'development');
     assert.ok(advancedBody.flow.planningApproval?.approvedAt);
+    assert.equal(advancedBody.flow.planningApproval.planArtifactId, planArtifactId);
     assert.equal(advancedBody.flow.planningApproval?.notes, 'Priorizar cobertura de timing attack.');
 
     const devPrompt = await waitReady(advancedBody.session.sessionId);
+    assert.ok(devPrompt.includes(secondPlanSession.reportPath));
+    assert.ok(!devPrompt.includes(planningSession.reportPath));
     assert.match(devPrompt, /Portão Humano do Bloco 02 — Decisões Aprovadas e Critérios de Aceite/);
     assert.ok(devPrompt.includes('Usar timingSafeEqual na comparação.'));
     assert.ok(devPrompt.includes('Enfileirar em DLQ'));
@@ -3020,7 +3098,14 @@ test(
     assert.ok(devPrompt.includes('Adicionar métrica de rejeição'));
 
     const persistedDetails = await getDetails(flowId);
-    assert.deepEqual(persistedDetails.flow.planningApproval?.decisions, planningApproval.decisions);
+    assert.deepEqual(
+      persistedDetails.flow.planningApproval?.decisions,
+      planningApproval.decisions.map((decision, index) => ({
+        ...decision,
+        question: pendingDecisions[index]?.question,
+        recommendedOption: pendingDecisions[index]?.recommendedOption,
+      })),
+    );
     assert.deepEqual(
       persistedDetails.flow.planningApproval?.acceptanceCriteria,
       planningApproval.acceptanceCriteria,
@@ -3135,12 +3220,15 @@ test(
     writeFileSync(planningSession.reportPath, planningMarkdown('Cobrir cenários de expiração.'));
     writeFactoryStageSidecar(planningSession.reportPath, 'planning');
     sessionManager.writeInput(planningSession.sessionId, 'EXIT0');
-    await waitFor(() => sessionManager.getSession(planningSession.sessionId)?.status === 'exited');
+    const ready = await waitForFlowDetails(
+      () => getDetails(flowId),
+      details => details.flow.planForApproval !== undefined,
+    );
 
     const approveRes = await fetch(`${baseUrl}/api/factory/flows/${flowId}/advance`, {
       method: 'POST',
       headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ startSession: true }),
+      body: JSON.stringify({ startSession: true, planningApproval: approvePlanWithoutPendingDecisions(ready) }),
     });
     assert.equal(approveRes.status, 200);
 

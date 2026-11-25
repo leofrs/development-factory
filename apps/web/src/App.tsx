@@ -172,6 +172,15 @@ export default function App() {
   const roadmapFlow = roadmapFlowId
     ? (factoryFlows.find(item => item.id === roadmapFlowId) ?? null)
     : null;
+  const notificationCenter = (
+    <NotificationToastCenter
+      notifications={notifications}
+      onOpenTerminal={openTerminal}
+      onViewReport={setViewingMarkdownPath}
+      onDismiss={dismissNotification}
+      onClearAll={clearAllNotifications}
+    />
+  );
 
   return (
     <div className="min-h-screen bg-page text-primary">
@@ -260,13 +269,7 @@ export default function App() {
         </main>
       )}
 
-      <NotificationToastCenter
-        notifications={notifications}
-        onOpenTerminal={openTerminal}
-        onViewReport={path => setViewingMarkdownPath(path)}
-        onDismiss={dismissNotification}
-        onClearAll={clearAllNotifications}
-      />
+      {!roadmapFlow && notificationCenter}
 
       <FloatingDock
         activeView={view}
@@ -342,6 +345,7 @@ export default function App() {
         <FactoryFlowRoadmapModal
           flow={roadmapFlow}
           runningSession={getRunningFactorySession(roadmapFlow, sessionsById)}
+          notificationCenter={notificationCenter}
           onClose={() => setRoadmapFlowId(null)}
           onAdvanceFlowStage={async (flowId, options) => {
             await advanceFlowStage(flowId, {

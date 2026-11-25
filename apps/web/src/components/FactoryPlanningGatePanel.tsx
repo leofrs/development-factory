@@ -8,10 +8,9 @@ import {
 
 export interface PlanningDecisionDraft {
   readonly id: string;
-  readonly question: string;
   readonly options: readonly string[];
   readonly recommendedOption: string;
-  readonly mode: FactoryPlanningDecisionChoiceMode;
+  readonly mode: FactoryPlanningDecisionChoiceMode | null;
   readonly selectedOption: string;
   readonly customText: string;
 }
@@ -47,18 +46,16 @@ export function createPlanningGateDrafts(
     if (!saved) {
       return {
         id,
-        question: pending.question,
         options: pending.options,
         recommendedOption: pending.recommendedOption,
-        mode: 'recommended',
-        selectedOption: pending.recommendedOption,
+        mode: null,
+        selectedOption: '',
         customText: '',
       };
     }
 
     return {
       id,
-      question: pending.question,
       options: pending.options,
       recommendedOption: pending.recommendedOption,
       mode: saved.mode,
@@ -171,8 +168,7 @@ export function FactoryPlanningGatePanel(props: FactoryPlanningGatePanelProps) {
                     {MODE_LABELS[decision.mode]}
                   </span>
                 </div>
-                <p className="mt-1 font-medium text-primary">{decision.question}</p>
-                <p className="mt-0.5 text-secondary">{decision.selectedOption}</p>
+                <p className="mt-1 text-secondary">{decision.selectedOption}</p>
                 {decision.customNote && (
                   <p className="mt-1 text-[10px] text-muted">
                     Observação: {decision.customNote}
@@ -257,6 +253,11 @@ export function FactoryPlanningGatePanel(props: FactoryPlanningGatePanelProps) {
         <span className="font-mono text-[10px] text-muted">Bloco 02 → 03</span>
       </div>
 
+      <p className="text-[11px] text-secondary">
+        {decisions.length > 0 && 'Leia as perguntas no plano e registre uma resposta para cada ID. '}
+        Ao avançar para Desenvolvimento, você aprova esta versão do plano.
+      </p>
+
       {decisions.length > 0 ? (
         <div className="space-y-2.5">
           {decisions.map((decision, decisionIndex) => {
@@ -272,7 +273,7 @@ export function FactoryPlanningGatePanel(props: FactoryPlanningGatePanelProps) {
                 className="space-y-2 rounded-lg border border-line bg-surface p-2.5"
               >
                 <legend className="px-1 text-[11px] font-semibold text-primary">
-                  <span className="font-mono text-accent">{decision.id}</span> · {decision.question}
+                  Decisão <span className="font-mono text-accent">{decision.id}</span>
                 </legend>
 
                 <div className="space-y-1.5">

@@ -71,7 +71,7 @@ export interface AppNotification {
   stage?: FactoryStageName | null;
   mode: BackgroundSessionMode;
   title: string;
-  kind: 'history_saved' | 'finished';
+  kind: 'history_saved' | 'finished' | 'plan_ready';
   status: BackgroundSessionStatus;
   historyState: BackgroundSessionHistoryState;
   reportPath: string | null;
@@ -384,6 +384,19 @@ function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === 'AbortError';
 }
 
+function rememberPlanNotification(id: string): boolean {
+  const key = `development-factory.notification.${id}`;
+  try {
+    if (localStorage.getItem(key) !== null) {
+      return false;
+    }
+    localStorage.setItem(key, '1');
+  } catch {
+    // O estado da aplicação deduplica o aviso quando o armazenamento está indisponível.
+  }
+  return true;
+}
+
 /**
  * Gerencia o estado global das operações em background (sessões e fluxos da Factory),
  * stream SSE de eventos, sessão ativa no TerminalModal e fila de notificações in-app.
@@ -409,9 +422,6 @@ export function useBackgroundOperations(): BackgroundOperationsState {
   }, [sessionsMap]);
 
   const factoryFlowsMapRef = useRef(factoryFlowsMap);
-  useEffect(() => {
-    factoryFlowsMapRef.current = factoryFlowsMap;
-  }, [factoryFlowsMap]);
 
   const activeTerminalRef = useRef(activeTerminalSession);
   useEffect(() => {
@@ -419,6 +429,48 @@ export function useBackgroundOperations(): BackgroundOperationsState {
   }, [activeTerminalSession]);
 
   const notifiedMilestonesRef = useRef<Set<string>>(new Set());
+
+  const updateFactoryFlows = useCallback((flows: Map<string, FactoryFlow>) => {
+    factoryFlowsMapRef.current = flows;
+    setFactoryFlowsMap(flows);
+    const readyPlans = new Set<string>();
+    const newNotifications: AppNotification[] = [];
+    for (const flow of flows.values()) {
+      const plan = flow.planForApproval;
+      if (!plan) {
+        continue;
+      }
+      const id = `flow:${flow.id}:plan_ready:${plan.artifactId}`;
+      readyPlans.add(id);
+      if (notifiedMilestonesRef.current.has(id)) {
+        continue;
+      }
+      notifiedMilestonesRef.current.add(id);
+      if (rememberPlanNotification(id)) {
+        newNotifications.push({
+          id,
+          sessionId: null,
+          flowId: flow.id,
+          stage: 'planning',
+          mode: 'factory',
+          title: flow.title,
+          kind: 'plan_ready',
+          status: 'exited',
+          historyState: 'saved',
+          reportPath: plan.path,
+          message: 'Triagem e Planejamento concluídos. O plano está pronto para revisão.',
+          severity: 'success',
+          createdAt: flow.updatedAt,
+        });
+      }
+    }
+    setNotifications(current => {
+      const visible = current.filter(item => item.kind !== 'plan_ready' || readyPlans.has(item.id));
+      return newNotifications.length > 0 || visible.length !== current.length
+        ? [...newNotifications, ...visible]
+        : current;
+    });
+  }, []);
 
   const upsertSession = useCallback((session: BackgroundSessionSummary) => {
     setSessionsMap((current) => {
@@ -429,17 +481,19 @@ export function useBackgroundOperations(): BackgroundOperationsState {
     });
   }, []);
 
-  const upsertFactoryFlow = useCallback((flow: FactoryFlow) => {
-    setFactoryFlowsMap(current => {
+  const upsertFactoryFlow = useCallback(
+    (flow: FactoryFlow) => {
+      const current = factoryFlowsMapRef.current;
       const previous = current.get(flow.id);
       if (previous && compareFactoryFlowRevisions(flow, previous) < 0) {
-        return current;
+        return;
       }
       const next = new Map(current);
       next.set(flow.id, flow);
-      return next;
-    });
-  }, []);
+      updateFactoryFlows(next);
+    },
+    [updateFactoryFlows],
+  );
 
   const hydrateSessions = useCallback(async (signal?: AbortSignal) => {
     const sessionsAtRequestStart = sessionsMapRef.current;
@@ -477,18 +531,18 @@ export function useBackgroundOperations(): BackgroundOperationsState {
     }
   }, []);
 
-  const hydrateFactoryFlows = useCallback(async (signal?: AbortSignal) => {
-    const flowsAtRequestStart = factoryFlowsMapRef.current;
-    try {
-      const list = await fetchFactoryFlows(undefined, signal);
-      if (signal?.aborted) {
-        return;
-      }
+  const hydrateFactoryFlows = useCallback(
+    async (signal?: AbortSignal) => {
+      const flowsAtRequestStart = factoryFlowsMapRef.current;
+      try {
+        const list = await fetchFactoryFlows(undefined, signal);
+        if (signal?.aborted) {
+          return;
+        }
 
-      setFactoryFlowsMap(current => {
         const next = new Map(list.map(flow => [flow.id, flow]));
         // Preserva atualizações recebidas enquanto a listagem estava em trânsito.
-        for (const [id, liveFlow] of current) {
+        for (const [id, liveFlow] of factoryFlowsMapRef.current) {
           const snapshotFlow = next.get(id);
           if (
             liveFlow !== flowsAtRequestStart.get(id) &&
@@ -497,27 +551,34 @@ export function useBackgroundOperations(): BackgroundOperationsState {
             next.set(id, liveFlow);
           }
         }
-        return next;
-      });
-      setFactoryFlowsError(null);
-    } catch (error) {
-      if (isAbortError(error) || signal?.aborted) {
-        return;
+        updateFactoryFlows(next);
+        setFactoryFlowsError(null);
+      } catch (error) {
+        if (isAbortError(error) || signal?.aborted) {
+          return;
+        }
+        setFactoryFlowsError(
+          error instanceof Error ? error.message : 'Não foi possível carregar os fluxos da Factory.',
+        );
+      } finally {
+        if (!signal?.aborted) {
+          setLoadingFactoryFlows(false);
+        }
       }
-      setFactoryFlowsError(
-        error instanceof Error
-          ? error.message
-          : 'Não foi possível carregar os fluxos da Factory.',
-      );
-    } finally {
-      if (!signal?.aborted) {
-        setLoadingFactoryFlows(false);
-      }
-    }
-  }, []);
+    },
+    [updateFactoryFlows],
+  );
 
   const maybeNotify = useCallback(
     (session: BackgroundSessionSummary, kind: 'history_saved' | 'finished') => {
+      if (
+        session.mode === 'factory' &&
+        session.flowId &&
+        (session.stage === 'triage' || session.stage === 'planning') &&
+        (kind === 'history_saved' || (session.status === 'exited' && session.historyState === 'saved'))
+      ) {
+        return;
+      }
       const milestoneKey = `${session.sessionId}:${kind}`;
       if (notifiedMilestonesRef.current.has(milestoneKey)) {
         return;

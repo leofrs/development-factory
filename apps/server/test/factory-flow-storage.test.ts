@@ -19,6 +19,7 @@ import {
   runMigrations,
 } from '../src/storage/index.js';
 import {
+  approvePlanWithoutPendingDecisions,
   planningMarkdown,
   triageMarkdown,
   writeFactoryStageSidecar,
@@ -460,7 +461,10 @@ test('FactoryFlowService valida retorno de review para development/tests e reini
     });
     await service.transitionFlow(created.flow.id, { to: 'waiting_action', reason: 'Plano encerrado' });
 
-    await service.advanceStage(created.flow.id, { approvedNotes: 'Notas dev' });
+    await service.advanceStage(created.flow.id, {
+      approvedNotes: 'Notas dev',
+      planningApproval: approvePlanWithoutPendingDecisions(service.getFlow(created.flow.id)),
+    });
     assert.equal(service.getFlow(created.flow.id).flow.iteration, 1);
     await service.registerArtifact(created.flow.id, {
       stage: 'development',
@@ -905,7 +909,7 @@ test('Migration v8 e FactoryFlowService persistem planningApproval e expõem pla
     await assert.rejects(
       () =>
         service1.advanceStage(created.flow.id, {
-          planningApproval: { decisions: [], acceptanceCriteria: [] },
+          planningApproval: { planArtifactId: randomUUID(), decisions: [], acceptanceCriteria: [] },
         }),
       error =>
         error instanceof FactoryFlowServiceError &&
@@ -926,6 +930,8 @@ test('Migration v8 e FactoryFlowService persistem planningApproval e expõem pla
     });
 
     const beforeApproval = service1.getFlow(created.flow.id);
+    assert.ok(beforeApproval.flow.planForApproval);
+    const { artifactId: planArtifactId } = beforeApproval.flow.planForApproval;
     assert.deepEqual(beforeApproval.planningGate, {
       pendingDecisions: [
         {
@@ -952,13 +958,12 @@ test('Migration v8 e FactoryFlowService persistem planningApproval e expõem pla
       () =>
         service1.advanceStage(created.flow.id, {
           planningApproval: {
+            planArtifactId,
             decisions: [
               {
                 id: 'D1',
-                question: 'Onde armazenar o refresh token?',
                 mode: 'recommended',
                 selectedOption: 'Tabela dedicada em SQLite',
-                recommendedOption: 'Tabela dedicada em SQLite',
               },
             ],
             acceptanceCriteria: [{ id: 'CA1', description: 'Validar token JWT', approved: true }],
@@ -972,20 +977,17 @@ test('Migration v8 e FactoryFlowService persistem planningApproval e expõem pla
     );
 
     const approvalInput = {
+      planArtifactId,
       decisions: [
         {
           id: 'D1',
-          question: 'Onde armazenar o refresh token?',
           mode: 'recommended' as const,
           selectedOption: 'Tabela dedicada em SQLite',
-          recommendedOption: 'Tabela dedicada em SQLite',
         },
         {
           id: 'D2',
-          question: 'Qual algoritmo de hash usar?',
           mode: 'custom' as const,
           selectedOption: 'BLAKE2b com salt por usuário',
-          recommendedOption: 'SHA-256',
         },
       ],
       acceptanceCriteria: [
@@ -1000,7 +1002,11 @@ test('Migration v8 e FactoryFlowService persistem planningApproval e expõem pla
     });
     assert.equal(advanced.flow.currentStage, 'development');
     assert.ok(advanced.flow.planningApproval);
-    assert.deepEqual(advanced.flow.planningApproval.decisions, approvalInput.decisions);
+    assert.equal(advanced.flow.planningApproval.planArtifactId, planArtifactId);
+    assert.deepEqual(
+      advanced.flow.planningApproval.decisions.map(({ id, selectedOption }) => ({ id, selectedOption })),
+      approvalInput.decisions.map(({ id, selectedOption }) => ({ id, selectedOption })),
+    );
     assert.deepEqual(
       advanced.flow.planningApproval.acceptanceCriteria,
       approvalInput.acceptanceCriteria,
@@ -1026,10 +1032,78 @@ test('Migration v8 e FactoryFlowService persistem planningApproval e expõem pla
       reloaded.stages.find(stage => stage.name === 'development')?.approvedNotes,
       approvalInput.notes,
     );
+    const replacement = await service2.registerArtifact(created.flow.id, {
+      stage: 'planning',
+      kind: 'plan',
+      path: planPath,
+      status: 'ready',
+      at: '2026-11-20T12:00:00.000Z',
+    });
+    await assert.rejects(
+      () => service2.attachSession(created.flow.id, randomUUID(), { stage: 'development' }),
+      error =>
+        error instanceof FactoryFlowServiceError &&
+        error.code === 'FACTORY_FLOW_INVALID_STAGE_ADVANCE' &&
+        /plano vigente/.test(error.message),
+    );
+    const history = service2.getFlow(created.flow.id);
+    assert.equal(history.flow.currentSessionId, null);
+    assert.equal(history.flow.planningApproval?.planArtifactId, planArtifactId);
+    assert.ok(history.artifacts.some(artifact => artifact.id === replacement.id));
     repo2.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
     rmSync(artifactsDir, { recursive: true, force: true });
+  }
+});
+
+test('Um fluxo legado retoma o Desenvolvimento com o plano registrado antes do avanço', async () => {
+  const { dir, dbPath } = createTempDbPath();
+  const repository = SqliteFactoryFlowRepository.open({ dbPath });
+  const now = createClock();
+  const service = new FactoryFlowService(repository, { now });
+
+  try {
+    const { flow } = await service.createFlow({
+      task: { inputType: 'title', value: 'Retomar fluxo legado', repoPath: dir },
+    });
+    const specPath = join(dir, 'spec.md');
+    writeFileSync(specPath, triageMarkdown('Triagem concluída.'));
+    writeFactoryStageSidecar(specPath, 'triage');
+    await service.transitionFlow(flow.id, { to: 'running', reason: 'Triagem iniciada' });
+    await service.registerArtifact(flow.id, {
+      stage: 'triage',
+      kind: 'specification',
+      path: specPath,
+      status: 'ready',
+    });
+    await service.transitionFlow(flow.id, { to: 'waiting_action', reason: 'Triagem concluída' });
+    await service.advanceStage(flow.id);
+
+    const planPath = join(dir, 'plan.md');
+    writeFileSync(planPath, planningMarkdown('Planejamento legado.'));
+    writeFactoryStageSidecar(planPath, 'planning');
+    await service.registerArtifact(flow.id, {
+      stage: 'planning',
+      kind: 'plan',
+      path: planPath,
+      status: 'ready',
+    });
+    await service.transitionFlow(flow.id, { to: 'waiting_action', reason: 'Plano concluído' });
+    repository.saveFlowTransition(flow.id, {
+      to: 'running',
+      stage: 'development',
+      at: now(),
+      reason: 'Avanço persistido pelo fluxo legado',
+    });
+
+    const sessionId = randomUUID();
+    const resumed = await service.attachSession(flow.id, sessionId, { stage: 'development' });
+    assert.equal(resumed.flow.currentSessionId, sessionId);
+    assert.equal(resumed.flow.planningApproval, null);
+  } finally {
+    repository.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 
@@ -1099,7 +1173,9 @@ test('migration v10 persiste revisão humana do PR (Etapa 2 do Bloco 06) com val
       status: 'ready',
     });
     await service1.transitionFlow(created.flow.id, { to: 'waiting_action', reason: 'Plano ok' });
-    await service1.advanceStage(created.flow.id);
+    await service1.advanceStage(created.flow.id, {
+      planningApproval: approvePlanWithoutPendingDecisions(service1.getFlow(created.flow.id)),
+    });
     await service1.registerArtifact(created.flow.id, {
       stage: 'development',
       kind: 'implementation_report',
@@ -1361,7 +1437,10 @@ test('migration v12 e getMetrics agregam lead time, 1º ciclo, motivos de reprov
       status: 'ready',
     });
     await service.transitionFlow(flow1.flow.id, { to: 'waiting_action', at: advanceClock(20), reason: 'Plano ok' });
-    await service.advanceStage(flow1.flow.id, { at: advanceClock(10) }); // dev start
+    await service.advanceStage(flow1.flow.id, {
+      at: advanceClock(10),
+      planningApproval: approvePlanWithoutPendingDecisions(service.getFlow(flow1.flow.id)),
+    });
     await service.registerArtifact(flow1.flow.id, {
       stage: 'development',
       kind: 'implementation_report',
@@ -1449,7 +1528,10 @@ test('migration v12 e getMetrics agregam lead time, 1º ciclo, motivos de reprov
       status: 'ready',
     });
     await service.transitionFlow(flow2.flow.id, { to: 'waiting_action', at: advanceClock(10), reason: 'Plano ok' });
-    await service.advanceStage(flow2.flow.id, { at: advanceClock(10) }); // dev iter 1
+    await service.advanceStage(flow2.flow.id, {
+      at: advanceClock(10),
+      planningApproval: approvePlanWithoutPendingDecisions(service.getFlow(flow2.flow.id)),
+    });
     await service.registerArtifact(flow2.flow.id, {
       stage: 'development',
       kind: 'implementation_report',

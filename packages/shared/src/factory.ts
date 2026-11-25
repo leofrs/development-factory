@@ -595,10 +595,10 @@ export type FactoryPlanningDecisionChoiceMode = z.infer<
 
 export const FactoryPlanningDecisionApprovalSchema = z.strictObject({
   id: text.max(32),
-  question: text.max(1000),
+  question: text,
   mode: FactoryPlanningDecisionChoiceModeSchema,
   selectedOption: text.max(2000),
-  recommendedOption: text.max(2000),
+  recommendedOption: text,
   customNote: text.max(2000).optional(),
 });
 export type FactoryPlanningDecisionApproval = z.infer<
@@ -625,7 +625,13 @@ const uniqueAcceptanceCriteriaRefinement = (
 ): boolean => new Set(criteria.map(criterion => criterion.id)).size === criteria.length;
 
 export const FactoryPlanningApprovalInputSchema = z.strictObject({
-  decisions: z.array(FactoryPlanningDecisionApprovalSchema),
+  planArtifactId: id,
+  decisions: z
+    .array(FactoryPlanningDecisionApprovalSchema.omit({ question: true, recommendedOption: true }))
+    .refine(
+      decisions => new Set(decisions.map(decision => decision.id)).size === decisions.length,
+      'Os IDs das decisões aprovadas devem ser únicos',
+    ),
   acceptanceCriteria: z
     .array(FactoryApprovedAcceptanceCriterionSchema)
     .refine(uniqueAcceptanceCriteriaRefinement, 'Os IDs dos critérios de aceite devem ser únicos'),
@@ -634,6 +640,7 @@ export const FactoryPlanningApprovalInputSchema = z.strictObject({
 export type FactoryPlanningApprovalInput = z.infer<typeof FactoryPlanningApprovalInputSchema>;
 
 export const FactoryPlanningApprovalSchema = z.strictObject({
+  planArtifactId: id.optional(),
   decisions: z.array(FactoryPlanningDecisionApprovalSchema),
   acceptanceCriteria: z
     .array(FactoryApprovedAcceptanceCriterionSchema)
@@ -1184,6 +1191,7 @@ export const FactoryFlowSchema = z
     branchName: gitBranchNameSchema.nullable().default(null),
     baseBranch: gitBranchNameSchema.nullable().default(null),
     planningApproval: FactoryPlanningApprovalSchema.nullable().optional(),
+    planForApproval: z.strictObject({ artifactId: id, path: artifactPathSchema }).optional(),
     reviewTriage: FactoryReviewTriageSchema.nullable().optional(),
     prReview: FactoryPrReviewSchema.nullable().optional(),
     prPublication: FactoryPrPublicationSchema.nullable().optional(),
@@ -1329,8 +1337,9 @@ function applyFactoryFlowTransition(
     }
   }
 
+  const { planForApproval: _planForApproval, ...currentFlow } = current.data;
   const updated = FactoryFlowSchema.safeParse({
-    ...current.data,
+    ...currentFlow,
     state: next.data.to,
     currentStage: targetStage,
     currentSessionId:
@@ -1515,14 +1524,19 @@ export function getReadyFactoryStageArtifact(
   stage: keyof typeof HANDOFF_ARTIFACT_KINDS,
 ): FactoryFlowArtifact | undefined {
   const reportPath = details.stages.find(item => item.name === stage)?.reportPath;
-  return details.artifacts.find(
-    artifact =>
+  for (let index = details.artifacts.length - 1; index >= 0; index -= 1) {
+    const artifact = details.artifacts[index];
+    if (
+      artifact &&
       artifact.stage === stage &&
       artifact.kind === HANDOFF_ARTIFACT_KINDS[stage] &&
       artifact.format === 'markdown' &&
-      artifact.status === 'ready' &&
-      artifact.path === reportPath,
-  );
+      artifact.path === reportPath
+    ) {
+      return artifact.status === 'ready' ? artifact : undefined;
+    }
+  }
+  return undefined;
 }
 
 /** Retorna o artefato pronto mais recente de uma etapa (preservando histórico entre iterações). */

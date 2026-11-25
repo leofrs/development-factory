@@ -1,4 +1,5 @@
 import { Fragment, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import {
   AlertCircle,
   AlertTriangle,
@@ -79,6 +80,7 @@ interface FactoryFlowRoadmapModalProps {
   flow: FactoryFlow;
   runningSession?: BackgroundSessionSummary;
   initialDetails?: FactoryFlowDetails;
+  notificationCenter?: ReactNode;
   onClose: () => void;
   onAdvanceFlowStage: (
     flowId: string,
@@ -273,6 +275,7 @@ export function FactoryFlowRoadmapModal({
   flow,
   runningSession,
   initialDetails,
+  notificationCenter,
   onClose,
   onAdvanceFlowStage,
   onRerunFlowStage,
@@ -304,11 +307,11 @@ export function FactoryFlowRoadmapModal({
       : undefined;
   const initialPlanningKey =
     initialDetails?.flow.id === flow.id
-      ? `${initialDetails.flow.id}:${initialPlanningReport?.id ?? 'none'}:${initialDetails.flow.planningApproval?.approvedAt ?? 'unapproved'}`
+      ? `${initialDetails.flow.id}:${initialPlanningReport?.id ?? 'none'}`
       : '';
   const initialDrafts = createPlanningGateDrafts(
     initialDetails?.flow.id === flow.id ? (initialDetails.planningGate ?? undefined) : undefined,
-    initialDetails?.flow.id === flow.id ? initialDetails.flow.planningApproval : undefined,
+    undefined,
   );
   const [syncedPlanningKey, setSyncedPlanningKey] = useState(initialPlanningKey);
   const [planningDecisions, setPlanningDecisions] = useState<PlanningDecisionDraft[]>(
@@ -360,7 +363,10 @@ export function FactoryFlowRoadmapModal({
     };
   }, [
     flow.id,
+    flow.currentStage,
+    flow.state,
     flow.updatedAt,
+    flow.planForApproval?.artifactId,
     flow.reviewTriage?.updatedAt,
     flow.prReview?.updatedAt,
     flow.prPublication?.updatedAt,
@@ -454,19 +460,26 @@ export function FactoryFlowRoadmapModal({
     : undefined;
 
   const planningDraftSourceKey = currentDetails
-    ? `${currentDetails.flow.id}:${planningReport?.id ?? 'none'}:${currentDetails.flow.planningApproval?.approvedAt ?? 'unapproved'}`
+    ? `${currentDetails.flow.id}:${planningReport?.id ?? 'none'}`
     : '';
   const persistedPlanningApproval =
     currentDetails?.flow.planningApproval ?? flow.planningApproval ?? null;
+  const planForApproval =
+    currentDetails?.flow.planForApproval?.artifactId === flow.planForApproval?.artifactId
+      ? currentDetails?.flow.planForApproval
+      : undefined;
+  const canApprovePlanning = Boolean(
+    planForApproval &&
+      planForApproval.artifactId === planningReport?.id &&
+      currentDetails?.planningGate &&
+      planningDraftSourceKey === syncedPlanningKey,
+  );
 
   useEffect(() => {
     if (!planningDraftSourceKey || planningDraftSourceKey === syncedPlanningKey) {
       return;
     }
-    const nextDrafts = createPlanningGateDrafts(
-      currentDetails?.planningGate ?? undefined,
-      currentDetails?.flow.planningApproval,
-    );
+    const nextDrafts = createPlanningGateDrafts(currentDetails?.planningGate ?? undefined, undefined);
     setPlanningDecisions(nextDrafts.decisions);
     setPlanningCriteria(nextDrafts.criteria);
     setPlanningNotes(nextDrafts.notes);
@@ -527,12 +540,26 @@ export function FactoryFlowRoadmapModal({
     setPlanningCriteria(current => current.filter((_, itemIndex) => itemIndex !== index));
   }, []);
 
-  const buildPlanningApprovalPayload = useCallback((): FactoryPlanningApprovalInput | null => {
+  function buildPlanningApprovalPayload(
+    planArtifactId: string,
+  ): FactoryPlanningApprovalInput | null {
+    const decisions: FactoryPlanningApprovalInput['decisions'] = [];
     for (const decision of planningDecisions) {
-      if (decision.mode === 'custom' && decision.customText.trim().length === 0) {
+      if (!decision.mode) {
+        setPlanningValidationError(`Responda a decisão pendente ${decision.id}.`);
+        return null;
+      }
+      const customText = decision.customText.trim();
+      if (decision.mode === 'custom' && customText.length === 0) {
         setPlanningValidationError(`Informe a decisão customizada para ${decision.id}.`);
         return null;
       }
+      decisions.push({
+        id: decision.id,
+        mode: decision.mode,
+        selectedOption: decision.mode === 'custom' ? customText : decision.selectedOption,
+        ...(decision.mode !== 'custom' && customText ? { customNote: customText } : {}),
+      });
     }
 
     const normalizedCriteria: FactoryPlanningApprovalInput['acceptanceCriteria'] = [];
@@ -558,21 +585,12 @@ export function FactoryFlowRoadmapModal({
 
     const trimmedNotes = planningNotes.trim();
     return {
-      decisions: planningDecisions.map(decision => ({
-        id: decision.id,
-        question: decision.question,
-        mode: decision.mode,
-        selectedOption:
-          decision.mode === 'custom' ? decision.customText.trim() : decision.selectedOption,
-        recommendedOption: decision.recommendedOption,
-        ...(decision.mode !== 'custom' && decision.customText.trim().length > 0
-          ? { customNote: decision.customText.trim() }
-          : {}),
-      })),
+      planArtifactId,
+      decisions,
       acceptanceCriteria: normalizedCriteria,
       ...(trimmedNotes.length > 0 ? { notes: trimmedNotes } : {}),
     };
-  }, [planningCriteria, planningDecisions, planningNotes]);
+  }
 
   const handleSaveReviewTriage = useCallback(
     async (decisions: FactoryReviewFindingDecision[]) => {
@@ -882,9 +900,11 @@ export function FactoryFlowRoadmapModal({
                           item.status !== 'failed',
                       );
                       const validatedKind = VALIDATED_REPORT_KIND_BY_STAGE[stage.id];
+                      const currentMarkdownPath =
+                        stage.id === 'planning' ? planningReport?.path : stageRecord?.reportPath;
                       const stageMarkdownPath = validatedKind
                         ? validatedReports[stage.id]?.path
-                        : (stageRecord?.reportPath ?? stageReportHistory[0]?.path);
+                        : (currentMarkdownPath ?? stageReportHistory.at(-1)?.path);
                       const stageArtifactError = validatedKind
                         ? stageArtifacts.find(
                             artifact =>
@@ -905,7 +925,7 @@ export function FactoryFlowRoadmapModal({
                         canRerunCurrent &&
                         stage.id !== 'triage' &&
                         nextStage !== null &&
-                        (nextStage !== 'development' || canStartDevelopment) &&
+                        (nextStage !== 'development' || canApprovePlanning) &&
                         (nextStage !== 'tests' || canStartTests) &&
                         (nextStage !== 'review' || canStartReview) &&
                         (nextStage !== 'pr' || canAdvanceToPr);
@@ -1120,7 +1140,9 @@ export function FactoryFlowRoadmapModal({
                                     className="modal-button border-accent/35 px-2.5 py-1 text-[11px] text-accent hover:bg-selected"
                                   >
                                     <FileText size={11} />
-                                    Ver artefato
+                                    {stage.id === 'planning' && planningReport
+                                      ? 'Ver plano'
+                                      : 'Ver artefato'}
                                   </button>
                                 )}
 
@@ -1307,22 +1329,23 @@ export function FactoryFlowRoadmapModal({
                                         : undefined
                                     }
                                     onClick={() => {
-                                      if (isPlanningGateEditable) {
-                                        const planningApproval = buildPlanningApprovalPayload();
+                                      if (nextStage === 'development') {
+                                        if (!planForApproval) {
+                                          return;
+                                        }
+                                        const planningApproval = buildPlanningApprovalPayload(
+                                          planForApproval.artifactId,
+                                        );
                                         if (!planningApproval) {
                                           return;
                                         }
-                                        void runAction(
+                                        runAction(
                                           'advance',
-                                          () =>
-                                            onAdvanceFlowStage(flow.id, {
-                                              planningApproval,
-                                              ...(planningApproval.notes
-                                                ? { approvedNotes: planningApproval.notes }
-                                                : {}),
-                                            }),
+                                          () => onAdvanceFlowStage(flow.id, { planningApproval }),
                                           'Não foi possível aprovar o planejamento e iniciar o desenvolvimento.',
-                                        );
+                                        ).catch(() => {
+                                          setActionError('Não foi possível concluir a aprovação.');
+                                        });
                                         return;
                                       }
                                       const shouldPassNotes =
@@ -1350,9 +1373,7 @@ export function FactoryFlowRoadmapModal({
                                     ) : (
                                       <ArrowRight size={11} />
                                     )}
-                                    {stage.id === 'planning' && nextStage === 'development'
-                                      ? 'Aprovar e Iniciar Desenvolvimento'
-                                      : `Avançar para ${getFactoryStageLabel(nextStage)}`}
+                                    {`Avançar para ${getFactoryStageLabel(nextStage)}`}
                                   </button>
                                 )}
 
@@ -1595,6 +1616,7 @@ export function FactoryFlowRoadmapModal({
           )}
         </div>
       </div>
+      {notificationCenter}
     </dialog>
   );
 }

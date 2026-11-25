@@ -17,6 +17,7 @@ import type {
 } from '@development-factory/shared';
 import { FactoryFlowRoadmapModal } from '../src/components/FactoryFlowRoadmapModal';
 import { createPlanningGateDrafts } from '../src/components/FactoryPlanningGatePanel';
+import { NotificationToastCenter } from '../src/components/NotificationToastCenter';
 import {
   useBackgroundOperations,
   type BackgroundOperationsState,
@@ -175,11 +176,16 @@ test('Fase 1.1 (UI): modal exibe portão humano da Triagem para falha do Jira e 
   }
 });
 
-test('Fase 1.2 (UI): sidecar de Planejamento alimenta o formulário de aprovação e envia planningApproval', async context => {
-  const { container } = setupDom(context);
+test('O roadmap abre o plano e exige resposta por ID antes de aprovar a versão vigente', async context => {
+  const { container, window } = setupDom(context);
+  const planForApproval = {
+    artifactId: '33333333-3333-4333-8333-333333333332',
+    path: '/tmp/artifacts/planning.md',
+  };
   const flow = createFlow({
     currentStage: 'planning',
     state: 'waiting_action',
+    planForApproval,
   });
   const planningGate: NonNullable<FactoryFlowDetails['planningGate']> = {
     pendingDecisions: [
@@ -194,7 +200,7 @@ test('Fase 1.2 (UI): sidecar de Planejamento alimenta o formulário de aprovaç�
 
   const drafts = createPlanningGateDrafts(planningGate, null);
   assert.equal(drafts.decisions[0]?.id, 'D1');
-  assert.equal(drafts.decisions[0]?.mode, 'recommended');
+  assert.equal(drafts.decisions[0]?.mode, null);
   assert.equal(drafts.criteria[0]?.id, 'CA1');
 
   const initialDetails: FactoryFlowDetails = {
@@ -219,13 +225,13 @@ test('Fase 1.2 (UI): sidecar de Planejamento alimenta o formulário de aprovaç�
       },
       {
         contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
-        id: '33333333-3333-4333-8333-333333333332',
+        id: planForApproval.artifactId,
         flowId: flow.id,
         stage: 'planning',
         sessionId: null,
         kind: 'plan',
         format: 'markdown',
-        path: '/tmp/artifacts/planning.md',
+        path: planForApproval.path,
         status: 'ready',
         iteration: 0,
         createdAt: flow.createdAt,
@@ -246,44 +252,70 @@ test('Fase 1.2 (UI): sidecar de Planejamento alimenta o formulário de aprovaç�
     flowId: string;
     planningApproval?: FactoryPlanningApprovalInput;
   }> = [];
+  const openedPlans: string[] = [];
 
   const root = createRoot(container);
-  try {
-    await act(async () => {
-      root.render(
-        createElement(FactoryFlowRoadmapModal, {
-          flow,
-          initialDetails,
-          onClose: () => undefined,
-          onAdvanceFlowStage: async (flowId, options) => {
-            submittedPayloads.push({
-              flowId,
-              planningApproval: options?.planningApproval,
-            });
-          },
-          onRerunFlowStage: async () => undefined,
-          onViewMarkdown: () => undefined,
-        }),
-      );
-    });
-
-    const approveButton = Array.from(container.querySelectorAll('button')).find(button =>
-      button.textContent?.includes('Aprovar e Iniciar Desenvolvimento'),
+  function renderRoadmap(currentFlow: FactoryFlow) {
+    root.render(
+      createElement(FactoryFlowRoadmapModal, {
+        flow: currentFlow,
+        initialDetails,
+        onClose: () => undefined,
+        onAdvanceFlowStage: async (flowId, options) => {
+          submittedPayloads.push({ flowId, planningApproval: options?.planningApproval });
+        },
+        onRerunFlowStage: async () => undefined,
+        onViewMarkdown: path => {
+          openedPlans.push(path);
+        },
+      }),
     );
-    assert.ok(approveButton);
+  }
+  try {
+    await act(async () => renderRoadmap(flow));
 
-    await act(async () => {
+    const buttons = Array.from(container.querySelectorAll('button'));
+    const approveButton = buttons.find(button => button.textContent === 'Avançar para Desenvolvimento');
+    const openPlanButton = buttons.find(button => button.textContent === 'Ver plano');
+    assert.ok(approveButton);
+    assert.ok(openPlanButton);
+    assert.doesNotMatch(container.textContent ?? '', /Qual estratégia de retry adotar/);
+
+    await act(() => {
+      openPlanButton.click();
       approveButton.click();
     });
+    assert.deepEqual(openedPlans, [planForApproval.path]);
+    assert.equal(submittedPayloads.length, 0);
+    assert.match(container.textContent ?? '', /Responda a decisão pendente D1/);
+
+    const recommendation = container.querySelector<HTMLInputElement>('fieldset input[type="radio"]');
+    assert.ok(recommendation);
+    await act(() => {
+      recommendation.checked = true;
+      recommendation.dispatchEvent(new window.Event('click', { bubbles: true }));
+    });
+    await act(() => approveButton.click());
 
     assert.equal(submittedPayloads.length, 1);
     assert.equal(submittedPayloads[0]?.flowId, flow.id);
+    assert.equal(submittedPayloads[0]?.planningApproval?.planArtifactId, planForApproval.artifactId);
     assert.equal(submittedPayloads[0]?.planningApproval?.decisions[0]?.id, 'D1');
     assert.equal(
       submittedPayloads[0]?.planningApproval?.decisions[0]?.selectedOption,
       'Backoff exponencial',
     );
     assert.equal(submittedPayloads[0]?.planningApproval?.acceptanceCriteria[0]?.approved, true);
+
+    await act(async () => renderRoadmap({
+      ...flow,
+      planForApproval: {
+        artifactId: '33333333-3333-4333-8333-333333333339',
+        path: '/tmp/artifacts/planning-v2.md',
+      },
+    }));
+    assert.equal(approveButton.isConnected, false);
+    assert.equal(submittedPayloads.length, 1);
   } finally {
     act(() => {
       root.unmount();
@@ -291,7 +323,7 @@ test('Fase 1.2 (UI): sidecar de Planejamento alimenta o formulário de aprovaç�
   }
 });
 
-test('Fase 1.2 (UI): useBackgroundOperations recebe atualizações via SSE e gera notificações com o modal fechado', async context => {
+test('O primeiro bloco avisa uma vez por versão com o roadmap aberto ou fechado e após reconexão', async context => {
   const { container, replaceProperty } = setupDom(context);
 
   const initialFlow = createFlow({
@@ -339,7 +371,13 @@ test('Fase 1.2 (UI): useBackgroundOperations recebe atualizações via SSE e ger
     }
   }
   replaceProperty(globalThis, 'EventSource', FakeEventSource);
+  const seenKeys = new Map<string, string>();
+  replaceProperty(globalThis, 'localStorage', {
+    getItem: (key: string) => seenKeys.get(key) ?? null,
+    setItem: (key: string, value: string) => seenKeys.set(key, value),
+  });
 
+  let listedFlow = initialFlow;
   context.mock.method(globalThis, 'fetch', (input: RequestInfo | URL) => {
     const pathname = new URL(input instanceof Request ? input.url : input).pathname;
     if (pathname === '/api/sessions') {
@@ -349,7 +387,7 @@ test('Fase 1.2 (UI): useBackgroundOperations recebe atualizações via SSE e ger
       return Promise.resolve(
         Response.json({
           contractVersion: FACTORY_FLOW_CONTRACT_VERSION,
-          flows: [initialFlow],
+          flows: [listedFlow],
         }),
       );
     }
@@ -357,9 +395,30 @@ test('Fase 1.2 (UI): useBackgroundOperations recebe atualizações via SSE e ger
   });
 
   let latestOperations: BackgroundOperationsState | undefined;
-  function BackgroundObserver() {
-    latestOperations = useBackgroundOperations();
-    return null;
+  const openedPlans: string[] = [];
+  function BackgroundObserver({ showRoadmap = false }: { showRoadmap?: boolean }) {
+    const operations = useBackgroundOperations();
+    latestOperations = operations;
+    const flow = operations.factoryFlowsById.get(initialFlow.id);
+    const notificationCenter = createElement(NotificationToastCenter, {
+      notifications: operations.notifications,
+      onOpenTerminal: operations.openTerminal,
+      onViewReport: path => {
+        openedPlans.push(path);
+      },
+      onDismiss: operations.dismissNotification,
+    });
+    if (showRoadmap && flow) {
+      return createElement(FactoryFlowRoadmapModal, {
+        flow,
+        notificationCenter,
+        onClose: () => undefined,
+        onAdvanceFlowStage: async () => undefined,
+        onRerunFlowStage: async () => undefined,
+        onViewMarkdown: () => undefined,
+      });
+    }
+    return notificationCenter;
   }
 
   const root = createRoot(container);
@@ -371,13 +430,32 @@ test('Fase 1.2 (UI): useBackgroundOperations recebe atualizações via SSE e ger
       });
     });
 
-    assert.equal(streams.length, 1);
+    const stream = streams[0];
+    assert.ok(stream);
     assert.equal(latestOperations?.factoryFlowsById.get(initialFlow.id)?.state, 'running');
+
+    const triageSession: BackgroundSessionSummary = {
+      ...planningSession,
+      sessionId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      reportPath: '/tmp/artifacts/triage.md',
+      stage: 'triage',
+    };
+    await act(() => {
+      for (const session of [triageSession, planningSession]) {
+        stream.emit({ type: 'session.history_saved', session });
+        stream.emit({ type: 'session.finished', session });
+      }
+    });
+    assert.equal(latestOperations?.notifications.length, 0);
 
     const updatedFlow = createFlow({
       currentStage: 'planning',
       state: 'waiting_action',
       currentSessionId: null,
+      planForApproval: {
+        artifactId: '33333333-3333-4333-8333-333333333332',
+        path: '/tmp/artifacts/planning.md',
+      },
       updatedAt: '2026-11-25T10:06:00.000Z',
       transitions: [
         ...initialFlow.transitions,
@@ -391,17 +469,73 @@ test('Fase 1.2 (UI): useBackgroundOperations recebe atualizações via SSE e ger
       ],
     });
 
-    await act(async () => {
-      streams[0]?.emit({ type: 'factory_flow.updated', flow: updatedFlow });
-      streams[0]?.emit({ type: 'session.history_saved', session: planningSession });
-      streams[0]?.emit({ type: 'session.finished', session: planningSession });
+    await act(() => {
+      stream.emit({ type: 'factory_flow.updated', flow: updatedFlow });
+      stream.emit({ type: 'factory_flow.updated', flow: updatedFlow });
+      stream.emit({ type: 'session.finished', session: planningSession });
     });
 
-    // Com o modal fechado, o estado global do fluxo é atualizado pelo SSE e as notificações de sessão chegam à fila.
     assert.equal(latestOperations?.factoryFlowsById.get(initialFlow.id)?.state, 'waiting_action');
-    assert.equal(latestOperations?.factoryFlowsById.get(initialFlow.id)?.currentSessionId, null);
-    assert.equal(latestOperations?.notifications.length, 2);
+    assert.equal(latestOperations?.notifications.length, 1);
     assert.equal(latestOperations?.notifications[0]?.reportPath, '/tmp/artifacts/planning.md');
+    assert.equal(latestOperations?.notifications[0]?.kind, 'plan_ready');
+
+    function clickPlanFromNotification() {
+      const toast = container.querySelector('[aria-label="Notificações de operações em background"]');
+      const link = Array.from(toast?.querySelectorAll('button') ?? []).find(
+        button => button.textContent === 'Ver plano',
+      );
+      assert.ok(link);
+      link.click();
+    }
+    await act(clickPlanFromNotification);
+    assert.deepEqual(openedPlans, ['/tmp/artifacts/planning.md']);
+
+    listedFlow = updatedFlow;
+    await act(async () => {
+      stream.onopen?.();
+      root.render(createElement(BackgroundObserver, { showRoadmap: true }));
+    });
+    assert.equal(latestOperations?.notifications.length, 0);
+
+    const newReadyAt = '2026-11-25T10:09:00.000Z';
+    const regeneratedFlow = createFlow({
+      ...updatedFlow,
+      updatedAt: newReadyAt,
+      planForApproval: {
+        artifactId: '33333333-3333-4333-8333-333333333333',
+        path: '/tmp/artifacts/planning-v2.md',
+      },
+      transitions: [
+        ...updatedFlow.transitions,
+        {
+          from: 'waiting_action',
+          to: 'running',
+          stage: 'planning',
+          at: '2026-11-25T10:07:00.000Z',
+          reason: 'Reexecução do Planejamento',
+        },
+        {
+          from: 'running',
+          to: 'waiting_action',
+          stage: 'planning',
+          at: newReadyAt,
+          reason: 'Novo plano concluído',
+        },
+      ],
+    });
+    listedFlow = regeneratedFlow;
+    await act(async () => stream.onopen?.());
+    await act(() => stream.emit({ type: 'factory_flow.updated', flow: regeneratedFlow }));
+    assert.equal(latestOperations?.notifications.length, 1);
+    assert.ok(container.querySelector('dialog[open] aside'));
+    await act(clickPlanFromNotification);
+    assert.deepEqual(openedPlans, ['/tmp/artifacts/planning.md', '/tmp/artifacts/planning-v2.md']);
+
+    await act(() => root.render(createElement(BackgroundObserver)));
+    await act(() => root.render(createElement(BackgroundObserver, { showRoadmap: true })));
+    assert.equal(latestOperations?.notifications.length, 0);
+    assert.equal(seenKeys.size, 2);
   } finally {
     act(() => {
       root.unmount();

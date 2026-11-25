@@ -1,7 +1,10 @@
+import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';
 import { FACTORY_STAGE_SIDECAR_CONTRACT_VERSION } from '@development-factory/shared';
 import type {
   FactoryDevelopmentSidecar,
+  FactoryFlowDetails,
+  FactoryPlanningApprovalInput,
   FactoryPlanningSidecar,
   FactoryPrSidecar,
   FactoryReviewSidecar,
@@ -21,6 +24,23 @@ interface Sidecars {
 }
 
 const contractVersion = FACTORY_STAGE_SIDECAR_CONTRACT_VERSION;
+
+export function approvePlanWithoutPendingDecisions(
+  details: FactoryFlowDetails,
+): FactoryPlanningApprovalInput {
+  assert.ok(details.flow.planForApproval);
+  assert.ok(details.planningGate);
+  assert.equal(details.planningGate.pendingDecisions.length, 0);
+  return {
+    planArtifactId: details.flow.planForApproval.artifactId,
+    decisions: [],
+    acceptanceCriteria: details.planningGate.acceptanceCriteria.map(criterion => ({
+      ...criterion,
+      approved: true,
+    })),
+  };
+}
+
 export const sidecarFixtures: Sidecars = {
   triage: {
     contractVersion,

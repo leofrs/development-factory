@@ -1420,6 +1420,10 @@ test('FactoryFlowRoadmapModal exibe portão humano estruturado do Bloco 02 e man
     currentStage: 'planning',
     state: 'waiting_action',
     currentSessionId: null,
+    planForApproval: {
+      artifactId: 'cccccccc-1111-4111-8111-111111111112',
+      path: '/tmp/artifacts/plan.md',
+    },
   });
 
   const editableDetails: FactoryFlowDetails = {
@@ -1525,8 +1529,9 @@ test('FactoryFlowRoadmapModal exibe portão humano estruturado do Bloco 02 e man
   );
 
   assert.match(editableHtml, /Portão humano · Decisões e critérios/);
-  assert.match(editableHtml, />D1<.*Onde armazenar os tokens revogados\?/);
-  assert.match(editableHtml, />D2<.*Qual política de expiração adotar\?/);
+  assert.match(editableHtml, />D1</);
+  assert.match(editableHtml, />D2</);
+  assert.doesNotMatch(editableHtml, /Onde armazenar os tokens revogados|Qual política de expiração/);
   assert.match(editableHtml, /Opção Recomendada/);
   assert.match(editableHtml, /Tabela SQLite dedicada/);
   assert.match(editableHtml, /Alternativa/);
@@ -1536,8 +1541,22 @@ test('FactoryFlowRoadmapModal exibe portão humano estruturado do Bloco 02 e man
   assert.match(editableHtml, /Adicionar critério/);
   assert.match(editableHtml, /value="Revogar token ao encerrar sessão"/);
   assert.match(editableHtml, /value="Rejeitar token revogado com HTTP 401"/);
-  assert.match(editableHtml, /Aprovar e Iniciar Desenvolvimento/);
+  assert.match(editableHtml, /Avançar para Desenvolvimento/);
+  assert.match(editableHtml, /Ver plano/);
   assert.doesNotMatch(editableHtml, /Notas \/ Decisões Aprovadas \(opcional\)/);
+
+  const waitingForPlan = { ...planningWaitingFlow, planForApproval: undefined };
+  const waitingHtml = renderToStaticMarkup(
+    createElement(FactoryFlowRoadmapModal, {
+      flow: waitingForPlan,
+      initialDetails: { ...editableDetails, flow: waitingForPlan },
+      onClose: noop,
+      onAdvanceFlowStage: noopAsync,
+      onRerunFlowStage: noopAsync,
+      onViewMarkdown: noop,
+    }),
+  );
+  assert.doesNotMatch(waitingHtml, /Avançar para Desenvolvimento/);
 
   const persistedApproval = {
     approvedAt: '2026-11-19T12:06:00.000Z',
@@ -1599,6 +1618,7 @@ test('FactoryFlowRoadmapModal exibe portão humano estruturado do Bloco 02 e man
   assert.match(persistedHtml, /TTL de 10 min com renovação explícita/);
   assert.match(persistedHtml, /Revogar token imediatamente no logout/);
   assert.match(persistedHtml, /Manter índice em expires_at\./);
+  assert.doesNotMatch(persistedHtml, /Onde armazenar os tokens revogados|Qual política de expiração/);
 
   const popoverHtml = renderToStaticMarkup(
     createElement(BackgroundTasksPopover, {

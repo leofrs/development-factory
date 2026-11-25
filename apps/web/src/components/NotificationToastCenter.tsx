@@ -132,6 +132,9 @@ export function NotificationToastCenter({
           notification.severity,
         );
         const reportPath = notification.reportPath;
+        const isPlan =
+          notification.kind === 'plan_ready' || !notification.stage || notification.stage === 'triage';
+        const reportLabel = isFactory ? (isPlan ? 'Ver plano' : 'Ver artefato') : 'Ver parecer';
 
         return (
           <div
@@ -203,13 +206,7 @@ export function NotificationToastCenter({
                       }}
                     >
                       <FileText size={12} />
-                      <span>
-                        {isFactory
-                          ? notification.stage && notification.stage !== 'triage'
-                            ? 'Ver artefato'
-                            : 'Ver plano'
-                          : 'Ver parecer'}
-                      </span>
+                      <span>{reportLabel}</span>
                     </button>
                   )}
 
