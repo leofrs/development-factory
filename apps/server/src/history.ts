@@ -2,7 +2,12 @@ import { randomUUID } from 'node:crypto';
 import { appendFileSync, closeSync, constants, openSync, writeFileSync } from 'node:fs';
 import { extname, join } from 'node:path';
 import { stripVTControlCharacters } from 'node:util';
-import type { FactoryRequest, FactoryStageName } from '@development-factory/shared';
+import {
+  resolvePlanningPendingDecisionId,
+  type FactoryPlanningSidecar,
+  type FactoryRequest,
+  type FactoryStageName,
+} from '@development-factory/shared';
 import { resolveFactoryArtifactsDirectory } from './artifacts.js';
 import { isImplementationReport } from './factory-development.js';
 import { isPrSummary } from './factory-pr.js';
@@ -11,12 +16,14 @@ import {
   FactoryStageArtifactError,
   describeMissingStructuredReportParts,
   getFactoryStageSidecarPath,
+  normalizeMarkdownHeadingKey,
   normalizeStructuredMarkdownReport,
   readFactoryArtifactFile,
   readFactoryStageSidecar,
 } from './factory-stage-runners.js';
 import { isTestReport } from './factory-tests.js';
 import { redactSecrets, redactSecretsInValue } from './secret-redaction.js';
+import { PLANNING_PENDING_QUESTIONS_SECTION } from './prompts/factory-architecture.js';
 import { IMPLEMENTATION_REPORT_TITLE } from './prompts/factory-development.js';
 import { PR_SUMMARY_TITLE } from './prompts/factory-pr.js';
 import { REVIEW_REPORT_TITLE } from './prompts/factory-review.js';
@@ -279,6 +286,11 @@ const PLANNING_REPORT_SECTIONS = {
   tests: 'Plano de Testes',
 };
 
+const PLANNING_REPORT_SECTIONS_WITH_OPTIONAL = {
+  ...PLANNING_REPORT_SECTIONS,
+  pendingQuestions: PLANNING_PENDING_QUESTIONS_SECTION,
+};
+
 const EARLY_STAGE_SECTION_ALIASES: Readonly<Record<string, string>> = {
   'sintese central': TRIAGE_REPORT_SECTIONS.summary,
   'sintese central (core)': TRIAGE_REPORT_SECTIONS.summary,
@@ -296,7 +308,146 @@ const EARLY_STAGE_SECTION_ALIASES: Readonly<Record<string, string>> = {
   'plano de alteracoes (arquivo por arquivo)': PLANNING_REPORT_SECTIONS.changes,
   'cuidados de regressao': PLANNING_REPORT_SECTIONS.regression,
   'plano de testes': PLANNING_REPORT_SECTIONS.tests,
+  'perguntas pendentes para aprovacao': PLANNING_PENDING_QUESTIONS_SECTION,
 };
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function usesStructuredPendingQuestions(sidecar: FactoryPlanningSidecar): boolean {
+  return sidecar.pendingDecisions.some(
+    decision =>
+      decision.id !== undefined ||
+      decision.checksPerformed !== undefined ||
+      decision.unresolvableReason !== undefined,
+  );
+}
+
+function validatePlanningPendingQuestionsSection(
+  markdown: string,
+  sidecar: FactoryPlanningSidecar,
+  reportPath: string,
+): void {
+  const normalized = normalizeStructuredMarkdownReport(
+    markdown,
+    PLANNING_REPORT_TITLE,
+    PLANNING_REPORT_SECTIONS_WITH_OPTIONAL,
+    EARLY_STAGE_SECTION_ALIASES,
+  ).replace(/\r\n?/g, '\n');
+
+  const [, ...rawSections] = normalized.split(/^## /m);
+  const parsedSections = rawSections.map(section => {
+    const [heading = '', ...bodyLines] = section.split('\n');
+    return {
+      heading: heading.trim(),
+      key: normalizeMarkdownHeadingKey(heading),
+      body: bodyLines.join('\n'),
+    };
+  });
+
+  const pendingKey = normalizeMarkdownHeadingKey(PLANNING_PENDING_QUESTIONS_SECTION);
+  const matchingIndices = parsedSections
+    .map((section, index) => (section.key === pendingKey ? index : -1))
+    .filter(index => index !== -1);
+
+  if (matchingIndices.length > 1) {
+    throw new FactoryStageArtifactError(
+      'FACTORY_MARKDOWN_INVALID',
+      'planning',
+      reportPath,
+      `A seção "${PLANNING_PENDING_QUESTIONS_SECTION}" deve aparecer no máximo uma vez, ao final do plano`,
+    );
+  }
+
+  const pendingIndex = matchingIndices[0] ?? -1;
+  const hasStructuredDecisions = usesStructuredPendingQuestions(sidecar);
+
+  if (sidecar.pendingDecisions.length === 0) {
+    if (pendingIndex !== -1) {
+      throw new FactoryStageArtifactError(
+        'FACTORY_MARKDOWN_INVALID',
+        'planning',
+        reportPath,
+        `A seção "${PLANNING_PENDING_QUESTIONS_SECTION}" deve ser omitida quando não houver perguntas pendentes`,
+      );
+    }
+    return;
+  }
+
+  if (pendingIndex === -1) {
+    if (hasStructuredDecisions) {
+      throw new FactoryStageArtifactError(
+        'FACTORY_MARKDOWN_INVALID',
+        'planning',
+        reportPath,
+        `O relatório Markdown deve incluir a seção final "${PLANNING_PENDING_QUESTIONS_SECTION}" quando houver decisões pendentes`,
+      );
+    }
+    // Compatibilidade com artefatos legados sem IDs/evidências estruturadas nem seção final dedicada.
+    return;
+  }
+
+  if (pendingIndex !== parsedSections.length - 1) {
+    throw new FactoryStageArtifactError(
+      'FACTORY_MARKDOWN_INVALID',
+      'planning',
+      reportPath,
+      `A seção "${PLANNING_PENDING_QUESTIONS_SECTION}" deve ser a última seção do plano`,
+    );
+  }
+
+  const pendingSection = parsedSections[pendingIndex];
+  if (!pendingSection || pendingSection.body.trim().length === 0) {
+    throw new FactoryStageArtifactError(
+      'FACTORY_MARKDOWN_INVALID',
+      'planning',
+      reportPath,
+      `A seção "${PLANNING_PENDING_QUESTIONS_SECTION}" está vazia`,
+    );
+  }
+
+  const precedingSectionsText = parsedSections
+    .slice(0, pendingIndex)
+    .map(section => section.body)
+    .join('\n');
+  if (
+    hasStructuredDecisions &&
+    /(?:^|\n)(?:#{2,6}\s+|\s*[-*]\s*\*\*|\s*\*\*)decis[oõ]es\s+pendentes\s+para\s+aprova[cç][aã]o/i.test(
+      precedingSectionsText,
+    )
+  ) {
+    throw new FactoryStageArtifactError(
+      'FACTORY_MARKDOWN_INVALID',
+      'planning',
+      reportPath,
+      `Perguntas pendentes devem aparecer exclusivamente na última seção "${PLANNING_PENDING_QUESTIONS_SECTION}"`,
+    );
+  }
+
+  const missingIds: string[] = [];
+  for (let index = 0; index < sidecar.pendingDecisions.length; index += 1) {
+    const decision = sidecar.pendingDecisions[index];
+    if (!decision) {
+      continue;
+    }
+    const decisionId = resolvePlanningPendingDecisionId(decision, index);
+    if (decision.id !== undefined || hasStructuredDecisions) {
+      const idPattern = new RegExp(`(?<![A-Za-z0-9_])${escapeRegExp(decisionId)}(?![A-Za-z0-9_])`);
+      if (!idPattern.test(pendingSection.body)) {
+        missingIds.push(decisionId);
+      }
+    }
+  }
+  if (missingIds.length > 0) {
+    throw new FactoryStageArtifactError(
+      'FACTORY_MARKDOWN_INVALID',
+      'planning',
+      reportPath,
+      `A seção "${PLANNING_PENDING_QUESTIONS_SECTION}" não referencia todos os identificadores do sidecar (${missingIds.join(', ')})`,
+    );
+  }
+}
 
 function validateEarlyStageReport(
   content: string,
@@ -417,7 +568,11 @@ export function validateFactoryStageArtifacts(
       `O relatório Markdown não contém o título e as seções obrigatórias${detail}`,
     );
   }
-  return readFactoryStageSidecar(stage, reportPath);
+  const sidecar = readFactoryStageSidecar(stage, reportPath);
+  if (sidecar.stage === 'planning') {
+    validatePlanningPendingQuestionsSection(trimmed, sidecar, reportPath);
+  }
+  return sidecar;
 }
 
 export function createFactoryHistory(

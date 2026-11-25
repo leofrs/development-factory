@@ -348,18 +348,10 @@ function formatTriageGatePausedReason(gate: FactoryTriageGate): string | null {
   if (!gate.blocked) {
     return null;
   }
-  const blockerCount = gate.blockers.length;
-  const blockerLabel =
-    blockerCount === 1
-      ? '1 bloqueador/ambiguidade'
-      : `${blockerCount} bloqueadores/ambiguidades`;
-  if (gate.jiraError && blockerCount > 0) {
-    return `Triagem pausada: falha ao consultar o Jira MCP (${gate.jiraError}) e ${blockerLabel} aguardando resposta humana antes do Planejamento.`;
-  }
   if (gate.jiraError) {
-    return `Triagem pausada por falha na consulta ao Jira MCP: ${gate.jiraError}`;
+    return `Triagem interrompida por falha na consulta ao Jira MCP: ${gate.jiraError}`;
   }
-  return `Triagem pausada com ${blockerLabel} aguardando resposta humana antes do Planejamento.`;
+  return 'Triagem interrompida por falha impeditiva ao gerar o Documento de Entendimento.';
 }
 
 function validateRepoPath(repoPath: string): void {
@@ -417,6 +409,7 @@ export class SessionManager {
   readonly #now: () => number;
   readonly #runtimes = new Map<string, SessionRuntime>();
   readonly #startingFlowIds = new Set<string>();
+  readonly #autoAdvancingFlowIds = new Set<string>();
   #cleanupTimer: ReturnType<typeof setInterval> | undefined;
 
   constructor(reviewService: ReviewService, options: SessionManagerOptions = {}) {
@@ -495,7 +488,7 @@ export class SessionManager {
   }
 
   #hasActiveRuntimeForFlow(flow: FactoryFlow): boolean {
-    if (this.#startingFlowIds.has(flow.id)) {
+    if (this.#startingFlowIds.has(flow.id) || this.#autoAdvancingFlowIds.has(flow.id)) {
       return true;
     }
     for (const runtime of this.#runtimes.values()) {
@@ -904,6 +897,13 @@ export class SessionManager {
   }
 
   async startFactorySession(input: StartFactorySessionInput): Promise<ManagedSession> {
+    return this.#startFactorySessionInternal(input, false);
+  }
+
+  async #startFactorySessionInternal(
+    input: StartFactorySessionInput,
+    allowAutoAdvanceTransition: boolean,
+  ): Promise<ManagedSession> {
     validateRepoPath(input.repoPath);
     this.#assertCapacity();
 
@@ -994,6 +994,7 @@ export class SessionManager {
       const flowId = flowDetails.flow.id;
       const hasRunningSessionForFlow =
         this.#startingFlowIds.has(flowId) ||
+        (!allowAutoAdvanceTransition && this.#autoAdvancingFlowIds.has(flowId)) ||
         [...this.#runtimes.values()].some(
           ({ session }) =>
             session.status === 'running' && session.activeFactorySession?.flowId === flowId,
@@ -1268,6 +1269,7 @@ export class SessionManager {
   ): Promise<ManagedSession> {
     let buildRunnerConfig: ((reportPath: string) => { prompt: string; runnerArgs: string[] }) | undefined;
     let understanding: HistoryFile | undefined;
+    let triageGaps: readonly string[] | undefined;
     try {
       if (isRestrictedRunnerStage(stage) && flowDetails) {
         buildRunnerConfig = await this.#prepareRestrictedRunnerFactory(
@@ -1286,6 +1288,8 @@ export class SessionManager {
           );
         }
         understanding = await readFactoryStageDocument('triage', triageArtifact.path);
+        const triageSidecar = readFactoryStageSidecar('triage', understanding.path);
+        triageGaps = triageSidecar.blockers;
       }
     } catch (error) {
       if (error instanceof FactoryStageArtifactError) {
@@ -1434,6 +1438,7 @@ export class SessionManager {
               value: input.value,
               understandingDocument: understanding?.content,
               understandingReportPath: understanding?.path,
+              ...(triageGaps && triageGaps.length > 0 ? { triageGaps } : {}),
               approvedNotes: planningApprovedNotes,
               reportPath: factoryHistory.reportPath,
               repositoryProfile,
@@ -1441,7 +1446,16 @@ export class SessionManager {
           : buildFactoryPlanPrompt(input.inputType, input.value, factoryHistory.reportPath, {
               approvedNotes: triageApprovedNotes,
             });
-      runnerArgs = buildTriageAndPlanningRunnerArgs(initialStage, factoryHistory.reportPath);
+      runnerArgs = buildTriageAndPlanningRunnerArgs(
+        initialStage,
+        factoryHistory.reportPath,
+        initialStage === 'planning'
+          ? {
+              repositoryProfile,
+              repoPath: flowDetails?.flow.target.repoPath ?? input.repoPath,
+            }
+          : {},
+      );
     }
 
     const workingDirectory = worktreePath ?? input.repoPath;
@@ -1644,8 +1658,16 @@ export class SessionManager {
     if (!this.#factoryFlowService) {
       return;
     }
+    if (this.#autoAdvancingFlowIds.has(flowId)) {
+      return;
+    }
 
+    this.#autoAdvancingFlowIds.add(flowId);
     try {
+      const current = this.#factoryFlowService.getFlow(flowId).flow;
+      if (isFinalFactoryFlowState(current.state) || current.updatedAt !== expectedUpdatedAt) {
+        return;
+      }
       const advanced = await this.#factoryFlowService.advanceStage(flowId, {
         reason,
         expectedUpdatedAt,
@@ -1654,18 +1676,23 @@ export class SessionManager {
         type: 'factory_flow.updated',
         flow: advanced.flow,
       });
-      await this.startFactorySession({
-        inputType: advanced.flow.target.inputType,
-        value: advanced.flow.target.value,
-        repoPath: advanced.flow.target.repoPath,
-        flowId: advanced.flow.id,
-        stage: targetStage,
-        title: advanced.flow.title,
-        cols: 120,
-        rows: 36,
-      });
+      await this.#startFactorySessionInternal(
+        {
+          inputType: advanced.flow.target.inputType,
+          value: advanced.flow.target.value,
+          repoPath: advanced.flow.target.repoPath,
+          flowId: advanced.flow.id,
+          stage: targetStage,
+          title: advanced.flow.title,
+          cols: 120,
+          rows: 36,
+        },
+        true,
+      );
     } catch (error) {
       await this.#handleAutoTransitionFailure(session, flowId, error);
+    } finally {
+      this.#autoAdvancingFlowIds.delete(flowId);
     }
   }
 
@@ -2010,19 +2037,46 @@ export class SessionManager {
 
       if (session.historyState === 'saved') {
         if (stage === 'triage') {
+          if (
+            currentFlow.currentStage !== 'triage' ||
+            currentFlow.currentSessionId !== session.sessionId
+          ) {
+            return;
+          }
           const triageGate = session.reportPath
             ? evaluateFactoryTriageGate(readFactoryStageSidecar('triage', session.reportPath))
             : { blockers: [], jiraError: null, blocked: false };
           const triagePausedReason = formatTriageGatePausedReason(triageGate);
-          const paused = await this.#factoryFlowService.transitionFlow(flowId, {
-            to: 'waiting_action',
-            stage,
-            reason: triageGate.blocked
-              ? 'Triagem pausada no portão humano por bloqueadores ou falha no Jira'
-              : 'Triagem concluída com especificação salva',
-            currentSessionId: null,
-            loopPausedReason: triagePausedReason,
-          });
+          const triageBlockingError = triageGate.blocked
+            ? buildFactoryFlowError(
+                'FACTORY_TRIAGE_JIRA_ERROR',
+                triageGate.jiraError ??
+                  'Falha impeditiva na Triagem ao gerar o Documento de Entendimento.',
+                true,
+              )
+            : null;
+          let paused: TransitionFactoryFlowResponse;
+          try {
+            paused = await this.#factoryFlowService.transitionFlow(
+              flowId,
+              {
+                to: 'waiting_action',
+                stage,
+                reason: triageGate.blocked
+                  ? 'Triagem interrompida por falha impeditiva na consulta ao Jira'
+                  : 'Triagem concluída com especificação salva',
+                currentSessionId: null,
+                loopPausedReason: triagePausedReason,
+                error: triageBlockingError,
+              },
+              { expectedSessionId: session.sessionId },
+            );
+          } catch (error) {
+            if (error instanceof FactoryFlowServiceError && error.code === 'FACTORY_FLOW_CONFLICT') {
+              return;
+            }
+            throw error;
+          }
           if (triageGate.blocked) {
             this.#emitEvent({
               type: 'factory_flow.updated',

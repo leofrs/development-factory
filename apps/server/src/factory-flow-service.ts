@@ -40,6 +40,7 @@ import {
   getReadyFactoryStageArtifact,
   isFinalFactoryFlowState,
   resolveFactoryReviewDecision,
+  resolvePlanningPendingDecisionId,
   transitionFactoryFlow,
   validateFactoryReviewTriageDecisions,
   type CreateFactoryFlowResponse,
@@ -321,7 +322,10 @@ function resolvePlanningGateForFlow(
       }
     }
     return {
-      pendingDecisions: planningSidecar.pendingDecisions,
+      pendingDecisions: planningSidecar.pendingDecisions.map((decision, index) => ({
+        ...decision,
+        id: resolvePlanningPendingDecisionId(decision, index),
+      })),
       acceptanceCriteria,
     };
   } catch {
@@ -342,7 +346,7 @@ function buildValidatedPlanningApproval(
       if (!pending) {
         continue;
       }
-      const decisionId = `D${index + 1}`;
+      const decisionId = resolvePlanningPendingDecisionId(pending, index);
       const decision =
         approvalInput.decisions.find(item => item.id === decisionId) ??
         approvalInput.decisions.find(item => item.question === pending.question);
@@ -1515,6 +1519,7 @@ export class FactoryFlowService {
         to: 'cancelled',
         at: options.at ?? this.now(),
         reason: options.reason ?? 'Fluxo cancelado pelo usuário',
+        currentSessionId: null,
         expectedUpdatedAt: options.expectedUpdatedAt,
       },
       {

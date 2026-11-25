@@ -229,7 +229,7 @@ test(
     assert.equal(planningWaiting.planningGate?.pendingDecisions.length, 1);
     assert.equal(planningWaiting.planningGate?.acceptanceCriteria.length, 1);
 
-    // 2) Ambiguidade na Triagem: blockers não vazio pausa o fluxo no portão humano sem iniciar Planejamento.
+    // 2) Lacuna investigável na Triagem (sem jiraError): avança automaticamente para Planejamento sem pausar.
     const createAmbiguousRes = await fetch(`${harness.baseUrl}/api/factory/flows`, {
       method: 'POST',
       headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
@@ -249,28 +249,30 @@ test(
     assert.ok(ambiguousSession?.reportPath);
     writeFileSync(
       ambiguousSession.reportPath,
-      `${triageMarkdown('Quando aplica cupom, o desconto precisa respeitar teto.')}#### 6. Bloqueadores e Ambiguidades (Ação Necessária)\n- Definir se o teto incide antes ou depois do frete.\n`,
+      `${triageMarkdown('Quando aplica cupom, o desconto precisa respeitar teto.')}#### 6. Lacunas e Pontos para Investigação\n- A task não especifica se o teto incide antes ou depois do frete; investigar regra atual no código.\n`,
     );
     writeFactoryStageSidecar(ambiguousSession.reportPath, 'triage', {
-      blockers: ['Definir se o teto incide antes ou depois do frete.'],
+      blockers: [
+        'A task não especifica se o teto incide antes ou depois do frete; investigar regra atual no código.',
+      ],
       jiraError: null,
     });
     harness.server.sessionManager.writeInput(ambiguousSession.sessionId, 'EXIT0');
 
-    const ambiguousPaused = await waitFor(
+    const ambiguousAdvanced = await waitFor(
       () => harness.fetchFlowDetails(ambiguousCreated.flow.id),
       details =>
-        details.flow.currentStage === 'triage' &&
-        details.flow.state === 'waiting_action' &&
-        details.flow.currentSessionId === null,
-      'pausa da Triagem por ambiguidade',
+        details.flow.currentStage === 'planning' &&
+        details.flow.state === 'running' &&
+        details.flow.currentSessionId !== null,
+      'avanço automático da Triagem com lacunas investigáveis para o Planejamento',
     );
-    assert.equal(ambiguousPaused.triageGate?.blocked, true);
-    assert.deepEqual(ambiguousPaused.triageGate?.blockers, [
-      'Definir se o teto incide antes ou depois do frete.',
-    ]);
-    assert.equal(ambiguousPaused.triageGate?.jiraError, null);
-    assert.match(ambiguousPaused.flow.loopPausedReason ?? '', /bloqueador\/ambiguidade/i);
+    assert.equal(ambiguousAdvanced.triageGate, undefined);
+    assert.ok(ambiguousAdvanced.flow.currentSessionId);
+    await harness.server.sessionManager.stopSession(
+      ambiguousAdvanced.flow.currentSessionId,
+      'encerramento de limpeza do teste',
+    );
 
     // 3) Falha do Jira na Triagem: jiraError preenchido pausa o fluxo no portão humano sem iniciar Planejamento.
     const createJiraFailRes = await fetch(`${harness.baseUrl}/api/factory/flows`, {

@@ -1404,17 +1404,12 @@ test('FactoryFlowRoadmapModal exibe portão humano estruturado do Bloco 01 com b
     }),
   );
 
-  assert.match(html, /Portão humano · Ação necessária/);
+  assert.doesNotMatch(html, /Portão humano · Ação necessária/);
+  assert.doesNotMatch(html, /Respostas aos bloqueadores \/ Complemento de contexto/);
+  assert.doesNotMatch(html, /Avançar para Planejamento/);
   assert.match(html, /Falha na consulta ao Jira MCP/);
   assert.match(html, /Erro 401 ao consultar Jira MCP/);
-  assert.match(html, /Bloqueadores e ambiguidades identificados/);
-  assert.match(html, /Definir provedor de e-mail/);
-  assert.match(html, /Confirmar limite de tentativas/);
-  assert.match(html, /Complemento enviado anteriormente/);
-  assert.match(html, /Contexto inicial do relator\./);
-  assert.match(html, /Respostas aos bloqueadores \/ Complemento de contexto/);
   assert.match(html, />Reexecutar</);
-  assert.match(html, /Avançar para Planejamento/);
 });
 
 test('FactoryFlowRoadmapModal exibe portão humano estruturado do Bloco 02 e mantém decisões persistidas visíveis após aprovação', () => {

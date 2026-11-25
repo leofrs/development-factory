@@ -929,11 +929,13 @@ test('Migration v8 e FactoryFlowService persistem planningApproval e expõem pla
     assert.deepEqual(beforeApproval.planningGate, {
       pendingDecisions: [
         {
+          id: 'D1',
           question: 'Onde armazenar o refresh token?',
           options: ['Tabela dedicada em SQLite', 'Cache em memória'],
           recommendedOption: 'Tabela dedicada em SQLite',
         },
         {
+          id: 'D2',
           question: 'Qual algoritmo de hash usar?',
           options: ['SHA-256', 'SHA-512'],
           recommendedOption: 'SHA-256',

@@ -17,6 +17,7 @@ import type {
   FactoryFlowDetails,
   FactoryPlanningSidecar,
   FactoryPrSidecar,
+  FactoryRepositoryProfile,
   FactoryReviewSidecar,
   FactoryStageName,
   FactoryTestsSidecar,
@@ -232,11 +233,73 @@ export const GIT_WRITE_DENIED_BASH_TOOLS: readonly string[] = [
   'Bash(git add*)',
 ];
 
+export const NON_INTERACTIVE_DENIED_TOOLS: readonly string[] = ['AskUserQuestion'];
+
+const SAFE_UNQUOTED_BASH_TOKEN_PATTERN = /^[A-Za-z0-9_./:=+-]+$/;
+const UNSAFE_ALLOWED_TOOL_CHARS_PATTERN = /[,()*?[\]\n\r\0]/;
+
+const PLANNING_SHELL_AND_REMOTE_DENIED_BASH_TOOLS: readonly string[] = [
+  'Bash(ssh*)',
+  'Bash(scp*)',
+  'Bash(nc*)',
+  'Bash(ncat*)',
+  'Bash(sh *)',
+  'Bash(bash *)',
+  'Bash(zsh *)',
+  'Bash(rm -rf*)',
+];
+
+function formatBashArgument(token: string): string {
+  if (SAFE_UNQUOTED_BASH_TOKEN_PATTERN.test(token)) {
+    return token;
+  }
+  return `'${token.replaceAll("'", "'\\''")}'`;
+}
+
+/**
+ * Converte comandos oficiais/autorizados do perfil em uma whitelist estrita para `Bash(...)`,
+ * sem liberar shell genérico nem caracteres que possam quebrar regras `--allowedTools`.
+ */
+export function buildWhitelistedBashTools(
+  commands: readonly (readonly string[] | null | undefined)[],
+): string[] {
+  const patterns = new Set<string>();
+  for (const command of commands) {
+    if (!command || command.some(token => UNSAFE_ALLOWED_TOOL_CHARS_PATTERN.test(token))) {
+      continue;
+    }
+    const formatted = command.map(formatBashArgument).join(' ');
+    if (formatted.length === 0) {
+      continue;
+    }
+    patterns.add(`Bash(${formatted})`);
+    patterns.add(`Bash(${formatted} *)`);
+  }
+  return [...patterns];
+}
+
+/** Constrói a whitelist `Bash(...)` de verificações locais permitidas no Planejamento a partir do perfil. */
+export function buildPlanningBashAllowedTools(
+  repositoryProfile?: FactoryRepositoryProfile,
+): string[] {
+  if (!repositoryProfile) {
+    return [];
+  }
+  return buildWhitelistedBashTools([
+    repositoryProfile.commands.typecheck,
+    repositoryProfile.commands.lint,
+    repositoryProfile.commands.test,
+    repositoryProfile.commands.coverage,
+    ...(repositoryProfile.devEnvironment?.verificationCommands?.map(item => item.command) ?? []),
+  ]);
+}
+
 export interface RestrictedRunnerArgsConfig {
   readonly tools: readonly string[];
   readonly allowed: readonly string[];
   readonly denied: readonly string[];
   readonly additionalDirectory?: string;
+  readonly additionalDirectories?: readonly string[];
   readonly allowedMcpServerUrl?: string;
 }
 
@@ -257,13 +320,24 @@ export function buildRestrictedRunnerArgs(config: RestrictedRunnerArgsConfig): s
       ]
     : ['--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}'];
 
+  const directories = new Set<string>();
+  if (config.additionalDirectory) {
+    directories.add(config.additionalDirectory);
+  }
+  for (const directory of config.additionalDirectories ?? []) {
+    if (directory) {
+      directories.add(directory);
+    }
+  }
+  const addDirArgs = [...directories].flatMap(directory => ['--add-dir', directory]);
+
   return [
     '--restricted',
     ...mcpArgs,
     '--no-chrome',
     '--permission-mode',
     'dontAsk',
-    ...(config.additionalDirectory ? ['--add-dir', config.additionalDirectory] : []),
+    ...addDirArgs,
     '--tools',
     config.tools.join(','),
     '--allowedTools',
@@ -281,23 +355,43 @@ const JIRA_READ_TOOLS = [
   'executeRead',
 ].map(tool => `mcp__claude_ai_Atlassian_Rovo__${tool}`);
 
+export interface TriageAndPlanningRunnerOptions {
+  readonly repositoryProfile?: FactoryRepositoryProfile;
+  readonly repoPath?: string;
+}
+
 export function buildTriageAndPlanningRunnerArgs(
   stage: 'triage' | 'planning',
   reportPath: string,
+  options: TriageAndPlanningRunnerOptions = {},
 ): string[] {
   const isTriage = stage === 'triage';
   const readTools = isTriage ? ['Read'] : ['Read', 'Glob', 'Grep'];
+  const planningBashAllowed = isTriage
+    ? []
+    : buildPlanningBashAllowedTools(options.repositoryProfile);
+  const hasPlanningBash = planningBashAllowed.length > 0;
+  const additionalDirectories = [
+    dirname(reportPath),
+    ...(!isTriage && options.repoPath ? [options.repoPath] : []),
+  ];
 
   return buildRestrictedRunnerArgs({
-    additionalDirectory: dirname(reportPath),
+    additionalDirectories,
     ...(isTriage ? { allowedMcpServerUrl: 'https://mcp.atlassian.com/*' } : {}),
-    tools: [...readTools, 'Edit', 'Write'],
+    tools: [...readTools, 'Edit', 'Write', ...(hasPlanningBash ? ['Bash'] : [])],
     allowed: [
       ...readTools,
       ...(isTriage ? JIRA_READ_TOOLS : []),
+      ...planningBashAllowed,
       ...buildReportFileToolPermissions(reportPath),
     ],
-    denied: [],
+    denied: [
+      ...NON_INTERACTIVE_DENIED_TOOLS,
+      ...(hasPlanningBash
+        ? [...GIT_WRITE_DENIED_BASH_TOOLS, ...PLANNING_SHELL_AND_REMOTE_DENIED_BASH_TOOLS]
+        : []),
+    ],
   });
 }
 

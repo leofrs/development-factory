@@ -369,7 +369,7 @@ test('valida jiraError no sidecar de triagem, avalia portão humano e aceita app
   assert.deepEqual(evaluateFactoryTriageGate(withBlocker), {
     blockers: ['Definir provedor de e-mail'],
     jiraError: null,
-    blocked: true,
+    blocked: false,
   });
 
   const withJiraFailure = FactoryTriageSidecarSchema.parse({

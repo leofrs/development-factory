@@ -108,6 +108,53 @@ const manifestCommandsSchema = z.strictObject(
   { error: manifestObjectError },
 );
 
+const manifestEnvVarNameSchema = manifestSingleLineSchema
+  .trim()
+  .regex(/^[A-Z_][A-Z0-9_]*$/, 'Informe um nome válido de variável de ambiente');
+
+const manifestPlanningVerificationCommandSchema = z.strictObject(
+  {
+    name: manifestSingleLineSchema.trim().min(1, 'Informe o nome da verificação'),
+    command: manifestCommandTupleSchema,
+    description: manifestTextSchema.optional(),
+    usesDevDatabase: z.boolean().optional(),
+    mutatesTestData: z.boolean().optional(),
+  },
+  { error: manifestObjectError },
+);
+
+export const FactoryDevEnvironmentSchema = z.strictObject(
+  {
+    verificationCommands: z
+      .array(manifestPlanningVerificationCommandSchema, {
+        error: 'Informe uma lista de comandos de verificação',
+      })
+      .optional(),
+    devDatabase: z
+      .strictObject(
+        {
+          engine: manifestSingleLineSchema.trim().min(1, 'Informe o motor do banco').optional(),
+          connectionEnvVar: manifestEnvVarNameSchema.optional(),
+          notes: manifestTextSchema.optional(),
+        },
+        { error: manifestObjectError },
+      )
+      .optional(),
+    envFiles: z
+      .array(manifestProtectedPathSchema, {
+        error: 'Informe uma lista de arquivos de configuração local',
+      })
+      .optional(),
+    stagingOnlyDependencies: z
+      .array(manifestTextSchema, {
+        error: 'Informe uma lista de dependências exclusivas de staging',
+      })
+      .optional(),
+  },
+  { error: manifestObjectError },
+);
+export type FactoryDevEnvironment = z.infer<typeof FactoryDevEnvironmentSchema>;
+
 export const FactoryRepositoryProfileSchema = z.strictObject(
   {
     baseBranch: manifestSingleLineSchema
@@ -137,6 +184,7 @@ export const FactoryRepositoryProfileSchema = z.strictObject(
       .array(manifestTextSchema, { error: 'Informe uma lista de regras de arquitetura' })
       .default(() => []),
     prTemplate: manifestTextSchema.nullable().default(null),
+    devEnvironment: FactoryDevEnvironmentSchema.optional(),
   },
   { error: manifestObjectError },
 );
@@ -483,20 +531,58 @@ export function evaluateFactoryTriageGate(sidecar: FactoryTriageSidecar): Factor
   return {
     blockers,
     jiraError,
-    blocked: blockers.length > 0 || jiraError !== null,
+    // Lacunas investigáveis em `blockers` são encaminhadas ao Planejamento; apenas falhas impeditivas (ex.: Jira) bloqueiam.
+    blocked: jiraError !== null,
   };
 }
 
-const pendingDecisionSchema = z
+export const FactoryPlanningPendingDecisionSchema = z
   .strictObject({
+    id: text.max(32).optional(),
     question: text,
     options: z.array(text).min(2),
     recommendedOption: text,
+    checksPerformed: z.array(text).min(1).optional(),
+    unresolvableReason: text.optional(),
   })
   .refine(decision => decision.options.includes(decision.recommendedOption), {
     path: ['recommendedOption'],
     message: 'A recomendação deve corresponder a uma das opções',
   });
+export type FactoryPlanningPendingDecision = z.infer<
+  typeof FactoryPlanningPendingDecisionSchema
+>;
+
+/** Resolve o identificador estável de uma pergunta pendente, preservando compatibilidade com artefatos legados sem `id`. */
+export function resolvePlanningPendingDecisionId(
+  decision: Pick<FactoryPlanningPendingDecision, 'id'>,
+  index: number,
+): string {
+  const explicitId = decision.id?.trim();
+  return explicitId && explicitId.length > 0 ? explicitId : `D${index + 1}`;
+}
+
+export const FactoryPlanningVerificationRecordSchema = z
+  .strictObject({
+    target: text,
+    status: z.enum(['passed', 'failed', 'blocked_by_staging', 'skipped']),
+    evidence: text,
+    isolationOrRollback: text.nullable().optional(),
+    stagingLimitation: text.nullable().optional(),
+  })
+  .refine(
+    record =>
+      record.status !== 'blocked_by_staging' ||
+      (typeof record.stagingLimitation === 'string' && record.stagingLimitation.trim().length > 0),
+    {
+      path: ['stagingLimitation'],
+      message:
+        'Informe a limitação concreta de staging quando a verificação não puder ser executada localmente',
+    },
+  );
+export type FactoryPlanningVerificationRecord = z.infer<
+  typeof FactoryPlanningVerificationRecordSchema
+>;
 
 export const FactoryPlanningDecisionChoiceModeSchema = z.enum([
   'recommended',
@@ -558,7 +644,7 @@ export const FactoryPlanningApprovalSchema = z.strictObject({
 export type FactoryPlanningApproval = z.infer<typeof FactoryPlanningApprovalSchema>;
 
 export const FactoryPlanningGateSchema = z.strictObject({
-  pendingDecisions: z.array(pendingDecisionSchema),
+  pendingDecisions: z.array(FactoryPlanningPendingDecisionSchema),
   acceptanceCriteria: z.array(FactoryAcceptanceCriterionSchema),
 });
 export type FactoryPlanningGate = z.infer<typeof FactoryPlanningGateSchema>;
@@ -566,9 +652,17 @@ export type FactoryPlanningGate = z.infer<typeof FactoryPlanningGateSchema>;
 export const FactoryPlanningSidecarSchema = z.strictObject({
   contractVersion: sidecarVersion,
   stage: z.literal('planning'),
-  pendingDecisions: z.array(pendingDecisionSchema),
+  pendingDecisions: z
+    .array(FactoryPlanningPendingDecisionSchema)
+    .refine(
+      decisions =>
+        new Set(decisions.map((decision, index) => resolvePlanningPendingDecisionId(decision, index)))
+          .size === decisions.length,
+      'Os identificadores das perguntas pendentes devem ser únicos',
+    ),
   plannedFiles: z.array(sidecarFilePathSchema),
   testPlan: z.array(text),
+  localVerifications: z.array(FactoryPlanningVerificationRecordSchema).optional(),
 });
 export type FactoryPlanningSidecar = z.infer<typeof FactoryPlanningSidecarSchema>;
 

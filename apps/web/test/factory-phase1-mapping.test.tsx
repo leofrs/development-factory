@@ -162,12 +162,12 @@ test('Fase 1.1 (UI): modal exibe portão humano da Triagem para falha do Jira e 
     });
 
     const text = container.textContent ?? '';
-    assert.match(text, /Portão humano · Ação necessária/);
+    assert.doesNotMatch(text, /Portão humano · Ação necessária/);
+    assert.doesNotMatch(text, /Respostas aos bloqueadores \/ Complemento de contexto/);
+    assert.doesNotMatch(text, /Avançar para Planejamento/);
     assert.match(text, /Falha na consulta ao Jira MCP/);
     assert.match(text, /401 Unauthorized/);
-    assert.match(text, /Definir regra de arredondamento do desconto\./);
-    assert.match(text, /Respostas aos bloqueadores \/ Complemento de contexto/);
-    assert.match(text, /Avançar para Planejamento/);
+    assert.match(text, /Reexecutar/);
   } finally {
     act(() => {
       root.unmount();

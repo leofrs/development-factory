@@ -1,8 +1,9 @@
 import { Check, CheckCircle2, ClipboardCheck, Plus, Trash2 } from 'lucide-react';
-import type {
-  FactoryPlanningApproval,
-  FactoryPlanningDecisionChoiceMode,
-  FactoryPlanningGate,
+import {
+  resolvePlanningPendingDecisionId,
+  type FactoryPlanningApproval,
+  type FactoryPlanningDecisionChoiceMode,
+  type FactoryPlanningGate,
 } from '@development-factory/shared';
 
 export interface PlanningDecisionDraft {
@@ -39,7 +40,7 @@ export function createPlanningGateDrafts(
 } {
   const pendingDecisions = planningGate?.pendingDecisions ?? [];
   const decisions: PlanningDecisionDraft[] = pendingDecisions.map((pending, index) => {
-    const id = `D${index + 1}`;
+    const id = resolvePlanningPendingDecisionId(pending, index);
     const saved = persistedApproval?.decisions.find(
       item => item.id === id || item.question === pending.question,
     );

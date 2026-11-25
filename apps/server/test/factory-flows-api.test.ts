@@ -546,7 +546,7 @@ test('API REST /api/factory/flows valida origem, idempotência, filtros e ciclo 
     '--verbose',
     '--output-format',
     'stream-json',
-    ...buildTriageAndPlanningRunnerArgs('planning', planningReport),
+    ...buildTriageAndPlanningRunnerArgs('planning', planningReport, { repoPath: repoA }),
     '-p',
   ]);
   const planningPrompt = planning.args.at(-1) ?? '';
@@ -2718,8 +2718,8 @@ test(
     );
     assert.equal(pausedFlowA.flow.currentStage, 'triage');
     assert.equal(pausedFlowA.flow.state, 'waiting_action');
-    assert.match(pausedFlowA.flow.loopPausedReason ?? '', /falha ao consultar o Jira MCP/i);
-    assert.match(pausedFlowA.flow.loopPausedReason ?? '', /2 bloqueadores\/ambiguidades/);
+    assert.match(pausedFlowA.flow.loopPausedReason ?? '', /falha na consulta ao Jira MCP/i);
+    assert.equal(pausedFlowA.flow.error?.code, 'FACTORY_TRIAGE_JIRA_ERROR');
     assert.deepEqual(pausedFlowA.triageGate, {
       blockers: ['Qual o gateway de pagamento?', 'Qual o timeout máximo?'],
       jiraError: 'Falha ao consultar Jira MCP: 401 Unauthorized',
@@ -2738,7 +2738,7 @@ test(
     const rerunBody = (await rerunTriageRes.json()) as { session: BackgroundSessionSummary };
     assert.ok(rerunBody.session.reportPath);
     const rerunPrompt = await waitReady(rerunBody.session.sessionId);
-    assert.match(rerunPrompt, /Complemento e respostas fornecidas pelo usuário/);
+    assert.match(rerunPrompt, /Contexto complementar fornecido para reexecução/);
     assert.ok(rerunPrompt.includes(complementText));
 
     writeFileSync(rerunBody.session.reportPath, triageMarkdown('Triagem desbloqueada após complemento.'));
@@ -2762,7 +2762,7 @@ test(
       await waitReady(autoAdvancedFlowA.flow.currentSessionId);
     }
 
-    // Caso 2: Bloqueador na triagem pausa em waiting_action e usuário envia respostas diretamente ao avançar para o Bloco 02.
+    // Caso 2: Lacunas investigáveis na Triagem (sem jiraError) avançam automaticamente para o Planejamento sem pausar.
     const createFlowBRes = await fetch(`${baseUrl}/api/factory/flows`, {
       method: 'POST',
       headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
@@ -2782,41 +2782,27 @@ test(
     assert.ok(flowBBody.session.reportPath);
     await waitReady(flowBBody.session.sessionId);
 
-    writeFileSync(flowBBody.session.reportPath, triageMarkdown('Triagem com ambiguidade de formato.'));
+    writeFileSync(flowBBody.session.reportPath, triageMarkdown('Triagem com lacuna de formato investigável.'));
     writeFactoryStageSidecar(flowBBody.session.reportPath, 'triage', {
-      blockers: ['Confirmar se a exportação deve ser CSV ou XLSX'],
+      blockers: ['Formato atual de exportação (CSV ou XLSX) não detalhado na task; verificar código existente.'],
+      jiraError: null,
     });
     sessionManager.writeInput(flowBBody.session.sessionId, 'EXIT0');
 
-    const pausedFlowB = await waitForFlowDetails(
+    const autoAdvancedFlowB = await waitForFlowDetails(
       () => getDetails(flowBId),
-      details => details.flow.state === 'waiting_action' && details.flow.currentSessionId === null,
+      details => details.flow.currentStage === 'planning' && details.flow.currentSessionId !== null,
     );
-    assert.equal(pausedFlowB.flow.currentStage, 'triage');
-    assert.deepEqual(pausedFlowB.triageGate, {
-      blockers: ['Confirmar se a exportação deve ser CSV ou XLSX'],
-      jiraError: null,
-      blocked: true,
-    });
-
-    const userAnswer = 'Exportar exclusivamente em CSV UTF-8 com separador vírgula.';
-    const advanceWithAnswerRes = await fetch(`${baseUrl}/api/factory/flows/${flowBId}/advance`, {
-      method: 'POST',
-      headers: { Origin: ALLOWED_ORIGIN, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ startSession: true, approvedNotes: userAnswer }),
-    });
-    assert.equal(advanceWithAnswerRes.status, 200);
-    const advancedFlowB = (await advanceWithAnswerRes.json()) as {
-      flow: { currentStage: string; currentSessionId: string | null };
-      session: BackgroundSessionSummary;
-    };
-    assert.equal(advancedFlowB.flow.currentStage, 'planning');
-    const planningPrompt = await waitReady(advancedFlowB.session.sessionId);
-    assert.match(planningPrompt, /RESPOSTAS E COMPLEMENTOS APROVADOS PELO USUÁRIO/);
-    assert.ok(planningPrompt.includes(userAnswer));
-
-    const flowBDetails = await getDetails(flowBId);
-    assert.equal(flowBDetails.stages.find(s => s.name === 'planning')?.approvedNotes, userAnswer);
+    assert.equal(autoAdvancedFlowB.flow.currentStage, 'planning');
+    assert.equal(autoAdvancedFlowB.triageGate, undefined);
+    assert.ok(autoAdvancedFlowB.flow.currentSessionId);
+    const planningPrompt = await waitReady(autoAdvancedFlowB.flow.currentSessionId);
+    assert.match(planningPrompt, /LACUNAS ENCAMINHADAS PELA TRIAGEM/);
+    assert.ok(
+      planningPrompt.includes(
+        'Formato atual de exportação (CSV ou XLSX) não detalhado na task; verificar código existente.',
+      ),
+    );
   },
 );
 
@@ -2947,7 +2933,10 @@ test(
       details => details.flow.state === 'waiting_action' && details.flow.currentSessionId === null,
     );
     assert.deepEqual(planningPaused.planningGate, {
-      pendingDecisions,
+      pendingDecisions: pendingDecisions.map((decision, index) => ({
+        id: `D${index + 1}`,
+        ...decision,
+      })),
       acceptanceCriteria: [
         { id: 'CA1', description: 'Validar assinatura do webhook' },
         { id: 'CA2', description: 'Registrar auditoria em log' },

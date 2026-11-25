@@ -190,12 +190,14 @@ test('buildFactoryPlanPrompt inclui a tarefa e o contrato dos artefatos de triag
   ]);
   assert.match(prompt, /Use IDs únicos.*mesmos IDs e descrições em Critérios de Aceite/);
   assert.match(prompt, /Use `null` em `jiraContext` quando não houver uma\s+chave confirmada/);
-  assert.match(prompt, /registre a falha em `jiraError`/);
+  assert.match(prompt, /registre a falha objetiva em `jiraError`/);
+  assert.match(prompt, /modo estritamente não interativo/i);
+  assert.match(prompt, /linguagem declarativa/i);
 
   const promptWithComplement = buildFactoryPlanPrompt('jira_key', 'PROD-1234', reportPath, {
     approvedNotes: 'Usar o provedor Stripe e manter timeout de 5 segundos.',
   });
-  assert.match(promptWithComplement, /Complemento e respostas fornecidas pelo usuário/);
+  assert.match(promptWithComplement, /Contexto complementar fornecido para reexecução/);
   assert.ok(promptWithComplement.includes('Usar o provedor Stripe e manter timeout de 5 segundos.'));
 });
 
@@ -206,25 +208,34 @@ test('buildFactoryArchitecturePrompt descreve a entrada e a entrega do planejame
     value: 'PROD-1234',
     understandingDocument: '#### 1. Síntese Central (Core)\nQuando X, deve Y.',
     understandingReportPath: '/tmp/factory-artifacts/flow-1/entendimento.md',
+    triageGaps: ['Verificar timeout efetivo do cliente HTTP no módulo de pagamentos.'],
     approvedNotes: 'Confirmado: manter compatibilidade retroativa no endpoint v1.',
     reportPath,
   });
   assert(prompt.includes('Chave da tarefa no JIRA: "PROD-1234"'));
   assert(prompt.includes('/tmp/factory-artifacts/flow-1/entendimento.md'));
   assert(prompt.includes('#### 1. Síntese Central (Core)'));
+  assert.match(prompt, /LACUNAS ENCAMINHADAS PELA TRIAGEM/);
+  assert.ok(prompt.includes('Verificar timeout efetivo do cliente HTTP no módulo de pagamentos.'));
   assert.match(prompt, /RESPOSTAS E COMPLEMENTOS APROVADOS PELO USUÁRIO/);
   assert.ok(prompt.includes('Confirmado: manter compatibilidade retroativa no endpoint v1.'));
   assert(prompt.includes(FACTORY_ARCHITECTURE_SYSTEM_PROMPT));
   assertFactoryStageOutput(prompt, 'planning', reportPath, [
     'pendingDecisions',
+    'id',
     'question',
     'options',
     'recommendedOption',
+    'checksPerformed',
+    'unresolvableReason',
     'plannedFiles',
     'testPlan',
+    'localVerifications',
   ]);
-  assert.match(prompt, /pelo menos dois textos.*`recommendedOption` com o texto exato/);
+  assert.match(prompt, /`options`: lista com pelo menos dois textos/);
+  assert.match(prompt, /`recommendedOption`: texto exato de uma das opções/);
   assert.match(prompt, /`plannedFiles`.*caminhos relativos ao repositório/);
+  assert.match(prompt, /## Perguntas pendentes para aprovação/);
 });
 
 test('buildFactoryArchitecturePrompt trata ausência de conteúdo prévio do Bloco 1', () => {
@@ -347,6 +358,8 @@ test('o runner da Triagem restringe o Jira a consultas e grava somente os artefa
       'Edit(//tmp/factory artifacts/flow-1/spec.json)',
       'Write(//tmp/factory artifacts/flow-1/spec.json)',
     ].join(','),
+    '--disallowedTools',
+    'AskUserQuestion',
   ]);
 });
 
@@ -376,6 +389,8 @@ test('o runner do Planejamento lê o worktree e grava apenas o plano e o sidecar
       'Edit(//tmp/factory artifacts/flow-1/plan.json)',
       'Write(//tmp/factory artifacts/flow-1/plan.json)',
     ].join(','),
+    '--disallowedTools',
+    'AskUserQuestion',
   ]);
 });
 
